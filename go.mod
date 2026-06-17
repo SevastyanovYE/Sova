@@ -7,9 +7,12 @@ require modernc.org/sqlite v1.40.1
 require (
 	github.com/gotd/td v0.143.0
 	golang.org/x/net v0.52.0
+	golang.org/x/oauth2 v0.36.0
+	rsc.io/qr v0.2.0
 )
 
 require (
+	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
@@ -49,5 +52,4 @@ require (
 	modernc.org/libc v1.66.10 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	rsc.io/qr v0.2.0 // indirect
 )

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SevastyanovYE/Sova/internal/calendarflow"
 	"github.com/SevastyanovYE/Sova/internal/config"
 	"github.com/SevastyanovYE/Sova/internal/indexes"
 	"github.com/SevastyanovYE/Sova/internal/nest"
@@ -27,8 +28,9 @@ const (
 )
 
 type Options struct {
-	GenerateDigest bool
-	PublishDigest  bool
+	GenerateDigest  bool
+	PublishDigest   bool
+	PublishCalendar bool
 }
 
 type Result struct {
@@ -42,6 +44,7 @@ type Result struct {
 	BundlePath         string
 	DigestPath         string
 	Published          bool
+	CalendarCandidates int
 }
 
 type classifiedMessage struct {
@@ -50,7 +53,7 @@ type classifiedMessage struct {
 }
 
 func ProductionOptions() Options {
-	return Options{GenerateDigest: true, PublishDigest: true}
+	return Options{GenerateDigest: true, PublishDigest: true, PublishCalendar: true}
 }
 
 func Run(ctx context.Context, cfg config.Config, trigger string, opts Options) (Result, error) {
@@ -60,7 +63,7 @@ func Run(ctx context.Context, cfg config.Config, trigger string, opts Options) (
 	}
 	defer store.Close()
 
-	now := time.Now().UTC()
+	now := time.Now().In(mustLocation(cfg.Timezone))
 	runRecord, err := store.TryStartOverview(ctx, trigger, now, cfg.OverviewCooldown)
 	if err != nil {
 		return Result{}, err
@@ -103,6 +106,12 @@ func Run(ctx context.Context, cfg config.Config, trigger string, opts Options) (
 	result.ClassifiedMessages = len(classified)
 	result.KeptMessages = countKept(classified)
 
+	calendarCandidates, err := extractCalendarCandidates(ctx, cfg, store, runRecord.ID, classified)
+	if err != nil {
+		return fail(fmt.Errorf("calendar event extraction: %w", err))
+	}
+	result.CalendarCandidates = len(calendarCandidates)
+
 	bundlePath, bundle, err := writeRunBundle(cfg, runRecord.ID, syncResult, newMessages, classified, time.Now().UTC())
 	if err != nil {
 		return fail(fmt.Errorf("write digest bundle: %w", err))
@@ -125,9 +134,14 @@ func Run(ctx context.Context, cfg config.Config, trigger string, opts Options) (
 		}
 		result.Published = true
 	}
+	if opts.PublishCalendar && len(calendarCandidates) > 0 {
+		if err := calendarflow.PublishCandidates(ctx, cfg, calendarCandidates); err != nil {
+			return fail(fmt.Errorf("publish calendar candidates: %w", err))
+		}
+	}
 
-	summary := fmt.Sprintf("overview completed: new=%d classified=%d kept=%d",
-		result.NewMessages, result.ClassifiedMessages, result.KeptMessages)
+	summary := fmt.Sprintf("overview completed: new=%d classified=%d kept=%d calendar_candidates=%d",
+		result.NewMessages, result.ClassifiedMessages, result.KeptMessages, result.CalendarCandidates)
 	if result.Published {
 		summary += "; published to Nest Digest"
 	}
@@ -138,6 +152,117 @@ func Run(ctx context.Context, cfg config.Config, trigger string, opts Options) (
 	result.Status = "success"
 	result.Summary = summary
 	return result, nil
+}
+
+func extractCalendarCandidates(ctx context.Context, cfg config.Config, store *sqlitestore.Store, runID int64, classified []classifiedMessage) ([]sqlitestore.CalendarCandidate, error) {
+	inputs, byID := eventInputs(classified)
+	if len(inputs) == 0 {
+		return nil, nil
+	}
+	client := qwen.New(cfg.OllamaURL, cfg.OllamaModel)
+	now := time.Now().UTC()
+	var candidates []sqlitestore.CalendarCandidate
+	for _, batch := range eventBatches(inputs) {
+		result, raw, err := client.ExtractEvents(ctx, batch, now, cfg.Timezone)
+		if err != nil {
+			if strings.TrimSpace(raw) != "" {
+				return nil, fmt.Errorf("%w; raw response: %s", err, compactLine(raw, 500))
+			}
+			return nil, err
+		}
+		for _, extracted := range result.Events {
+			message := byID[extracted.ID]
+			candidate, ok, err := calendarCandidateFromExtraction(cfg, runID, message, extracted)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	return store.InsertCalendarCandidates(ctx, candidates, time.Now().UTC())
+}
+
+func eventInputs(classified []classifiedMessage) ([]qwen.EventInput, map[string]telegrammt.SyncedMessage) {
+	inputs := make([]qwen.EventInput, 0, len(classified))
+	byID := make(map[string]telegrammt.SyncedMessage, len(classified))
+	for _, item := range classified {
+		if !item.Decision.HasEvent || (!item.Decision.Keep && item.Decision.Importance < 1) {
+			continue
+		}
+		text := strings.TrimSpace(item.Message.Text)
+		if text == "" {
+			continue
+		}
+		id := messageID(item.Message)
+		inputs = append(inputs, qwen.EventInput{
+			ID:         id,
+			SourceRef:  item.Message.SourceRef,
+			SourceLink: item.Message.SourceLink,
+			Text:       compactLine(text, qwenMessageMaxText),
+		})
+		byID[id] = item.Message
+	}
+	return inputs, byID
+}
+
+func eventBatches(inputs []qwen.EventInput) [][]qwen.EventInput {
+	var batches [][]qwen.EventInput
+	for len(inputs) > 0 {
+		end := 0
+		for end < len(inputs) && end < qwenBatchSize {
+			candidate := inputs[:end+1]
+			if end > 0 && qwen.ApproxEventChars(candidate) > qwenBatchMaxChars {
+				break
+			}
+			end++
+		}
+		if end == 0 {
+			end = 1
+		}
+		batches = append(batches, inputs[:end])
+		inputs = inputs[end:]
+	}
+	return batches
+}
+
+func calendarCandidateFromExtraction(cfg config.Config, runID int64, message telegrammt.SyncedMessage, extracted qwen.EventCandidate) (sqlitestore.CalendarCandidate, bool, error) {
+	if !extracted.HasEvent || strings.TrimSpace(extracted.Title) == "" || strings.TrimSpace(extracted.Start) == "" {
+		return sqlitestore.CalendarCandidate{}, false, nil
+	}
+	start, err := time.Parse(time.RFC3339, strings.TrimSpace(extracted.Start))
+	if err != nil {
+		return sqlitestore.CalendarCandidate{}, false, nil
+	}
+	var end time.Time
+	if strings.TrimSpace(extracted.End) != "" {
+		end, err = time.Parse(time.RFC3339, strings.TrimSpace(extracted.End))
+		if err != nil {
+			end = time.Time{}
+		}
+	}
+	if end.IsZero() || !end.After(start) {
+		end = start.Add(time.Hour)
+	}
+	description := strings.TrimSpace(extracted.Description)
+	if description == "" {
+		description = compactPlain(message.Text, 500)
+	}
+	return sqlitestore.CalendarCandidate{
+		RunID:       runID,
+		ChatID:      message.ChatID,
+		MessageID:   message.MessageID,
+		SourceLink:  message.SourceLink,
+		Title:       compactPlain(extracted.Title, 180),
+		StartAt:     start,
+		EndAt:       end,
+		Timezone:    cfg.Timezone,
+		Location:    compactPlain(extracted.Location, 180),
+		Description: description,
+		Confidence:  compactPlain(extracted.Confidence, 40),
+		Status:      "pending",
+	}, true, nil
 }
 
 func rebuildIndexesBestEffort(ctx context.Context, cfg config.Config, store *sqlitestore.Store) {
@@ -515,6 +640,18 @@ func compactLine(value string, limit int) string {
 	value = strings.Join(strings.Fields(value), " ")
 	value = strings.ReplaceAll(value, "[", "\\[")
 	value = strings.ReplaceAll(value, "]", "\\]")
+	if limit <= 0 || len([]rune(value)) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	if limit <= 3 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-3]) + "..."
+}
+
+func compactPlain(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
 	if limit <= 0 || len([]rune(value)) <= limit {
 		return value
 	}

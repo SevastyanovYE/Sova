@@ -33,3 +33,26 @@ type CalibrationResult struct {
 	Events         int    `json:"events"`
 	Error          string `json:"error,omitempty"`
 }
+
+type EventInput struct {
+	ID         string `json:"id"`
+	SourceRef  string `json:"source_ref"`
+	SourceLink string `json:"source_link,omitempty"`
+	Text       string `json:"text"`
+}
+
+type EventCandidate struct {
+	ID          string   `json:"id"`
+	HasEvent    bool     `json:"has_event"`
+	Title       string   `json:"title"`
+	Start       string   `json:"start"`
+	End         string   `json:"end"`
+	Location    string   `json:"location"`
+	Description string   `json:"description"`
+	Confidence  string   `json:"confidence"`
+	Missing     []string `json:"missing"`
+}
+
+type EventExtractionResult struct {
+	Events []EventCandidate `json:"events"`
+}

@@ -61,6 +61,17 @@ Rebuild compact indexes without running the pipeline:
 go run ./cmd/sova index
 ```
 
+Authorize Google Calendar before approving event candidates:
+
+```bash
+go run ./cmd/sova google-login
+```
+
+Overview runs publish event candidates to the Nest `Calendar` topic with
+Approve/Reject buttons. Approve creates a Google Calendar event only after this
+local OAuth token exists. Events use custom reminders: 7 days, 3 days, 1 day,
+and 1 hour.
+
 ## Data boundary
 
 Private runtime data is stored under `.state/` and `.sessions/`; both are

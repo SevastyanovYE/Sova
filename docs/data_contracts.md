@@ -38,3 +38,20 @@ The allowlist is the only source selector. Each synced message preserves:
 
 The compact review surface is `.state/index/telegram-recent.md`; agents should
 read it before retrieving targeted raw records.
+
+## Calendar approval
+
+Event candidates are derived artifacts linked to `(run_id, chat_id, message_id)`
+and the original Telegram source link. Candidates are published only to the Nest
+`Calendar` topic with approve/reject buttons.
+
+Candidate statuses:
+
+- `pending`: waiting for user action.
+- `approved`: reserved intermediate state before event creation.
+- `rejected`: user rejected the candidate.
+- `created`: user approved and Google Calendar returned an event id.
+- `failed`: approval was attempted but Google Calendar creation failed.
+
+Google Calendar events are created only after approval and use reminders at
+10080, 4320, 1440, and 60 minutes before the event.

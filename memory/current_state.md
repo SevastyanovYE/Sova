@@ -20,5 +20,8 @@
   and the local daily scheduler.
 - Compact indexes exist for Telegram recent content, overview runs, and calendar
   setup state under `.state/index/`.
-- Google Calendar real event creation is still blocked on OAuth Desktop
-  credentials and target calendar ID.
+- Google Calendar approval flow is implemented: event-like messages become
+  Calendar topic candidates with approve/reject buttons, and approve creates a
+  real Google Calendar event with 7d/3d/1d/1h reminders after `sova google-login`.
+- Local doctor still reports Calendar setup as input-dependent until OAuth
+  credentials, target calendar ID, and token are visible in the runtime env.

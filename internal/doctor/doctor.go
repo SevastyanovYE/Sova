@@ -34,6 +34,7 @@ func Run(ctx context.Context, cfg config.Config) []Check {
 		configuredCheck("telegram_sources", len(cfg.TelegramAllowedChats) > 0, "set at least one allowlisted Telegram source"),
 		configuredCheck("nest", cfg.NestReady(), "set bot token, Nest chat ID, and all four topic IDs"),
 		configuredCheck("google_calendar", cfg.GoogleCalendarID != "" && fileExists(cfg.GoogleCredentials), "set calendar ID and OAuth Desktop credentials"),
+		configuredCheck("google_calendar_token", fileExists(cfg.GoogleToken), "run `sova google-login` after setting OAuth credentials"),
 	)
 	checks = append(checks, ollamaCheck(ctx, cfg))
 	return checks

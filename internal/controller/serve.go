@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/SevastyanovYE/Sova/internal/calendarflow"
 	"github.com/SevastyanovYE/Sova/internal/config"
 	"github.com/SevastyanovYE/Sova/internal/nest"
 	"github.com/SevastyanovYE/Sova/internal/overview"
@@ -144,6 +145,10 @@ func handleMessage(ctx context.Context, cfg config.Config, client *nest.Client, 
 }
 
 func handleCallback(ctx context.Context, cfg config.Config, client *nest.Client, submit func(overviewJob) bool, callback nest.CallbackQuery) {
+	if calendarflow.IsCallback(callback.Data) {
+		handleCalendarCallback(ctx, cfg, client, callback)
+		return
+	}
 	if callback.Data != createOverviewCallback {
 		return
 	}
@@ -161,6 +166,25 @@ func handleCallback(ctx context.Context, cfg config.Config, client *nest.Client,
 		return
 	}
 	_ = client.AnswerCallbackQuery(ctx, callback.ID, "Обзор уже выполняется.")
+}
+
+func handleCalendarCallback(ctx context.Context, cfg config.Config, client *nest.Client, callback nest.CallbackQuery) {
+	if callback.Message == nil || callback.Message.Chat.ID != cfg.NestChatID || callback.Message.MessageThreadID != cfg.NestTopics.Calendar {
+		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Calendar approvals are available only in Calendar topic.")
+		return
+	}
+	text, err := calendarflow.HandleCallback(ctx, cfg, callback.Data)
+	if err != nil {
+		text = "Calendar action failed: " + compactLine(err.Error(), 500)
+		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Calendar action failed.")
+	} else {
+		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Done.")
+	}
+	_ = client.SendLongMessage(ctx, nest.SendMessageRequest{
+		ChatID:          cfg.NestChatID,
+		MessageThreadID: cfg.NestTopics.Calendar,
+		Text:            text,
+	})
 }
 
 func sendControlMessage(ctx context.Context, cfg config.Config, client *nest.Client) error {

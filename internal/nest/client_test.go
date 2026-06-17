@@ -20,3 +20,15 @@ func TestSplitMessageText(t *testing.T) {
 		t.Fatal("split produced empty content")
 	}
 }
+
+func TestRedactBotToken(t *testing.T) {
+	token := "123:secret"
+	input := `Post "https://api.telegram.org/bot123:secret/getUpdates": context deadline exceeded`
+	got := redactBotToken(input, token)
+	if strings.Contains(got, token) {
+		t.Fatalf("token was not redacted: %s", got)
+	}
+	if !strings.Contains(got, "<redacted>") {
+		t.Fatalf("redaction marker missing: %s", got)
+	}
+}

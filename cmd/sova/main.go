@@ -11,6 +11,7 @@ import (
 	"github.com/SevastyanovYE/Sova/internal/config"
 	"github.com/SevastyanovYE/Sova/internal/controller"
 	"github.com/SevastyanovYE/Sova/internal/doctor"
+	"github.com/SevastyanovYE/Sova/internal/gcalendar"
 	"github.com/SevastyanovYE/Sova/internal/indexes"
 	"github.com/SevastyanovYE/Sova/internal/nest"
 	"github.com/SevastyanovYE/Sova/internal/overview"
@@ -67,6 +68,8 @@ func run(ctx context.Context, args []string) error {
 		return qwenSmoke(ctx, cfg)
 	case "qwen-calibrate":
 		return qwenCalibrate(ctx, cfg, args[1:])
+	case "google-login":
+		return googleLogin(ctx, cfg)
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -297,6 +300,10 @@ func qwenCalibrate(ctx context.Context, cfg config.Config, args []string) error 
 	return nil
 }
 
+func googleLogin(ctx context.Context, cfg config.Config) error {
+	return gcalendar.Login(ctx, cfg, os.Stdin, os.Stdout)
+}
+
 func mustLocation(name string) *time.Location {
 	location, err := time.LoadLocation(name)
 	if err != nil {
@@ -321,5 +328,6 @@ Usage:
   sova telegram-login-qr
   sova sync [--limit 100] [--dry-run]
   sova qwen-smoke
-  sova qwen-calibrate --input examples.jsonl`)
+  sova qwen-calibrate --input examples.jsonl
+  sova google-login`)
 }

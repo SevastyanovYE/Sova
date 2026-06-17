@@ -21,7 +21,11 @@ func Rebuild(ctx context.Context, cfg config.Config, store *sqlitestore.Store, g
 	if err := WriteRunsIndex(cfg, runs, generatedAt); err != nil {
 		return err
 	}
-	return WriteCalendarIndex(cfg, generatedAt)
+	candidates, err := store.RecentCalendarCandidates(ctx, 20)
+	if err != nil {
+		return err
+	}
+	return WriteCalendarIndex(cfg, candidates, generatedAt)
 }
 
 func WriteRunsIndex(cfg config.Config, runs []sqlitestore.Run, generatedAt time.Time) error {
@@ -69,7 +73,7 @@ func WriteRunsIndex(cfg config.Config, runs []sqlitestore.Run, generatedAt time.
 	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
 
-func WriteCalendarIndex(cfg config.Config, generatedAt time.Time) error {
+func WriteCalendarIndex(cfg config.Config, candidates []sqlitestore.CalendarCandidate, generatedAt time.Time) error {
 	path := filepath.Join(cfg.StateDir, "index", "calendar.md")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -80,9 +84,41 @@ func WriteCalendarIndex(cfg config.Config, generatedAt time.Time) error {
 	b.WriteString("Generated: ")
 	b.WriteString(generatedAt.In(location).Format(time.RFC3339))
 	b.WriteString("\n\n")
-	b.WriteString("Google Calendar OAuth and target calendar ID are still open setup items.\n")
 	b.WriteString("Calendar events must be created only after approval in the Nest Calendar topic.\n")
-	b.WriteString("\nNo calendar candidates indexed yet.\n")
+	if cfg.GoogleCalendarID == "" {
+		b.WriteString("Google Calendar target calendar ID is not configured.\n")
+	}
+	if len(candidates) == 0 {
+		b.WriteString("\nNo calendar candidates indexed yet.\n")
+		return os.WriteFile(path, []byte(b.String()), 0o600)
+	}
+	b.WriteString("\n")
+	for _, candidate := range candidates {
+		b.WriteString("- `")
+		b.WriteString(strconv.FormatInt(candidate.ID, 10))
+		b.WriteString("` `")
+		b.WriteString(candidate.Status)
+		b.WriteString("` ")
+		b.WriteString(compact(candidate.Title, 140))
+		b.WriteString(" start=`")
+		b.WriteString(candidate.StartAt.In(location).Format("2006-01-02 15:04 MST"))
+		b.WriteString("`")
+		if candidate.SourceLink != "" {
+			b.WriteString(" source=")
+			b.WriteString(candidate.SourceLink)
+		}
+		if candidate.CalendarEventID != "" {
+			b.WriteString(" calendar_event_id=`")
+			b.WriteString(candidate.CalendarEventID)
+			b.WriteString("`")
+		}
+		if candidate.Error != "" {
+			b.WriteString(" error=\"")
+			b.WriteString(compact(candidate.Error, 180))
+			b.WriteString("\"")
+		}
+		b.WriteString("\n")
+	}
 	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
 

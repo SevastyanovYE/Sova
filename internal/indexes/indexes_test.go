@@ -44,8 +44,16 @@ func TestWriteRunsIndex(t *testing.T) {
 
 func TestWriteCalendarIndex(t *testing.T) {
 	stateDir := t.TempDir()
-	cfg := config.Config{StateDir: stateDir, Timezone: "Europe/Moscow"}
-	if err := WriteCalendarIndex(cfg, time.Date(2026, 6, 17, 7, 0, 0, 0, time.UTC)); err != nil {
+	cfg := config.Config{StateDir: stateDir, Timezone: "Europe/Moscow", GoogleCalendarID: "primary"}
+	start := time.Date(2026, 6, 18, 7, 0, 0, 0, time.UTC)
+	if err := WriteCalendarIndex(cfg, []sqlitestore.CalendarCandidate{{
+		ID:         1,
+		Status:     "pending",
+		Title:      "[ОММ] Экзамен",
+		StartAt:    start,
+		EndAt:      start.Add(time.Hour),
+		SourceLink: "https://t.me/c/100/42",
+	}}, time.Date(2026, 6, 17, 7, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(CalendarIndexPath(cfg))
@@ -55,8 +63,9 @@ func TestWriteCalendarIndex(t *testing.T) {
 	content := string(data)
 	for _, want := range []string{
 		"# Calendar Index",
-		"Google Calendar OAuth and target calendar ID are still open setup items.",
 		"only after approval",
+		"`1` `pending` [ОММ] Экзамен",
+		"https://t.me/c/100/42",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("calendar index missing %q:\n%s", want, content)

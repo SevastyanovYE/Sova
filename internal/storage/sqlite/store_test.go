@@ -227,3 +227,86 @@ WHERE run_id = ? AND chat_id = ? AND message_id = ?`, run.ID, 100, 42).
 			keep, importance, reason, tags, hasEvent, model)
 	}
 }
+
+func TestCalendarCandidatesLifecycle(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Date(2026, 6, 17, 8, 0, 0, 0, time.UTC)
+	run, err := store.TryStartOverview(ctx, "manual", now, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.UpsertTelegramSource(ctx, TelegramSource{
+		Ref:      "telegram:channel:100",
+		PeerKind: "channel",
+		ChatID:   100,
+		Title:    "Study",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.InsertTelegramMessages(ctx, []TelegramMessage{{
+		SourceID:   source.ID,
+		ChatID:     100,
+		MessageID:  50,
+		Date:       now,
+		Kind:       "message",
+		Text:       "exam tomorrow",
+		SourceLink: "https://t.me/c/100/50",
+		RawJSON:    `{"message_id":50}`,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC)
+	inserted, err := store.InsertCalendarCandidates(ctx, []CalendarCandidate{{
+		RunID:       run.ID,
+		ChatID:      100,
+		MessageID:   50,
+		SourceLink:  "https://t.me/c/100/50",
+		Title:       "[ОММ] Экзамен",
+		StartAt:     start,
+		EndAt:       start.Add(2 * time.Hour),
+		Timezone:    "Europe/Moscow",
+		Location:    "504",
+		Description: "Экзамен",
+		Confidence:  "medium",
+		Status:      "pending",
+	}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inserted) != 1 || inserted[0].ID == 0 {
+		t.Fatalf("inserted = %+v", inserted)
+	}
+	again, err := store.InsertCalendarCandidates(ctx, []CalendarCandidate{inserted[0]}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("duplicate candidate inserted again: %+v", again)
+	}
+
+	if err := store.UpdateCalendarCandidateStatus(ctx, inserted[0].ID, "created", "google-event-1", "", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := store.CalendarCandidateByID(ctx, inserted[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.Status != "created" || candidate.CalendarEventID != "google-event-1" {
+		t.Fatalf("candidate after update = %+v", candidate)
+	}
+	recent, err := store.RecentCalendarCandidates(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recent) != 1 || recent[0].ID != inserted[0].ID {
+		t.Fatalf("recent = %+v", recent)
+	}
+}

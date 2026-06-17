@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SevastyanovYE/Sova/internal/config"
 	"github.com/SevastyanovYE/Sova/internal/qwen"
 	"github.com/SevastyanovYE/Sova/internal/telegrammt"
 )
@@ -159,4 +160,48 @@ func TestBuildRunBundleKeepsImportantMessagesAndProvenance(t *testing.T) {
 	if strings.Contains(bundle, "text: мем") {
 		t.Fatalf("noise message leaked into kept digest section:\n%s", bundle)
 	}
+}
+
+func TestCalendarCandidateFromExtractionDefaultsEnd(t *testing.T) {
+	message := telegrammt.SyncedMessage{
+		SourceRef:  "telegram:channel:100",
+		ChatID:     100,
+		MessageID:  42,
+		Text:       "Экзамен завтра в 10:00",
+		SourceLink: "https://t.me/c/100/42",
+	}
+	candidate, ok, err := calendarCandidateFromExtraction(
+		testConfig("Europe/Moscow"),
+		7,
+		message,
+		qwen.EventCandidate{
+			ID:          "telegram:100:42",
+			HasEvent:    true,
+			Title:       "[ОММ] Экзамен",
+			Start:       "2026-06-18T10:00:00+03:00",
+			End:         "",
+			Location:    "504",
+			Description: "Экзамен",
+			Confidence:  "medium",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("candidate was skipped")
+	}
+	if candidate.RunID != 7 || candidate.ChatID != 100 || candidate.MessageID != 42 {
+		t.Fatalf("candidate identity = %+v", candidate)
+	}
+	if candidate.Title != "[ОММ] Экзамен" || candidate.Location != "504" || candidate.Status != "pending" {
+		t.Fatalf("candidate fields = %+v", candidate)
+	}
+	if candidate.EndAt.Sub(candidate.StartAt) != time.Hour {
+		t.Fatalf("default duration = %s", candidate.EndAt.Sub(candidate.StartAt))
+	}
+}
+
+func testConfig(timezone string) config.Config {
+	return config.Config{Timezone: timezone}
 }

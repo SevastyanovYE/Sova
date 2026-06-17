@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -73,6 +74,26 @@ type MessageDecision struct {
 	Tags       []string
 	HasEvent   bool
 	Model      string
+}
+
+type CalendarCandidate struct {
+	ID              int64
+	RunID           int64
+	ChatID          int64
+	MessageID       int
+	SourceLink      string
+	Title           string
+	StartAt         time.Time
+	EndAt           time.Time
+	Timezone        string
+	Location        string
+	Description     string
+	Confidence      string
+	Status          string
+	CalendarEventID string
+	Error           string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 type CooldownError struct {
@@ -167,6 +188,30 @@ CREATE TABLE IF NOT EXISTS message_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_message_decisions_run
     ON message_decisions(run_id, importance DESC, keep DESC);
+CREATE TABLE IF NOT EXISTS calendar_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES overview_runs(id),
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    source_link TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    start_at TEXT NOT NULL,
+    end_at TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    location TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    confidence TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'created', 'failed')),
+    calendar_event_id TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(chat_id, message_id) REFERENCES telegram_messages(chat_id, message_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_candidates_run_message
+    ON calendar_candidates(run_id, chat_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_calendar_candidates_status
+    ON calendar_candidates(status, updated_at DESC);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate SQLite: %w", err)
@@ -486,6 +531,128 @@ INSERT INTO message_decisions(
 	return tx.Commit()
 }
 
+func (s *Store) InsertCalendarCandidates(ctx context.Context, candidates []CalendarCandidate, now time.Time) ([]CalendarCandidate, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	inserted := make([]CalendarCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.RunID == 0 || candidate.ChatID == 0 || candidate.MessageID == 0 {
+			return nil, fmt.Errorf("invalid calendar candidate identity")
+		}
+		if strings.TrimSpace(candidate.Title) == "" {
+			return nil, fmt.Errorf("calendar candidate title is required")
+		}
+		if candidate.StartAt.IsZero() || candidate.EndAt.IsZero() || !candidate.EndAt.After(candidate.StartAt) {
+			return nil, fmt.Errorf("calendar candidate requires a valid start/end")
+		}
+		if candidate.Status == "" {
+			candidate.Status = "pending"
+		}
+		if candidate.Timezone == "" {
+			candidate.Timezone = "Europe/Moscow"
+		}
+		nowRaw := now.UTC().Format(time.RFC3339Nano)
+		result, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO calendar_candidates(
+    run_id, chat_id, message_id, source_link, title, start_at, end_at, timezone,
+    location, description, confidence, status, calendar_event_id, error, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			candidate.RunID, candidate.ChatID, candidate.MessageID, candidate.SourceLink,
+			candidate.Title, candidate.StartAt.UTC().Format(time.RFC3339Nano),
+			candidate.EndAt.UTC().Format(time.RFC3339Nano), candidate.Timezone,
+			candidate.Location, candidate.Description, candidate.Confidence, candidate.Status,
+			candidate.CalendarEventID, candidate.Error, nowRaw, nowRaw)
+		if err != nil {
+			return nil, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if affected == 0 {
+			continue
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		candidate.ID = id
+		candidate.CreatedAt = now.UTC()
+		candidate.UpdatedAt = now.UTC()
+		inserted = append(inserted, candidate)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return inserted, nil
+}
+
+func (s *Store) CalendarCandidateByID(ctx context.Context, id int64) (CalendarCandidate, error) {
+	return s.calendarCandidateByQuery(ctx, `
+SELECT id, run_id, chat_id, message_id, source_link, title, start_at, end_at,
+       timezone, location, description, confidence, status, calendar_event_id,
+       error, created_at, updated_at
+FROM calendar_candidates
+WHERE id = ?`, id)
+}
+
+func (s *Store) RecentCalendarCandidates(ctx context.Context, limit int) ([]CalendarCandidate, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, run_id, chat_id, message_id, source_link, title, start_at, end_at,
+       timezone, location, description, confidence, status, calendar_event_id,
+       error, created_at, updated_at
+FROM calendar_candidates
+ORDER BY updated_at DESC, id DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var candidates []CalendarCandidate
+	for rows.Next() {
+		candidate, err := scanCalendarCandidate(rows)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
+func (s *Store) UpdateCalendarCandidateStatus(ctx context.Context, id int64, status, eventID, runErr string, now time.Time) error {
+	if status != "approved" && status != "rejected" && status != "created" && status != "failed" {
+		return fmt.Errorf("invalid calendar candidate status %q", status)
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE calendar_candidates
+SET status = ?, calendar_event_id = ?, error = ?, updated_at = ?
+WHERE id = ?`,
+		status, eventID, runErr, now.UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("calendar candidate %d not found", id)
+	}
+	return nil
+}
+
 func isConstraintError(err error) bool {
 	return err != nil && (contains(err.Error(), "constraint") || contains(err.Error(), "unique"))
 }
@@ -495,6 +662,47 @@ func boolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+type calendarCandidateScanner interface {
+	Scan(dest ...any) error
+}
+
+func (s *Store) calendarCandidateByQuery(ctx context.Context, query string, args ...any) (CalendarCandidate, error) {
+	row := s.db.QueryRowContext(ctx, query, args...)
+	return scanCalendarCandidate(row)
+}
+
+func scanCalendarCandidate(scanner calendarCandidateScanner) (CalendarCandidate, error) {
+	var candidate CalendarCandidate
+	var startRaw, endRaw, createdRaw, updatedRaw string
+	if err := scanner.Scan(
+		&candidate.ID, &candidate.RunID, &candidate.ChatID, &candidate.MessageID,
+		&candidate.SourceLink, &candidate.Title, &startRaw, &endRaw, &candidate.Timezone,
+		&candidate.Location, &candidate.Description, &candidate.Confidence,
+		&candidate.Status, &candidate.CalendarEventID, &candidate.Error,
+		&createdRaw, &updatedRaw,
+	); err != nil {
+		return CalendarCandidate{}, err
+	}
+	var err error
+	candidate.StartAt, err = time.Parse(time.RFC3339Nano, startRaw)
+	if err != nil {
+		return CalendarCandidate{}, err
+	}
+	candidate.EndAt, err = time.Parse(time.RFC3339Nano, endRaw)
+	if err != nil {
+		return CalendarCandidate{}, err
+	}
+	candidate.CreatedAt, err = time.Parse(time.RFC3339Nano, createdRaw)
+	if err != nil {
+		return CalendarCandidate{}, err
+	}
+	candidate.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedRaw)
+	if err != nil {
+		return CalendarCandidate{}, err
+	}
+	return candidate, nil
 }
 
 type runScanner interface {

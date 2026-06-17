@@ -15,6 +15,7 @@ import (
 
 const telegramMessageLimit = 4096
 const safeMessageLimit = 3900
+const defaultHTTPTimeout = 75 * time.Second
 
 type Client struct {
 	token      string
@@ -71,7 +72,7 @@ type SendMessageRequest struct {
 func New(token string) *Client {
 	return &Client{
 		token:      strings.TrimSpace(token),
-		httpClient: &http.Client{Timeout: 20 * time.Second},
+		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
 	}
 }
 
@@ -229,14 +230,14 @@ func (c *Client) call(ctx context.Context, method string, payload any, out any) 
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(method), body)
 	if err != nil {
-		return err
+		return fmt.Errorf("build Bot API %s request: %s", method, redactBotToken(err.Error(), c.token))
 	}
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("Bot API %s request failed: %s", method, redactBotToken(err.Error(), c.token))
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -254,4 +255,12 @@ func (c *Client) call(ctx context.Context, method string, payload any, out any) 
 
 func (c *Client) url(method string) string {
 	return "https://api.telegram.org/bot" + c.token + "/" + method
+}
+
+func redactBotToken(value, token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return value
+	}
+	return strings.ReplaceAll(value, token, "<redacted>")
 }
