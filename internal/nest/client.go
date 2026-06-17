@@ -13,6 +13,9 @@ import (
 	"github.com/SevastyanovYE/Sova/internal/config"
 )
 
+const telegramMessageLimit = 4096
+const safeMessageLimit = 3900
+
 type Client struct {
 	token      string
 	httpClient *http.Client
@@ -25,11 +28,44 @@ type User struct {
 	FirstName string `json:"first_name"`
 }
 
+type Chat struct {
+	ID int64 `json:"id"`
+}
+
+type Message struct {
+	MessageID       int    `json:"message_id"`
+	MessageThreadID int    `json:"message_thread_id"`
+	Chat            Chat   `json:"chat"`
+	Text            string `json:"text"`
+}
+
+type CallbackQuery struct {
+	ID      string   `json:"id"`
+	Message *Message `json:"message"`
+	Data    string   `json:"data"`
+}
+
+type Update struct {
+	UpdateID      int            `json:"update_id"`
+	Message       *Message       `json:"message"`
+	CallbackQuery *CallbackQuery `json:"callback_query"`
+}
+
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+}
+
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data,omitempty"`
+}
+
 type SendMessageRequest struct {
 	ChatID          int64
 	MessageThreadID int
 	Text            string
 	ParseMode       string
+	ReplyMarkup     *InlineKeyboardMarkup
 }
 
 func New(token string) *Client {
@@ -63,6 +99,9 @@ func (c *Client) SendMessage(ctx context.Context, request SendMessageRequest) er
 	if strings.TrimSpace(request.ParseMode) != "" {
 		payload["parse_mode"] = request.ParseMode
 	}
+	if request.ReplyMarkup != nil {
+		payload["reply_markup"] = request.ReplyMarkup
+	}
 	var response struct {
 		OK          bool   `json:"ok"`
 		Description string `json:"description"`
@@ -74,6 +113,93 @@ func (c *Client) SendMessage(ctx context.Context, request SendMessageRequest) er
 		return fmt.Errorf("Bot API sendMessage failed: %s", response.Description)
 	}
 	return nil
+}
+
+func (c *Client) GetUpdates(ctx context.Context, offset int, timeoutSeconds int) ([]Update, error) {
+	payload := map[string]any{
+		"offset":          offset,
+		"timeout":         timeoutSeconds,
+		"allowed_updates": []string{"message", "callback_query"},
+	}
+	var response struct {
+		OK          bool     `json:"ok"`
+		Result      []Update `json:"result"`
+		Description string   `json:"description"`
+	}
+	if err := c.call(ctx, "getUpdates", payload, &response); err != nil {
+		return nil, err
+	}
+	if !response.OK {
+		return nil, fmt.Errorf("Bot API getUpdates failed: %s", response.Description)
+	}
+	return response.Result, nil
+}
+
+func (c *Client) AnswerCallbackQuery(ctx context.Context, id, text string) error {
+	payload := map[string]any{"callback_query_id": id}
+	if strings.TrimSpace(text) != "" {
+		payload["text"] = text
+	}
+	var response struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := c.call(ctx, "answerCallbackQuery", payload, &response); err != nil {
+		return err
+	}
+	if !response.OK {
+		return fmt.Errorf("Bot API answerCallbackQuery failed: %s", response.Description)
+	}
+	return nil
+}
+
+func (c *Client) SendLongMessage(ctx context.Context, request SendMessageRequest) error {
+	parts := SplitMessageText(request.Text, safeMessageLimit)
+	for _, part := range parts {
+		next := request
+		next.Text = part
+		if err := c.SendMessage(ctx, next); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func SplitMessageText(text string, limit int) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return []string{""}
+	}
+	if limit <= 0 || limit > telegramMessageLimit {
+		limit = safeMessageLimit
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return []string{text}
+	}
+	var parts []string
+	for len(runes) > 0 {
+		end := limit
+		if end > len(runes) {
+			end = len(runes)
+		}
+		split := end
+		for i := end - 1; i > 0 && end-i < 600; i-- {
+			if runes[i] == '\n' {
+				split = i + 1
+				break
+			}
+		}
+		part := strings.TrimSpace(string(runes[:split]))
+		if part != "" {
+			parts = append(parts, part)
+		}
+		runes = runes[split:]
+	}
+	if len(parts) == 0 {
+		return []string{""}
+	}
+	return parts
 }
 
 func CheckTopics(cfg config.Config) error {

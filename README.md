@@ -44,6 +44,23 @@ After `telegram-status` reports an authorized session, `sync` reads only
 `.state/raw/telegram/`, persists message indexes in SQLite, and regenerates
 `.state/index/telegram-recent.md`.
 
+Run the local controller:
+
+```bash
+go run ./cmd/sova serve
+```
+
+`serve` keeps Bot API long polling active, accepts `/run` and the "Создать обзор"
+button only from the Nest `Chat` topic, and schedules the daily overview at
+`SOVA_DAILY_RUN_TIME`. Overview output goes to the `Digest` topic; failures and
+health/status messages go to the `Status` topic.
+
+Rebuild compact indexes without running the pipeline:
+
+```bash
+go run ./cmd/sova index
+```
+
 ## Data boundary
 
 Private runtime data is stored under `.state/` and `.sessions/`; both are

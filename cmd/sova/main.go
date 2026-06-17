@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,8 +9,11 @@ import (
 	"time"
 
 	"github.com/SevastyanovYE/Sova/internal/config"
+	"github.com/SevastyanovYE/Sova/internal/controller"
 	"github.com/SevastyanovYE/Sova/internal/doctor"
+	"github.com/SevastyanovYE/Sova/internal/indexes"
 	"github.com/SevastyanovYE/Sova/internal/nest"
+	"github.com/SevastyanovYE/Sova/internal/overview"
 	"github.com/SevastyanovYE/Sova/internal/qwen"
 	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
 	"github.com/SevastyanovYE/Sova/internal/telegrammt"
@@ -47,6 +49,10 @@ func run(ctx context.Context, args []string) error {
 		return runOverview(ctx, cfg, args[1:])
 	case "status":
 		return printStatus(ctx, cfg)
+	case "index":
+		return rebuildIndexes(ctx, cfg)
+	case "serve":
+		return controller.Serve(ctx, cfg)
 	case "nest-check":
 		return nestCheck(ctx, cfg, args[1:])
 	case "telegram-status":
@@ -99,27 +105,17 @@ func runOverview(ctx context.Context, cfg config.Config, args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	store, err := sqlitestore.Open(cfg.DatabasePath)
+	result, err := overview.Run(ctx, cfg, *trigger, overview.ProductionOptions())
 	if err != nil {
-		return err
+		return overview.FormatRunError(err, cfg.Timezone)
 	}
-	defer store.Close()
-
-	now := time.Now().UTC()
-	runRecord, err := store.TryStartOverview(ctx, *trigger, now, cfg.OverviewCooldown)
-	if err != nil {
-		var cooldownErr *sqlitestore.CooldownError
-		if errors.As(err, &cooldownErr) {
-			return fmt.Errorf("%w (next run after %s)", err, cooldownErr.NextAllowedAt.In(mustLocation(cfg.Timezone)).Format("15:04:05 MST"))
-		}
-		return err
+	fmt.Printf("overview run %d finished via %s; %s\n", result.RunID, result.Trigger, result.Summary)
+	if result.BundlePath != "" {
+		fmt.Println("bundle:", result.BundlePath)
 	}
-
-	const summary = "overview pipeline foundation verified; Telegram processing is not configured yet"
-	if err := store.FinishOverview(ctx, runRecord.ID, "success", summary, "", time.Now().UTC()); err != nil {
-		return err
+	if result.DigestPath != "" {
+		fmt.Println("digest:", result.DigestPath)
 	}
-	fmt.Printf("overview run %d accepted via %s; %s\n", runRecord.ID, runRecord.Trigger, summary)
 	return nil
 }
 
@@ -140,6 +136,19 @@ func printStatus(ctx context.Context, cfg config.Config) error {
 	fmt.Printf("run=%d trigger=%s status=%s started=%s summary=%q\n",
 		runRecord.ID, runRecord.Trigger, runRecord.Status,
 		runRecord.StartedAt.In(mustLocation(cfg.Timezone)).Format(time.RFC3339), runRecord.Summary)
+	return nil
+}
+
+func rebuildIndexes(ctx context.Context, cfg config.Config) error {
+	store, err := sqlitestore.Open(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := indexes.Rebuild(ctx, cfg, store, time.Now().UTC()); err != nil {
+		return err
+	}
+	fmt.Println(indexes.Summary(cfg))
 	return nil
 }
 
@@ -304,6 +313,8 @@ Usage:
   sova doctor
   sova run [--trigger manual|scheduled|nest_button]
   sova status
+  sova index
+  sova serve
   sova nest-check [--send-status]
   sova telegram-status
   sova telegram-login

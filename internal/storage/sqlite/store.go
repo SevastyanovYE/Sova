@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -60,6 +61,18 @@ type TelegramRecentMessage struct {
 	Text        string
 	MediaType   string
 	SourceLink  string
+}
+
+type MessageDecision struct {
+	RunID      int64
+	ChatID     int64
+	MessageID  int
+	Keep       bool
+	Importance int
+	Reason     string
+	Tags       []string
+	HasEvent   bool
+	Model      string
 }
 
 type CooldownError struct {
@@ -138,6 +151,22 @@ CREATE TABLE IF NOT EXISTS telegram_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_telegram_messages_source_date
     ON telegram_messages(source_id, date DESC);
+CREATE TABLE IF NOT EXISTS message_decisions (
+    run_id INTEGER NOT NULL REFERENCES overview_runs(id),
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    keep INTEGER NOT NULL CHECK (keep IN (0, 1)),
+    importance INTEGER NOT NULL CHECK (importance BETWEEN 0 AND 3),
+    reason TEXT NOT NULL DEFAULT '',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    has_event INTEGER NOT NULL CHECK (has_event IN (0, 1)),
+    model TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, chat_id, message_id),
+    FOREIGN KEY(chat_id, message_id) REFERENCES telegram_messages(chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_message_decisions_run
+    ON message_decisions(run_id, importance DESC, keep DESC);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate SQLite: %w", err)
@@ -246,6 +275,33 @@ LIMIT 1`).Scan(&run.ID, &run.Trigger, &run.Status, &startedRaw, &finishedRaw, &r
 		run.FinishedAt = &finished
 	}
 	return run, true, nil
+}
+
+func (s *Store) RecentRuns(ctx context.Context, limit int) ([]Run, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, trigger, status, started_at, finished_at, summary, error
+FROM overview_runs
+ORDER BY started_at DESC, id DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
 }
 
 func (s *Store) UpsertTelegramSource(ctx context.Context, source TelegramSource, now time.Time) (TelegramSource, error) {
@@ -397,8 +453,74 @@ LIMIT ?`, limit)
 	return messages, nil
 }
 
+func (s *Store) InsertMessageDecisions(ctx context.Context, decisions []MessageDecision, now time.Time) error {
+	if len(decisions) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, decision := range decisions {
+		if decision.RunID == 0 || decision.ChatID == 0 || decision.MessageID == 0 {
+			return fmt.Errorf("invalid decision identity")
+		}
+		if decision.Importance < 0 || decision.Importance > 3 {
+			return fmt.Errorf("decision importance out of range for %d/%d", decision.ChatID, decision.MessageID)
+		}
+		tags, err := json.Marshal(decision.Tags)
+		if err != nil {
+			return fmt.Errorf("marshal decision tags: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO message_decisions(
+    run_id, chat_id, message_id, keep, importance, reason, tags_json, has_event, model, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			decision.RunID, decision.ChatID, decision.MessageID, boolInt(decision.Keep),
+			decision.Importance, decision.Reason, string(tags), boolInt(decision.HasEvent),
+			decision.Model, now.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func isConstraintError(err error) bool {
 	return err != nil && (contains(err.Error(), "constraint") || contains(err.Error(), "unique"))
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+type runScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRun(scanner runScanner) (Run, error) {
+	var run Run
+	var startedRaw string
+	var finishedRaw sql.NullString
+	if err := scanner.Scan(&run.ID, &run.Trigger, &run.Status, &startedRaw, &finishedRaw, &run.Summary, &run.Error); err != nil {
+		return Run{}, err
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, startedRaw)
+	if err != nil {
+		return Run{}, err
+	}
+	run.StartedAt = startedAt
+	if finishedRaw.Valid {
+		finished, err := time.Parse(time.RFC3339Nano, finishedRaw.String)
+		if err != nil {
+			return Run{}, err
+		}
+		run.FinishedAt = &finished
+	}
+	return run, nil
 }
 
 func contains(value, fragment string) bool {

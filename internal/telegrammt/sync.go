@@ -37,10 +37,32 @@ type SyncSourceResult struct {
 	Fetched       int
 	New           int
 	Inserted      int
+	Messages      []SyncedMessage
 }
 
 type SyncResult struct {
 	Sources []SyncSourceResult
+}
+
+type SyncedMessage struct {
+	SourceRef   string
+	SourceTitle string
+	Username    string
+	ChatID      int64
+	MessageID   int
+	Date        time.Time
+	Kind        string
+	Text        string
+	MediaType   string
+	SourceLink  string
+}
+
+func (r SyncResult) NewMessages() []SyncedMessage {
+	var messages []SyncedMessage
+	for _, source := range r.Sources {
+		messages = append(messages, source.Messages...)
+	}
+	return messages
 }
 
 type resolvedSource struct {
@@ -141,6 +163,7 @@ func (c *Client) Sync(ctx context.Context, store *sqlitestore.Store, opts SyncOp
 				Fetched:       len(messages),
 				New:           len(newMessages),
 				Inserted:      inserted,
+				Messages:      compactSyncedMessages(source.source, newMessages),
 			})
 		}
 
@@ -159,6 +182,25 @@ func (c *Client) Sync(ctx context.Context, store *sqlitestore.Store, opts SyncOp
 		return SyncResult{}, err
 	}
 	return result, nil
+}
+
+func compactSyncedMessages(source sqlitestore.TelegramSource, messages []sqlitestore.TelegramMessage) []SyncedMessage {
+	out := make([]SyncedMessage, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, SyncedMessage{
+			SourceRef:   source.Ref,
+			SourceTitle: source.Title,
+			Username:    source.Username,
+			ChatID:      message.ChatID,
+			MessageID:   message.MessageID,
+			Date:        message.Date,
+			Kind:        message.Kind,
+			Text:        message.Text,
+			MediaType:   message.MediaType,
+			SourceLink:  message.SourceLink,
+		})
+	}
+	return out
 }
 
 func existingSource(ctx context.Context, store *sqlitestore.Store, ref string) (sqlitestore.TelegramSource, bool) {

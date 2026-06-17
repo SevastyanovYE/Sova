@@ -1,0 +1,120 @@
+package indexes
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/SevastyanovYE/Sova/internal/config"
+	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
+)
+
+func Rebuild(ctx context.Context, cfg config.Config, store *sqlitestore.Store, generatedAt time.Time) error {
+	runs, err := store.RecentRuns(ctx, 20)
+	if err != nil {
+		return err
+	}
+	if err := WriteRunsIndex(cfg, runs, generatedAt); err != nil {
+		return err
+	}
+	return WriteCalendarIndex(cfg, generatedAt)
+}
+
+func WriteRunsIndex(cfg config.Config, runs []sqlitestore.Run, generatedAt time.Time) error {
+	path := filepath.Join(cfg.StateDir, "index", "runs.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	location := mustLocation(cfg.Timezone)
+	var b strings.Builder
+	b.WriteString("# Overview Runs\n\n")
+	b.WriteString("Generated: ")
+	b.WriteString(generatedAt.In(location).Format(time.RFC3339))
+	b.WriteString("\n\n")
+	if len(runs) == 0 {
+		b.WriteString("No overview runs yet.\n")
+		return os.WriteFile(path, []byte(b.String()), 0o600)
+	}
+	for _, run := range runs {
+		b.WriteString("- `")
+		b.WriteString(strconv.FormatInt(run.ID, 10))
+		b.WriteString("` `")
+		b.WriteString(run.Status)
+		b.WriteString("` trigger=`")
+		b.WriteString(run.Trigger)
+		b.WriteString("` started=`")
+		b.WriteString(run.StartedAt.In(location).Format("2006-01-02 15:04:05 MST"))
+		b.WriteString("`")
+		if run.FinishedAt != nil {
+			b.WriteString(" finished=`")
+			b.WriteString(run.FinishedAt.In(location).Format("2006-01-02 15:04:05 MST"))
+			b.WriteString("`")
+		}
+		if run.Summary != "" {
+			b.WriteString(" summary=\"")
+			b.WriteString(compact(run.Summary, 180))
+			b.WriteString("\"")
+		}
+		if run.Error != "" {
+			b.WriteString(" error=\"")
+			b.WriteString(compact(run.Error, 180))
+			b.WriteString("\"")
+		}
+		b.WriteString("\n")
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o600)
+}
+
+func WriteCalendarIndex(cfg config.Config, generatedAt time.Time) error {
+	path := filepath.Join(cfg.StateDir, "index", "calendar.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	location := mustLocation(cfg.Timezone)
+	var b strings.Builder
+	b.WriteString("# Calendar Index\n\n")
+	b.WriteString("Generated: ")
+	b.WriteString(generatedAt.In(location).Format(time.RFC3339))
+	b.WriteString("\n\n")
+	b.WriteString("Google Calendar OAuth and target calendar ID are still open setup items.\n")
+	b.WriteString("Calendar events must be created only after approval in the Nest Calendar topic.\n")
+	b.WriteString("\nNo calendar candidates indexed yet.\n")
+	return os.WriteFile(path, []byte(b.String()), 0o600)
+}
+
+func compact(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	value = strings.ReplaceAll(value, "\"", "'")
+	if limit <= 0 || len([]rune(value)) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	if limit <= 3 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-3]) + "..."
+}
+
+func mustLocation(name string) *time.Location {
+	location, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return location
+}
+
+func RunsIndexPath(cfg config.Config) string {
+	return filepath.Join(cfg.StateDir, "index", "runs.md")
+}
+
+func CalendarIndexPath(cfg config.Config) string {
+	return filepath.Join(cfg.StateDir, "index", "calendar.md")
+}
+
+func Summary(cfg config.Config) string {
+	return fmt.Sprintf("updated %s and %s", RunsIndexPath(cfg), CalendarIndexPath(cfg))
+}
