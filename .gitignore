@@ -1,0 +1,10 @@
+.env
+.secrets/
+.sessions/
+.state/
+.tmp/
+bin/
+coverage.out
+*.db
+*.db-shm
+*.db-wal
