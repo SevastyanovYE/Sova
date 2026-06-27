@@ -72,3 +72,40 @@ func TestWriteCalendarIndex(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteQwenPerformanceIndex(t *testing.T) {
+	stateDir := t.TempDir()
+	cfg := config.Config{StateDir: stateDir, Timezone: "Europe/Moscow"}
+	generatedAt := time.Date(2026, 6, 18, 7, 0, 0, 0, time.UTC)
+	if err := WriteQwenPerformanceIndex(cfg, []sqlitestore.ModelCall{{
+		RunID:          6,
+		Stage:          "qwen_classify",
+		BatchIndex:     2,
+		InputMessages:  24,
+		InputChars:     1700,
+		DurationMillis: 75000,
+		Success:        false,
+		Fallbacks:      24,
+		Error:          "deadline exceeded",
+		Model:          "qwen3:14b",
+		CreatedAt:      generatedAt,
+	}}, generatedAt); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(QwenPerformanceIndexPath(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"# Qwen Performance",
+		"run=`6` stage=`qwen_classify` batch=2",
+		"duration_ms=75000",
+		"fallbacks=24",
+		"deadline exceeded",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("qwen performance index missing %q:\n%s", want, content)
+		}
+	}
+}

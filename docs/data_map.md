@@ -8,10 +8,12 @@ Read this file before opening runtime data.
 | Architecture decision | `memory/important_decisions.md` | Decision records |
 | Recent Telegram content | generated `.state/index/telegram-recent.md` | `.state/raw/telegram/*.jsonl` |
 | Run status or failure | generated `.state/index/runs.md` | SQLite `overview_runs`, JSONL logs |
+| Qwen latency/fallbacks | generated `.state/index/qwen-performance.md` | SQLite `model_calls` |
+| Qwen model benchmark | generated `.state/index/qwen-benchmark.md` | `.state/artifacts/qwen-benchmark-*.jsonl` |
+| Qwen labeled eval | generated `.state/index/qwen-eval.md` | `.state/artifacts/qwen-eval/*.jsonl` |
 | Extracted knowledge | generated `.state/index/facts.md` | SQLite facts/artifacts |
 | Calendar candidates | generated `.state/index/calendar.md` | SQLite event candidates/events |
 | A particular file | artifact index entry | `.state/media/` or `.state/artifacts/` |
 
 Generated indexes are compact navigation surfaces. They may be rebuilt from
 SQLite and immutable raw records and must not become the canonical data store.
-

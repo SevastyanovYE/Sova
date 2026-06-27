@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -37,11 +38,13 @@ type Message struct {
 	MessageID       int    `json:"message_id"`
 	MessageThreadID int    `json:"message_thread_id"`
 	Chat            Chat   `json:"chat"`
+	From            *User  `json:"from,omitempty"`
 	Text            string `json:"text"`
 }
 
 type CallbackQuery struct {
 	ID      string   `json:"id"`
+	From    User     `json:"from"`
 	Message *Message `json:"message"`
 	Data    string   `json:"data"`
 }
@@ -69,11 +72,28 @@ type SendMessageRequest struct {
 	ReplyMarkup     *InlineKeyboardMarkup
 }
 
+type EditMessageTextRequest struct {
+	ChatID      int64
+	MessageID   int
+	Text        string
+	ParseMode   string
+	ReplyMarkup *InlineKeyboardMarkup
+}
+
 func New(token string) *Client {
 	return &Client{
 		token:      strings.TrimSpace(token),
-		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
+		httpClient: &http.Client{Timeout: defaultHTTPTimeout, Transport: telegramTransport()},
 	}
+}
+
+func telegramTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	transport.DialContext = func(ctx context.Context, _ string, address string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp4", address)
+	}
+	return transport
 }
 
 func (c *Client) GetMe(ctx context.Context) (User, error) {
@@ -92,6 +112,11 @@ func (c *Client) GetMe(ctx context.Context) (User, error) {
 }
 
 func (c *Client) SendMessage(ctx context.Context, request SendMessageRequest) error {
+	_, err := c.SendMessageResult(ctx, request)
+	return err
+}
+
+func (c *Client) SendMessageResult(ctx context.Context, request SendMessageRequest) (Message, error) {
 	payload := map[string]any{
 		"chat_id":           request.ChatID,
 		"message_thread_id": request.MessageThreadID,
@@ -104,14 +129,40 @@ func (c *Client) SendMessage(ctx context.Context, request SendMessageRequest) er
 		payload["reply_markup"] = request.ReplyMarkup
 	}
 	var response struct {
+		OK          bool    `json:"ok"`
+		Result      Message `json:"result"`
+		Description string  `json:"description"`
+	}
+	if err := c.call(ctx, "sendMessage", payload, &response); err != nil {
+		return Message{}, err
+	}
+	if !response.OK {
+		return Message{}, fmt.Errorf("Bot API sendMessage failed: %s", response.Description)
+	}
+	return response.Result, nil
+}
+
+func (c *Client) EditMessageText(ctx context.Context, request EditMessageTextRequest) error {
+	payload := map[string]any{
+		"chat_id":    request.ChatID,
+		"message_id": request.MessageID,
+		"text":       request.Text,
+	}
+	if strings.TrimSpace(request.ParseMode) != "" {
+		payload["parse_mode"] = request.ParseMode
+	}
+	if request.ReplyMarkup != nil {
+		payload["reply_markup"] = request.ReplyMarkup
+	}
+	var response struct {
 		OK          bool   `json:"ok"`
 		Description string `json:"description"`
 	}
-	if err := c.call(ctx, "sendMessage", payload, &response); err != nil {
+	if err := c.call(ctx, "editMessageText", payload, &response); err != nil {
 		return err
 	}
 	if !response.OK {
-		return fmt.Errorf("Bot API sendMessage failed: %s", response.Description)
+		return fmt.Errorf("Bot API editMessageText failed: %s", response.Description)
 	}
 	return nil
 }

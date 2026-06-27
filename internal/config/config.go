@@ -46,6 +46,7 @@ type Config struct {
 	NestTopics           TopicIDs
 	OllamaURL            string
 	OllamaModel          string
+	CodexPath            string
 	GoogleCredentials    string
 	GoogleToken          string
 	GoogleCalendarID     string
@@ -103,6 +104,7 @@ func Load() (Config, error) {
 		},
 		OllamaURL:         valueOrDefault("SOVA_OLLAMA_URL", defaultOllamaURL),
 		OllamaModel:       valueOrDefault("SOVA_OLLAMA_MODEL", defaultOllamaModel),
+		CodexPath:         strings.TrimSpace(os.Getenv("SOVA_CODEX_PATH")),
 		GoogleCredentials: valueOrDefault("SOVA_GOOGLE_CREDENTIALS_PATH", defaultGoogleCredsPath),
 		GoogleToken:       valueOrDefault("SOVA_GOOGLE_TOKEN_PATH", defaultGoogleTokenPath),
 		GoogleCalendarID:  strings.TrimSpace(os.Getenv("SOVA_GOOGLE_CALENDAR_ID")),

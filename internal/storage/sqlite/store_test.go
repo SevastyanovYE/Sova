@@ -52,6 +52,37 @@ func TestRejectsConcurrentRun(t *testing.T) {
 	}
 }
 
+func TestRecoverFailedOverview(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Date(2026, 6, 18, 8, 0, 0, 0, time.UTC)
+	run, err := store.TryStartOverview(ctx, "manual", now, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishOverview(ctx, run.ID, "failed", "codex failed", "codex digest: missing", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecoverFailedOverview(ctx, run.ID, "recovered", now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	recovered, ok, err := store.RunByID(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || recovered.Status != "success" || recovered.Summary != "recovered" || recovered.Error != "" {
+		t.Fatalf("recovered run = %+v, ok=%t", recovered, ok)
+	}
+	if err := store.RecoverFailedOverview(ctx, run.ID, "again", now.Add(3*time.Minute)); err == nil {
+		t.Fatal("expected a recovered run to reject a second recovery")
+	}
+}
+
 func TestTelegramMessagesAreIdempotentCursorAndRecent(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
 	if err != nil {
@@ -159,6 +190,66 @@ func TestTelegramMessagesAreIdempotentCursorAndRecent(t *testing.T) {
 	}
 }
 
+func TestTelegramMessagesCreatedBetween(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	source, err := store.UpsertTelegramSource(ctx, TelegramSource{
+		Ref: "telegram:channel:100", PeerKind: "channel", ChatID: 100, Title: "Study",
+	}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Add(-time.Second)
+	if _, _, err := store.InsertTelegramMessages(ctx, []TelegramMessage{{
+		SourceID: source.ID, ChatID: 100, MessageID: 90, Date: time.Now().UTC(),
+		Kind: "message", Text: "exam", SourceLink: "https://t.me/c/100/90",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	end := time.Now().UTC().Add(time.Second)
+	messages, err := store.TelegramMessagesCreatedBetween(ctx, start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].MessageID != 90 || messages[0].SourceTitle != "Study" {
+		t.Fatalf("messages = %+v", messages)
+	}
+}
+
+func TestSampleTelegramTextMessagesSkipsServiceAndEmpty(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	source, err := store.UpsertTelegramSource(ctx, TelegramSource{
+		Ref: "telegram:channel:100", PeerKind: "channel", ChatID: 100, Title: "Study",
+	}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 18, 8, 0, 0, 0, time.UTC)
+	if _, _, err := store.InsertTelegramMessages(ctx, []TelegramMessage{
+		{SourceID: source.ID, ChatID: 100, MessageID: 1, Date: now, Kind: "message", Text: "exam"},
+		{SourceID: source.ID, ChatID: 100, MessageID: 2, Date: now, Kind: "message", Text: ""},
+		{SourceID: source.ID, ChatID: 100, MessageID: 3, Date: now, Kind: "service", Text: "joined"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.SampleTelegramTextMessages(ctx, 10, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].MessageID != 1 {
+		t.Fatalf("messages = %+v", messages)
+	}
+}
+
 func TestInsertMessageDecisions(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
 	if err != nil {
@@ -208,6 +299,12 @@ func TestInsertMessageDecisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.InsertMessageDecisions(ctx, []MessageDecision{{
+		RunID: run.ID, ChatID: 100, MessageID: 42, Keep: true, Importance: 3,
+		Reason: "экзамен", Tags: []string{"exam", "urgent"}, HasEvent: true, Model: "qwen3:14b",
+	}}, now); err != nil {
+		t.Fatalf("idempotent decision insert: %v", err)
+	}
 
 	var keep, importance, hasEvent int
 	var reason, tags, model string
@@ -225,6 +322,60 @@ WHERE run_id = ? AND chat_id = ? AND message_id = ?`, run.ID, 100, 42).
 	if keep != 1 || importance != 3 || reason != "экзамен" || tags != `["exam","urgent"]` || hasEvent != 1 || model != "qwen3:14b" {
 		t.Fatalf("stored decision = keep:%d importance:%d reason:%q tags:%q event:%d model:%q",
 			keep, importance, reason, tags, hasEvent, model)
+	}
+}
+
+func TestInsertModelCallAndRecent(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Date(2026, 6, 18, 8, 0, 0, 0, time.UTC)
+	run, err := store.TryStartOverview(ctx, "manual", now, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertModelCall(ctx, ModelCall{
+		RunID:          run.ID,
+		Stage:          "qwen_classify",
+		BatchIndex:     1,
+		InputMessages:  24,
+		InputChars:     1800,
+		DurationMillis: 1200,
+		Success:        true,
+		Model:          "qwen3:14b",
+	}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertModelCall(ctx, ModelCall{
+		RunID:          run.ID,
+		Stage:          "qwen_classify",
+		BatchIndex:     2,
+		InputMessages:  24,
+		InputChars:     1700,
+		DurationMillis: 75000,
+		Success:        false,
+		Fallbacks:      24,
+		Error:          "deadline exceeded",
+		Model:          "qwen3:14b",
+	}, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := store.RecentModelCalls(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	if calls[0].BatchIndex != 2 || calls[0].Success || calls[0].Fallbacks != 24 {
+		t.Fatalf("latest call = %+v", calls[0])
+	}
+	if calls[1].BatchIndex != 1 || !calls[1].Success {
+		t.Fatalf("older call = %+v", calls[1])
 	}
 }
 
@@ -291,6 +442,17 @@ func TestCalendarCandidatesLifecycle(t *testing.T) {
 	if len(again) != 0 {
 		t.Fatalf("duplicate candidate inserted again: %+v", again)
 	}
+	shiftedStart := start.Add(24 * time.Hour)
+	if err := store.UpdateCalendarCandidateTime(ctx, inserted[0].ID, shiftedStart, shiftedStart.Add(2*time.Hour), now.Add(30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	shifted, err := store.CalendarCandidateByID(ctx, inserted[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shifted.StartAt.Equal(shiftedStart) || shifted.EndAt.Sub(shifted.StartAt) != 2*time.Hour {
+		t.Fatalf("candidate after time update = %+v", shifted)
+	}
 
 	if err := store.UpdateCalendarCandidateStatus(ctx, inserted[0].ID, "created", "google-event-1", "", now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
@@ -301,6 +463,9 @@ func TestCalendarCandidatesLifecycle(t *testing.T) {
 	}
 	if candidate.Status != "created" || candidate.CalendarEventID != "google-event-1" {
 		t.Fatalf("candidate after update = %+v", candidate)
+	}
+	if err := store.UpdateCalendarCandidateTime(ctx, inserted[0].ID, start.Add(24*time.Hour), start.Add(25*time.Hour), now.Add(2*time.Minute)); err == nil {
+		t.Fatal("expected created candidate time update to be rejected")
 	}
 	recent, err := store.RecentCalendarCandidates(ctx, 10)
 	if err != nil {

@@ -1,6 +1,9 @@
 package gcalendar
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -31,5 +34,31 @@ func TestGoogleEventPayload(t *testing.T) {
 		if overrides[i]["minutes"] != minutes {
 			t.Fatalf("reminder %d = %#v", i, overrides[i])
 		}
+	}
+}
+
+func TestOAuthCallbackHandlerValidatesStateAndReturnsCode(t *testing.T) {
+	callbacks := make(chan oauthCallback, 1)
+	handler := oauthCallbackHandler("expected", callbacks)
+
+	bad := httptest.NewRecorder()
+	handler.ServeHTTP(bad, httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=wrong&code=bad", nil))
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("bad state status = %d", bad.Code)
+	}
+	select {
+	case callback := <-callbacks:
+		t.Fatalf("bad state produced callback: %+v", callback)
+	default:
+	}
+
+	good := httptest.NewRecorder()
+	handler.ServeHTTP(good, httptest.NewRequest(http.MethodGet, "/oauth2/callback?state=expected&code=auth-code", nil))
+	if good.Code != http.StatusOK || !strings.Contains(good.Body.String(), "authorization complete") {
+		t.Fatalf("good response = %d %q", good.Code, good.Body.String())
+	}
+	callback := <-callbacks
+	if callback.err != nil || callback.code != "auth-code" {
+		t.Fatalf("callback = %+v", callback)
 	}
 }

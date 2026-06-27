@@ -76,6 +76,21 @@ type MessageDecision struct {
 	Model      string
 }
 
+type ModelCall struct {
+	ID             int64
+	RunID          int64
+	Stage          string
+	BatchIndex     int
+	InputMessages  int
+	InputChars     int
+	DurationMillis int64
+	Success        bool
+	Fallbacks      int
+	Error          string
+	Model          string
+	CreatedAt      time.Time
+}
+
 type CalendarCandidate struct {
 	ID              int64
 	RunID           int64
@@ -188,6 +203,24 @@ CREATE TABLE IF NOT EXISTS message_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_message_decisions_run
     ON message_decisions(run_id, importance DESC, keep DESC);
+CREATE TABLE IF NOT EXISTS model_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES overview_runs(id),
+    stage TEXT NOT NULL,
+    batch_index INTEGER NOT NULL,
+    input_messages INTEGER NOT NULL,
+    input_chars INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    success INTEGER NOT NULL CHECK (success IN (0, 1)),
+    fallbacks INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_model_calls_created
+    ON model_calls(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_model_calls_run
+    ON model_calls(run_id, stage, batch_index);
 CREATE TABLE IF NOT EXISTS calendar_candidates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id INTEGER NOT NULL REFERENCES overview_runs(id),
@@ -320,6 +353,40 @@ LIMIT 1`).Scan(&run.ID, &run.Trigger, &run.Status, &startedRaw, &finishedRaw, &r
 		run.FinishedAt = &finished
 	}
 	return run, true, nil
+}
+
+func (s *Store) RunByID(ctx context.Context, id int64) (Run, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, trigger, status, started_at, finished_at, summary, error
+FROM overview_runs
+WHERE id = ?`, id)
+	run, err := scanRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, false, nil
+	}
+	if err != nil {
+		return Run{}, false, err
+	}
+	return run, true, nil
+}
+
+func (s *Store) RecoverFailedOverview(ctx context.Context, id int64, summary string, now time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE overview_runs
+SET status = 'success', finished_at = ?, summary = ?, error = ''
+WHERE id = ? AND status = 'failed'`,
+		now.UTC().Format(time.RFC3339Nano), summary, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("failed overview %d not found", id)
+	}
+	return nil
 }
 
 func (s *Store) RecentRuns(ctx context.Context, limit int) ([]Run, error) {
@@ -498,6 +565,83 @@ LIMIT ?`, limit)
 	return messages, nil
 }
 
+func (s *Store) TelegramMessagesCreatedBetween(ctx context.Context, start, end time.Time) ([]TelegramRecentMessage, error) {
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return nil, fmt.Errorf("valid Telegram message creation window is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.text, m.media_type, m.source_link
+FROM telegram_messages m
+JOIN telegram_sources s ON s.id = m.source_id
+WHERE m.created_at >= ? AND m.created_at <= ?
+ORDER BY m.date, m.chat_id, m.message_id`,
+		start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []TelegramRecentMessage
+	for rows.Next() {
+		var message TelegramRecentMessage
+		var dateRaw string
+		if err := rows.Scan(
+			&message.SourceRef, &message.SourceTitle, &message.Username, &message.ChatID,
+			&message.MessageID, &dateRaw, &message.Kind, &message.Text, &message.MediaType,
+			&message.SourceLink,
+		); err != nil {
+			return nil, err
+		}
+		message.Date, err = time.Parse(time.RFC3339Nano, dateRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse telegram message date: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+func (s *Store) SampleTelegramTextMessages(ctx context.Context, limit int, seed int64) ([]TelegramRecentMessage, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.text, m.media_type, m.source_link
+FROM telegram_messages m
+JOIN telegram_sources s ON s.id = m.source_id
+WHERE TRIM(m.text) != '' AND m.kind != 'service'
+ORDER BY ABS(((m.chat_id * 1103515245) + (m.message_id * 12345) + ?) % 2147483647),
+         m.date DESC, m.chat_id, m.message_id
+LIMIT ?`, seed, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []TelegramRecentMessage
+	for rows.Next() {
+		var message TelegramRecentMessage
+		var dateRaw string
+		if err := rows.Scan(
+			&message.SourceRef, &message.SourceTitle, &message.Username, &message.ChatID,
+			&message.MessageID, &dateRaw, &message.Kind, &message.Text, &message.MediaType,
+			&message.SourceLink,
+		); err != nil {
+			return nil, err
+		}
+		message.Date, err = time.Parse(time.RFC3339Nano, dateRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse telegram message date: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
 func (s *Store) InsertMessageDecisions(ctx context.Context, decisions []MessageDecision, now time.Time) error {
 	if len(decisions) == 0 {
 		return nil
@@ -519,7 +663,7 @@ func (s *Store) InsertMessageDecisions(ctx context.Context, decisions []MessageD
 			return fmt.Errorf("marshal decision tags: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO message_decisions(
+INSERT OR IGNORE INTO message_decisions(
     run_id, chat_id, message_id, keep, importance, reason, tags_json, has_event, model, created_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			decision.RunID, decision.ChatID, decision.MessageID, boolInt(decision.Keep),
@@ -529,6 +673,70 @@ INSERT INTO message_decisions(
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *Store) InsertModelCall(ctx context.Context, call ModelCall, now time.Time) error {
+	if call.RunID == 0 {
+		return fmt.Errorf("model call run id is required")
+	}
+	call.Stage = strings.TrimSpace(call.Stage)
+	if call.Stage == "" {
+		return fmt.Errorf("model call stage is required")
+	}
+	if call.BatchIndex <= 0 {
+		return fmt.Errorf("model call batch index must be positive")
+	}
+	if call.InputMessages < 0 || call.InputChars < 0 || call.DurationMillis < 0 || call.Fallbacks < 0 {
+		return fmt.Errorf("model call metrics cannot be negative")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO model_calls(
+    run_id, stage, batch_index, input_messages, input_chars, duration_ms,
+    success, fallbacks, error, model, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		call.RunID, call.Stage, call.BatchIndex, call.InputMessages, call.InputChars,
+		call.DurationMillis, boolInt(call.Success), call.Fallbacks, call.Error, call.Model,
+		now.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) RecentModelCalls(ctx context.Context, limit int) ([]ModelCall, error) {
+	if limit <= 0 {
+		limit = 40
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, run_id, stage, batch_index, input_messages, input_chars, duration_ms,
+       success, fallbacks, error, model, created_at
+FROM model_calls
+ORDER BY created_at DESC, id DESC
+LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var calls []ModelCall
+	for rows.Next() {
+		var call ModelCall
+		var success int
+		var createdRaw string
+		if err := rows.Scan(
+			&call.ID, &call.RunID, &call.Stage, &call.BatchIndex, &call.InputMessages,
+			&call.InputChars, &call.DurationMillis, &success, &call.Fallbacks,
+			&call.Error, &call.Model, &createdRaw,
+		); err != nil {
+			return nil, err
+		}
+		call.Success = success == 1
+		call.CreatedAt, err = time.Parse(time.RFC3339Nano, createdRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse model call time: %w", err)
+		}
+		calls = append(calls, call)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return calls, nil
 }
 
 func (s *Store) InsertCalendarCandidates(ctx context.Context, candidates []CalendarCandidate, now time.Time) ([]CalendarCandidate, error) {
@@ -631,6 +839,32 @@ LIMIT ?`, limit)
 	return candidates, nil
 }
 
+func (s *Store) PendingCalendarCandidatesByRun(ctx context.Context, runID int64) ([]CalendarCandidate, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, run_id, chat_id, message_id, source_link, title, start_at, end_at,
+       timezone, location, description, confidence, status, calendar_event_id,
+       error, created_at, updated_at
+FROM calendar_candidates
+WHERE run_id = ? AND status = 'pending'
+ORDER BY id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var candidates []CalendarCandidate
+	for rows.Next() {
+		candidate, err := scanCalendarCandidate(rows)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
 func (s *Store) UpdateCalendarCandidateStatus(ctx context.Context, id int64, status, eventID, runErr string, now time.Time) error {
 	if status != "approved" && status != "rejected" && status != "created" && status != "failed" {
 		return fmt.Errorf("invalid calendar candidate status %q", status)
@@ -649,6 +883,34 @@ WHERE id = ?`,
 	}
 	if affected != 1 {
 		return fmt.Errorf("calendar candidate %d not found", id)
+	}
+	return nil
+}
+
+func (s *Store) UpdateCalendarCandidateTime(ctx context.Context, id int64, startAt, endAt time.Time, now time.Time) error {
+	if id <= 0 {
+		return fmt.Errorf("calendar candidate id is required")
+	}
+	if startAt.IsZero() || endAt.IsZero() || !endAt.After(startAt) {
+		return fmt.Errorf("calendar candidate requires a valid start/end")
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE calendar_candidates
+SET start_at = ?, end_at = ?, updated_at = ?
+WHERE id = ? AND status NOT IN ('created', 'rejected')`,
+		startAt.UTC().Format(time.RFC3339Nano),
+		endAt.UTC().Format(time.RFC3339Nano),
+		now.UTC().Format(time.RFC3339Nano),
+		id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("editable calendar candidate %d not found", id)
 	}
 	return nil
 }

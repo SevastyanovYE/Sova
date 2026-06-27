@@ -1,16 +1,20 @@
 package gcalendar
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -20,6 +24,8 @@ import (
 )
 
 const calendarEventsScope = "https://www.googleapis.com/auth/calendar.events"
+
+const oauthCallbackTimeout = 5 * time.Minute
 
 type Event struct {
 	Title       string
@@ -35,30 +41,66 @@ type CreatedEvent struct {
 	HTMLLink string
 }
 
-func Login(ctx context.Context, cfg config.Config, in io.Reader, out io.Writer) error {
+type oauthCallback struct {
+	code string
+	err  error
+}
+
+func Login(ctx context.Context, cfg config.Config, _ io.Reader, out io.Writer) error {
 	oauthConfig, err := loadOAuthConfig(cfg)
 	if err != nil {
 		return err
 	}
-	authURL := oauthConfig.AuthCodeURL("sova-local", oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
-	if _, err := fmt.Fprintln(out, "Open this URL and approve Google Calendar access:"); err != nil {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("start Google OAuth callback: %w", err)
+	}
+	defer listener.Close()
+	oauthConfig.RedirectURL = "http://" + listener.Addr().String() + "/oauth2/callback"
+	state, err := randomOAuthState()
+	if err != nil {
+		return err
+	}
+	callbackCh := make(chan oauthCallback, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth2/callback", oauthCallbackHandler(state, callbackCh))
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- server.Serve(listener)
+	}()
+	defer server.Shutdown(context.Background())
+
+	authURL := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
+	if _, err := fmt.Fprintln(out, "If the Google app is in Testing, add this account under Google Auth Platform > Audience > Test users."); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(out, "Approve Google Calendar access in your browser:"); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintln(out, authURL); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprint(out, "Paste authorization code: "); err != nil {
-		return err
+	if err := openBrowser(authURL); err != nil {
+		_, _ = fmt.Fprintln(out, "Could not open the browser automatically; open the URL above.")
 	}
-	code, err := bufio.NewReader(in).ReadString('\n')
-	if err != nil && err != io.EOF {
-		return err
+	var callback oauthCallback
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(oauthCallbackTimeout):
+		return fmt.Errorf("Google OAuth callback timed out")
+	case serveErr := <-serveErrCh:
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			return fmt.Errorf("serve Google OAuth callback: %w", serveErr)
+		}
+		return fmt.Errorf("Google OAuth callback server stopped")
+	case callback = <-callbackCh:
 	}
-	code = strings.TrimSpace(code)
-	if code == "" {
-		return fmt.Errorf("authorization code is required")
+	if callback.err != nil {
+		return callback.err
 	}
-	token, err := oauthConfig.Exchange(ctx, code)
+	token, err := oauthConfig.Exchange(ctx, callback.code)
 	if err != nil {
 		return fmt.Errorf("exchange Google OAuth code: %w", err)
 	}
@@ -67,6 +109,55 @@ func Login(ctx context.Context, cfg config.Config, in io.Reader, out io.Writer) 
 	}
 	_, _ = fmt.Fprintln(out, "Google Calendar token saved.")
 	return nil
+}
+
+func oauthCallbackHandler(expectedState string, callbackCh chan<- oauthCallback) http.HandlerFunc {
+	return func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("state") != expectedState {
+			http.Error(w, "Invalid OAuth state. Return to Sova and try again.", http.StatusBadRequest)
+			return
+		}
+		result := oauthCallback{code: strings.TrimSpace(request.URL.Query().Get("code"))}
+		if oauthErr := strings.TrimSpace(request.URL.Query().Get("error")); oauthErr != "" {
+			result.err = fmt.Errorf("Google OAuth authorization failed: %s", oauthErr)
+		} else if result.code == "" {
+			result.err = fmt.Errorf("Google OAuth callback did not contain an authorization code")
+		}
+		select {
+		case callbackCh <- result:
+		default:
+		}
+		if result.err != nil {
+			http.Error(w, result.err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = fmt.Fprintln(w, "Google Calendar authorization complete. You can close this tab.")
+	}
+}
+
+func randomOAuthState() (string, error) {
+	data := make([]byte, 32)
+	if _, err := rand.Read(data); err != nil {
+		return "", fmt.Errorf("generate Google OAuth state: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+func openBrowser(target string) error {
+	var command string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		command, args = "open", []string{target}
+	case "linux":
+		command, args = "xdg-open", []string{target}
+	case "windows":
+		command, args = "rundll32", []string{"url.dll,FileProtocolHandler", target}
+	default:
+		return fmt.Errorf("unsupported browser launcher on %s", runtime.GOOS)
+	}
+	return exec.Command(command, args...).Start()
 }
 
 func CreateEvent(ctx context.Context, cfg config.Config, event Event) (CreatedEvent, error) {

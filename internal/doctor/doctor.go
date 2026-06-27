@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SevastyanovYE/Sova/internal/codexcli"
 	"github.com/SevastyanovYE/Sova/internal/config"
 )
 
@@ -24,7 +25,7 @@ func Run(ctx context.Context, cfg config.Config) []Check {
 		commandCheck("sqlite3", "sqlite3"),
 		commandCheck("ffmpeg", "ffmpeg"),
 		commandCheck("tesseract", "tesseract"),
-		commandCheck("codex", "codex"),
+		codexCheck(cfg.CodexPath),
 		commandCheck("ollama", "ollama"),
 		pathParentCheck("database", cfg.DatabasePath),
 		sessionPathCheck(cfg.TelegramSessionPath),
@@ -33,11 +34,20 @@ func Run(ctx context.Context, cfg config.Config) []Check {
 		configuredCheck("telegram_credentials", cfg.TelegramAppID != 0 && cfg.TelegramAppHash != "" && cfg.TelegramPhone != "", "set Telegram app ID, hash, and phone"),
 		configuredCheck("telegram_sources", len(cfg.TelegramAllowedChats) > 0, "set at least one allowlisted Telegram source"),
 		configuredCheck("nest", cfg.NestReady(), "set bot token, Nest chat ID, and all four topic IDs"),
-		configuredCheck("google_calendar", cfg.GoogleCalendarID != "" && fileExists(cfg.GoogleCredentials), "set calendar ID and OAuth Desktop credentials"),
+		configuredCheck("google_calendar_id", cfg.GoogleCalendarID != "", "set SOVA_GOOGLE_CALENDAR_ID"),
+		configuredCheck("google_oauth_credentials", fileExists(cfg.GoogleCredentials), "place OAuth Desktop client JSON at "+cfg.GoogleCredentials),
 		configuredCheck("google_calendar_token", fileExists(cfg.GoogleToken), "run `sova google-login` after setting OAuth credentials"),
 	)
 	checks = append(checks, ollamaCheck(ctx, cfg))
 	return checks
+}
+
+func codexCheck(configuredPath string) Check {
+	path, err := codexcli.Resolve(configuredPath)
+	if err != nil {
+		return Check{Name: "codex", Status: "missing", Message: err.Error()}
+	}
+	return Check{Name: "codex", Status: "ok", Message: path}
 }
 
 func commandCheck(name, command string) Check {

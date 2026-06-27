@@ -43,7 +43,7 @@ func LoadJSONL(path string) ([]MessageInput, error) {
 
 func ParseBatchSizes(value string) ([]int, error) {
 	if strings.TrimSpace(value) == "" {
-		return []int{4, 8, 12, 16, 24}, nil
+		return []int{8, 16, 24, 32}, nil
 	}
 	parts := strings.Split(value, ",")
 	out := make([]int, 0, len(parts))
@@ -77,13 +77,19 @@ func RunCalibration(ctx context.Context, client *Client, inputs []MessageInput, 
 	for _, size := range batchSizes {
 		batch := takeBatch(inputs, size, maxChars)
 		result := CalibrationResult{
+			Model:         client.Model(),
 			BatchSize:     size,
 			InputMessages: len(batch),
 			InputChars:    ApproxChars(batch),
 		}
+		if prompt, err := BuildPrompt(batch); err == nil {
+			result.PromptChars = len(prompt)
+		}
 		started := time.Now()
-		response, _, err := client.ClassifyBatch(ctx, batch)
+		response, _, metrics, err := client.ClassifyBatchWithMetrics(ctx, batch)
 		result.DurationMillis = time.Since(started).Milliseconds()
+		result.EvalTokens = metrics.EvalCount
+		result.PromptTokens = metrics.PromptEvalCount
 		if err != nil {
 			result.Error = err.Error()
 		} else {

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="330" viewBox="0 0 1200 330" role="img" aria-labelledby="title desc">
+  <title id="title">Sova Nest topic routing</title>
+  <desc id="desc">Automated digests go to Digest, approvals go to Calendar, health goes to Status, and Chat remains user-controlled.</desc>
+  <defs>
+    <style>
+      .bg { fill: #fbfbf8; }
+      .headline { fill: #20282c; font: 700 34px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .sub { fill: #5a666a; font: 500 17px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .topic { stroke: #253137; stroke-width: 2; rx: 16; }
+      .topic-title { fill: #172022; font: 700 24px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .topic-text { fill: #344348; font: 500 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .guard { fill: #7b2d26; font: 700 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .line { stroke: #28343a; stroke-width: 3; fill: none; stroke-linecap: round; }
+    </style>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1200" height="330" rx="28" />
+  <text class="headline" x="56" y="64">Sova Nest: маршрутизация сообщений</text>
+  <text class="sub" x="56" y="93">Автоматический вывод не попадает в Chat topic. Chat остается местом команд и ручного общения.</text>
+
+  <rect class="topic" x="70" y="140" width="230" height="116" fill="#eef7ff" />
+  <text class="topic-title" x="110" y="181">Chat</text>
+  <text class="topic-text" x="110" y="211">/run и кнопка</text>
+  <text class="guard" x="110" y="235">без авто-дайджестов</text>
+
+  <rect class="topic" x="354" y="140" width="230" height="116" fill="#e9f7df" />
+  <text class="topic-title" x="394" y="181">Digest</text>
+  <text class="topic-text" x="394" y="211">готовые обзоры</text>
+  <text class="topic-text" x="394" y="235">источники-ссылки</text>
+
+  <rect class="topic" x="638" y="140" width="230" height="116" fill="#fff1c8" />
+  <text class="topic-title" x="678" y="181">Calendar</text>
+  <text class="topic-text" x="678" y="211">approve/reject</text>
+  <text class="topic-text" x="678" y="235">создание событий</text>
+
+  <rect class="topic" x="922" y="140" width="230" height="116" fill="#ffe5e2" />
+  <text class="topic-title" x="962" y="181">Status</text>
+  <text class="topic-text" x="962" y="211">ошибки и health</text>
+  <text class="topic-text" x="962" y="235">cooldown/fallback</text>
+
+  <path class="line" d="M300 198 H354" />
+  <path class="line" d="M584 198 H638" />
+  <path class="line" d="M868 198 H922" />
+</svg>

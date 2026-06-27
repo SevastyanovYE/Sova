@@ -14,14 +14,39 @@
 - `sova run --trigger manual` now calls Telegram sync and completes successfully
   when there are no new messages.
 - Qwen classification, compact run bundle generation, Codex digest generation,
-  and Nest Digest publication are wired for the next run that has new text
-  messages.
-- `sova serve` uses Bot API long polling for `/run`, a "Создать обзор" button,
-  and the local daily scheduler.
+  and Nest Digest publication are wired. Qwen runs with compact output,
+  `think:false`, bounded batch/stage budgets, per-batch decision persistence,
+  conservative timeout/error fallback, and compact performance metrics. The
+  production classification batch target is 16 messages after `qwen3:14b`
+  timed out at larger batch sizes.
+- `sova serve` uses Bot API long polling for `/run`, an existing "Создать
+  обзор" button, Status topic progress updates, Calendar date-edit callbacks,
+  and the local daily scheduler. Control/button messages are created explicitly
+  through `nest-seed-topics`, `/button`, `/start`, or `/help`; `serve` no longer
+  sends a new Chat button on every startup. Short service messages in
+  Chat/Calendar/Status use Telegram HTML formatting; final digests stay plain
+  text. Polling uses IPv4 and bounded exponential backoff for temporary Telegram
+  network failures.
+- Codex CLI discovery supports both `PATH` and the standard macOS Codex app
+  location. A Codex failure degrades to a fallback digest instead of losing
+  synced messages; `sova retry-run --id` can recover older Codex/Qwen failures.
+- Nest digests use Telegram-friendly plain text with compact headings, bullets,
+  direct provenance URLs, and at most two relevant emoji.
+- Overview run 5 was recovered from 42 stored messages and published
+  successfully after its original empty Qwen response.
 - Compact indexes exist for Telegram recent content, overview runs, and calendar
-  setup state under `.state/index/`.
+  setup state under `.state/index/`. Qwen model-call metrics are indexed at
+  `.state/index/qwen-performance.md`; model comparison summaries are written to
+  `.state/index/qwen-benchmark.md` and labeled eval summaries to
+  `.state/index/qwen-eval.md`.
+- Qwen runtime remains `qwen3:14b` for MVP close. A labeled 100-message eval on
+  2026-06-27 showed `qwen3:8b` is the best next candidate after prompt/event
+  threshold tuning; `qwen3:4b`, `gemma3:4b`, and `llama3.2:3b` are not suitable
+  for this MVP pipeline.
 - Google Calendar approval flow is implemented: event-like messages become
-  Calendar topic candidates with approve/reject buttons, and approve creates a
-  real Google Calendar event with 7d/3d/1d/1h reminders after `sova google-login`.
-- Local doctor still reports Calendar setup as input-dependent until OAuth
-  credentials, target calendar ID, and token are visible in the runtime env.
+  Calendar topic candidates with approve/reject/date-edit buttons, and approve
+  creates a real Google Calendar event with 7d/3d/1d/1h reminders after
+  browser-based `sova google-login` with a temporary localhost OAuth callback.
+- The target Google Calendar ID, OAuth Desktop credentials, and local Google
+  OAuth token are configured per user report after successful
+  `sova google-login`.

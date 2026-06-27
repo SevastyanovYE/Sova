@@ -1,6 +1,7 @@
 package overview
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,14 @@ import (
 	"github.com/SevastyanovYE/Sova/internal/qwen"
 	"github.com/SevastyanovYE/Sova/internal/telegrammt"
 )
+
+type emptyClassifier struct{}
+
+func (emptyClassifier) ClassifyBatch(_ context.Context, inputs []qwen.MessageInput) (qwen.BatchResult, string, error) {
+	return qwen.BatchResult{}, `{"decisions":[]}`, &qwen.IncompleteResultError{
+		Kind: "decisions", Expected: len(inputs),
+	}
+}
 
 func TestQwenInputsSkipNonTextAndBoundMessages(t *testing.T) {
 	longText := strings.Repeat("a", qwenMessageMaxText+100)
@@ -80,6 +89,66 @@ func TestQwenBatchesStaySmall(t *testing.T) {
 		if len(batch) > qwenBatchSize {
 			t.Fatalf("batch too large: %d", len(batch))
 		}
+	}
+}
+
+func TestClassifyBatchResilientFallsBackForIncompleteBatch(t *testing.T) {
+	decisions, fallbacks, errText, err := classifyBatchResilient(
+		context.Background(), emptyClassifier{}, []qwen.MessageInput{{ID: "a"}, {ID: "b"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errText == "" {
+		t.Fatal("expected fallback error text")
+	}
+	if len(decisions) != 2 || fallbacks != 2 || !decisions[0].Keep || decisions[0].Importance != 1 {
+		t.Fatalf("decisions=%+v fallbacks=%d", decisions, fallbacks)
+	}
+}
+
+func TestFallbackDecisionsKeepEventHints(t *testing.T) {
+	decisions := fallbackDecisions([]qwen.MessageInput{{
+		ID:   "telegram:100:42",
+		Text: "Экзамен завтра в 10:00",
+	}}, "fallback")
+	if len(decisions) != 1 || !decisions[0].Keep || !decisions[0].HasEvent {
+		t.Fatalf("decisions = %+v", decisions)
+	}
+	if !containsString(decisions[0].Tags, "event-hint") {
+		t.Fatalf("tags = %+v", decisions[0].Tags)
+	}
+}
+
+func TestCompactPromptTextKeepsHeadAndTail(t *testing.T) {
+	text := "начало " + strings.Repeat("середина ", 100) + "дедлайн 18.06"
+	got := compactPromptText(text, 60)
+	if !strings.Contains(got, "начало") || !strings.Contains(got, "18.06") || !strings.Contains(got, " ... ") {
+		t.Fatalf("compact text = %q", got)
+	}
+}
+
+func TestCodexPromptUsesTelegramPlainTextFormat(t *testing.T) {
+	prompt := buildCodexPrompt("bundle")
+	for _, want := range []string{"🦉 ОБЗОР SOVA", "📅 КАЛЕНДАРЬ", "Источник: URL", "Do not use Markdown"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q", want)
+		}
+	}
+}
+
+func TestFallbackDigestUsesTelegramPlainTextFormat(t *testing.T) {
+	digest := fallbackDigest(7, []classifiedMessage{{
+		Message:  telegrammt.SyncedMessage{Text: "Экзамен завтра", SourceLink: "https://t.me/c/100/1"},
+		Decision: qwen.MessageDecision{Keep: true, Importance: 3},
+	}})
+	for _, want := range []string{"🦉 ОБЗОР SOVA", "ГЛАВНОЕ", "• Экзамен завтра", "Источник: https://t.me/c/100/1"} {
+		if !strings.Contains(digest, want) {
+			t.Fatalf("digest missing %q:\n%s", want, digest)
+		}
+	}
+	if strings.Contains(digest, "#") || strings.Contains(digest, "- ") {
+		t.Fatalf("digest contains Markdown markers:\n%s", digest)
 	}
 }
 
@@ -204,4 +273,13 @@ func TestCalendarCandidateFromExtractionDefaultsEnd(t *testing.T) {
 
 func testConfig(timezone string) config.Config {
 	return config.Config{Timezone: timezone}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

@@ -25,7 +25,14 @@ func Rebuild(ctx context.Context, cfg config.Config, store *sqlitestore.Store, g
 	if err != nil {
 		return err
 	}
-	return WriteCalendarIndex(cfg, candidates, generatedAt)
+	if err := WriteCalendarIndex(cfg, candidates, generatedAt); err != nil {
+		return err
+	}
+	calls, err := store.RecentModelCalls(ctx, 40)
+	if err != nil {
+		return err
+	}
+	return WriteQwenPerformanceIndex(cfg, calls, generatedAt)
 }
 
 func WriteRunsIndex(cfg config.Config, runs []sqlitestore.Run, generatedAt time.Time) error {
@@ -122,6 +129,58 @@ func WriteCalendarIndex(cfg config.Config, candidates []sqlitestore.CalendarCand
 	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
 
+func WriteQwenPerformanceIndex(cfg config.Config, calls []sqlitestore.ModelCall, generatedAt time.Time) error {
+	path := QwenPerformanceIndexPath(cfg)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	location := mustLocation(cfg.Timezone)
+	var b strings.Builder
+	b.WriteString("# Qwen Performance\n\n")
+	b.WriteString("Generated: ")
+	b.WriteString(generatedAt.In(location).Format(time.RFC3339))
+	b.WriteString("\n\n")
+	b.WriteString("This index stores only compact model-call metrics, not Telegram text or prompts.\n\n")
+	if len(calls) == 0 {
+		b.WriteString("No Qwen calls recorded yet.\n")
+		return os.WriteFile(path, []byte(b.String()), 0o600)
+	}
+	for _, call := range calls {
+		b.WriteString("- run=`")
+		b.WriteString(strconv.FormatInt(call.RunID, 10))
+		b.WriteString("` stage=`")
+		b.WriteString(call.Stage)
+		b.WriteString("` batch=")
+		b.WriteString(strconv.Itoa(call.BatchIndex))
+		b.WriteString(" messages=")
+		b.WriteString(strconv.Itoa(call.InputMessages))
+		b.WriteString(" chars=")
+		b.WriteString(strconv.Itoa(call.InputChars))
+		b.WriteString(" duration_ms=")
+		b.WriteString(strconv.FormatInt(call.DurationMillis, 10))
+		b.WriteString(" success=")
+		b.WriteString(strconv.FormatBool(call.Success))
+		if call.Fallbacks > 0 {
+			b.WriteString(" fallbacks=")
+			b.WriteString(strconv.Itoa(call.Fallbacks))
+		}
+		if call.Model != "" {
+			b.WriteString(" model=`")
+			b.WriteString(call.Model)
+			b.WriteString("`")
+		}
+		if call.Error != "" {
+			b.WriteString(" error=\"")
+			b.WriteString(compact(call.Error, 180))
+			b.WriteString("\"")
+		}
+		b.WriteString(" at=`")
+		b.WriteString(call.CreatedAt.In(location).Format("2006-01-02 15:04:05 MST"))
+		b.WriteString("`\n")
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o600)
+}
+
 func compact(value string, limit int) string {
 	value = strings.Join(strings.Fields(value), " ")
 	value = strings.ReplaceAll(value, "\"", "'")
@@ -151,6 +210,11 @@ func CalendarIndexPath(cfg config.Config) string {
 	return filepath.Join(cfg.StateDir, "index", "calendar.md")
 }
 
+func QwenPerformanceIndexPath(cfg config.Config) string {
+	return filepath.Join(cfg.StateDir, "index", "qwen-performance.md")
+}
+
 func Summary(cfg config.Config) string {
-	return fmt.Sprintf("updated %s and %s", RunsIndexPath(cfg), CalendarIndexPath(cfg))
+	return fmt.Sprintf("updated %s, %s, and %s",
+		RunsIndexPath(cfg), CalendarIndexPath(cfg), QwenPerformanceIndexPath(cfg))
 }

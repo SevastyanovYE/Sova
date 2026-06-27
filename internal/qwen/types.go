@@ -1,5 +1,26 @@
 package qwen
 
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+type IncompleteResultError struct {
+	Kind     string
+	Returned int
+	Expected int
+}
+
+func (e *IncompleteResultError) Error() string {
+	return fmt.Sprintf("model returned %d %s for %d inputs", e.Returned, e.Kind, e.Expected)
+}
+
+func IsIncompleteResult(err error) bool {
+	var target *IncompleteResultError
+	return errors.As(err, &target)
+}
+
 type MessageInput struct {
 	ID              string `json:"id"`
 	SourceRef       string `json:"source_ref"`
@@ -22,11 +43,25 @@ type BatchResult struct {
 	Decisions []MessageDecision `json:"decisions"`
 }
 
+type ResponseMetrics struct {
+	Model              string
+	TotalDuration      time.Duration
+	LoadDuration       time.Duration
+	PromptEvalCount    int
+	PromptEvalDuration time.Duration
+	EvalCount          int
+	EvalDuration       time.Duration
+}
+
 type CalibrationResult struct {
+	Model          string `json:"model"`
 	BatchSize      int    `json:"batch_size"`
 	InputMessages  int    `json:"input_messages"`
 	InputChars     int    `json:"input_chars"`
+	PromptChars    int    `json:"prompt_chars"`
 	DurationMillis int64  `json:"duration_ms"`
+	EvalTokens     int    `json:"eval_tokens"`
+	PromptTokens   int    `json:"prompt_tokens"`
 	JSONValid      bool   `json:"json_valid"`
 	Kept           int    `json:"kept"`
 	Important      int    `json:"important"`
