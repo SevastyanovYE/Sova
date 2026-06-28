@@ -6,6 +6,7 @@ Read this file before opening runtime data.
 | --- | --- | --- |
 | Current project state | `memory/current_state.md` | Git history and SQLite runs |
 | Architecture decision | `memory/important_decisions.md` | Decision records |
+| Text MVP follow-ups | `docs/text_mvp_followups.md` | Git history and future issue tracker |
 | Recent Telegram content | generated `.state/index/telegram-recent.md` | `.state/raw/telegram/*.jsonl` |
 | Run status or failure | generated `.state/index/runs.md` | SQLite `overview_runs`, JSONL logs |
 | Qwen latency/fallbacks | generated `.state/index/qwen-performance.md` | SQLite `model_calls` |

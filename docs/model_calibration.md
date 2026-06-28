@@ -81,10 +81,10 @@ For a failed/slow run:
 go run ./cmd/sova qwen-calibrate --run-id RUN_ID --batch-sizes 8,16,24,32 --max-duration 10m
 ```
 
-To compare installed local models on the same real run:
+To compare retained local models on the same real run:
 
 ```bash
-go run ./cmd/sova qwen-benchmark --run-id RUN_ID --models qwen3:14b,qwen3:8b,qwen3:4b,gemma3:4b,llama3.2:3b --batch-sizes 8,16,24 --max-duration 30m
+go run ./cmd/sova qwen-benchmark --run-id RUN_ID --models qwen3:14b,qwen3:8b --batch-sizes 8,16,24 --max-duration 30m
 ```
 
 To compare model quality against a reviewed labeled set of Telegram message IDs:
@@ -130,7 +130,9 @@ Dataset:
   and noisy free chat.
 - Expected positives: 72 kept, 59 important, 41 calendar-event messages.
 
-Main all-model run, batch size 16:
+Historical all-model run, batch size 16. The smaller rejected models were
+removed locally after this eval and should only be re-pulled for a new explicit
+comparison:
 
 | Model | Valid batches | Errors | Timeouts | Duration | Important P/R | Event P/R | Pred events |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

@@ -50,3 +50,6 @@
 - The target Google Calendar ID, OAuth Desktop credentials, and local Google
   OAuth token are configured per user report after successful
   `sova google-login`.
+- The main README uses generated PNG diagrams under `docs/assets/readme/` and
+  Russian sentence-case headings. Follow-up conclusions for this text MVP branch
+  are captured in `docs/text_mvp_followups.md`.
