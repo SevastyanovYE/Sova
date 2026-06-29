@@ -42,7 +42,7 @@ func TestControlMessageRequestUsesChatTopicAndButton(t *testing.T) {
 	if button.Text != "Создать обзор" || button.CallbackData != createOverviewCallback {
 		t.Fatalf("button = %+v", button)
 	}
-	if !strings.Contains(request.Text, "<code>/run</code>") || !strings.Contains(request.Text, "cooldown") {
+	if !strings.Contains(request.Text, "<code>/run</code>") || !strings.Contains(request.Text, "служебном Status topic") {
 		t.Fatalf("control text = %q", request.Text)
 	}
 }
@@ -78,15 +78,21 @@ func TestNextDailyRun(t *testing.T) {
 	}
 }
 
-func TestIsChatTopicMessage(t *testing.T) {
+func TestTopicRoles(t *testing.T) {
 	cfg := config.Config{NestChatID: -1001, NestTopics: config.TopicIDs{Chat: 2, Digest: 4, Calendar: 6, Status: 8}}
-	if !isChatTopicMessage(cfg, nest.Message{Chat: nest.Chat{ID: -1001}, MessageThreadID: 2}) {
-		t.Fatal("expected Chat topic message")
+	if !isCommandTopicMessage(cfg, nest.Message{Chat: nest.Chat{ID: -1001}, MessageThreadID: 8}) {
+		t.Fatal("expected Status topic to accept text commands")
 	}
-	if isChatTopicMessage(cfg, nest.Message{Chat: nest.Chat{ID: -1001}, MessageThreadID: 4}) {
-		t.Fatal("Digest topic must not be accepted as Chat commands")
+	if isCommandTopicMessage(cfg, nest.Message{Chat: nest.Chat{ID: -1001}, MessageThreadID: 2}) {
+		t.Fatal("Chat topic must not accept text commands")
 	}
-	if isChatTopicMessage(cfg, nest.Message{Chat: nest.Chat{ID: -1002}, MessageThreadID: 2}) {
+	if !isControlButtonTopicMessage(cfg, nest.Message{Chat: nest.Chat{ID: -1001}, MessageThreadID: 2}) {
+		t.Fatal("expected Chat topic to accept the pinned control button")
+	}
+	if isControlButtonTopicMessage(cfg, nest.Message{Chat: nest.Chat{ID: -1001}, MessageThreadID: 8}) {
+		t.Fatal("Status topic must not be treated as the control-button topic")
+	}
+	if isCommandTopicMessage(cfg, nest.Message{Chat: nest.Chat{ID: -1002}, MessageThreadID: 8}) {
 		t.Fatal("different chat must not be accepted")
 	}
 }

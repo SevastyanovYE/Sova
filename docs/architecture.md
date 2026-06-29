@@ -1,8 +1,9 @@
 # MVP Architecture
 
-`sova serve` is a lightweight local controller. It will keep Bot API long
-polling active, enqueue the daily overview, and accept a run command from the
-Nest `Chat` topic. One worker executes overview jobs serially.
+`sova serve` is a lightweight local controller. It keeps Bot API long polling
+active, enqueue the daily overview, accepts text commands from the Nest `Status`
+service topic, and accepts the pinned run button from the Nest `Chat` study
+topic. One worker executes overview jobs serially.
 
 ```text
 launchd

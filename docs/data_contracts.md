@@ -45,13 +45,14 @@ plain text so long messages can be split safely.
 
 - `Digest`: automated overview output.
 - `Calendar`: event candidates, approval/edit buttons, and calendar results.
-- `Status`: progress, health, failures, reauthentication, and run status.
-- `Chat`: user-owned free-form messages and command input. No automatic digest,
-  calendar, or status output is posted here. A manually pinnable control
-  message with the run button is allowed. Human-facing topic intro messages are
-  intentionally formatted for Telegram and may be pinned manually. `serve`
-  listens for callbacks from the pinned button but does not create a fresh
-  control message on each startup.
+- `Status`: service topic for text commands, progress, health, failures,
+  reauthentication, cooldown/fallback notices, and run status.
+- `Chat`: user-owned study/materials topic and manual conversation. No
+  automatic digest, calendar, or status output is posted here. A manually
+  pinnable control message with the run button is allowed. Human-facing topic
+  intro messages are intentionally formatted for Telegram and may be pinned
+  manually. `serve` listens for callbacks from the pinned button but does not
+  create a fresh control message on each startup.
 
 ## Telegram sync
 

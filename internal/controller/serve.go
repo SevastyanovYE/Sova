@@ -69,8 +69,8 @@ func Serve(ctx context.Context, cfg config.Config) error {
 	go overviewWorker(ctx, cfg, client, jobs, &busy)
 	go dailyScheduler(ctx, cfg, client, submit)
 
-	fmt.Printf("sova serve: polling Nest chat %d topic %d; daily run at %s %s\n",
-		cfg.NestChatID, cfg.NestTopics.Chat, cfg.DailyRunTime, cfg.Timezone)
+	fmt.Printf("sova serve: polling Nest chat %d command topic %d; daily run at %s %s\n",
+		cfg.NestChatID, cfg.NestTopics.Status, cfg.DailyRunTime, cfg.Timezone)
 
 	offset := 0
 	pollFailures := 0
@@ -139,7 +139,7 @@ func overviewWorker(ctx context.Context, cfg config.Config, client *nest.Client,
 				reply := chatRunReply(cfg, result, err)
 				_ = client.SendMessage(ctx, nest.SendMessageRequest{
 					ChatID:          cfg.NestChatID,
-					MessageThreadID: cfg.NestTopics.Chat,
+					MessageThreadID: cfg.NestTopics.Status,
 					Text:            reply,
 				})
 			}
@@ -173,7 +173,7 @@ func handleMessage(ctx context.Context, cfg config.Config, client *nest.Client, 
 		handleCalendarDateEditMessage(ctx, cfg, client, pendingEdits, message)
 		return
 	}
-	if !isChatTopicMessage(cfg, message) {
+	if !isCommandTopicMessage(cfg, message) {
 		return
 	}
 	command := commandName(message.Text)
@@ -182,7 +182,7 @@ func handleMessage(ctx context.Context, cfg config.Config, client *nest.Client, 
 		if submit(overviewJob{trigger: "nest_button", chatReply: true}) {
 			_ = client.SendMessage(ctx, nest.SendMessageRequest{
 				ChatID:          cfg.NestChatID,
-				MessageThreadID: cfg.NestTopics.Chat,
+				MessageThreadID: cfg.NestTopics.Status,
 				Text:            overviewStartedText(),
 				ParseMode:       "HTML",
 			})
@@ -190,7 +190,7 @@ func handleMessage(ctx context.Context, cfg config.Config, client *nest.Client, 
 		}
 		_ = client.SendMessage(ctx, nest.SendMessageRequest{
 			ChatID:          cfg.NestChatID,
-			MessageThreadID: cfg.NestTopics.Chat,
+			MessageThreadID: cfg.NestTopics.Status,
 			Text:            "<b>Обзор уже в работе</b>\n\nЯ не запускаю второй параллельно. Ход текущего обзора видно в <b>Status</b>.",
 			ParseMode:       "HTML",
 		})
@@ -207,15 +207,15 @@ func handleCallback(ctx context.Context, cfg config.Config, client *nest.Client,
 	if callback.Data != createOverviewCallback {
 		return
 	}
-	if callback.Message == nil || !isChatTopicMessage(cfg, *callback.Message) {
-		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Команды доступны только в Chat topic.")
+	if callback.Message == nil || !isControlButtonTopicMessage(cfg, *callback.Message) {
+		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Кнопка запуска доступна только в Chat topic.")
 		return
 	}
 	if submit(overviewJob{trigger: "nest_button", chatReply: true, callbackID: callback.ID}) {
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Запускаю обзор.")
 		_ = client.SendMessage(ctx, nest.SendMessageRequest{
 			ChatID:          cfg.NestChatID,
-			MessageThreadID: cfg.NestTopics.Chat,
+			MessageThreadID: cfg.NestTopics.Status,
 			Text:            overviewStartedText(),
 			ParseMode:       "HTML",
 		})
@@ -329,7 +329,7 @@ func ControlMessageRequest(cfg config.Config) nest.SendMessageRequest {
 }
 
 func chatControlText() string {
-	return "<b>🦉 Sova Control</b>\n\nНажми <b>Создать обзор</b> или отправь <code>/run</code>, чтобы запустить свежий обзор.\n\n<blockquote>Общий cooldown для всех запусков — 15 минут.</blockquote>\n\nАвтоматические дайджесты, статусы и календарные карточки сюда не пишу: этот топик остаётся для твоих команд."
+	return "<b>🦉 Sova control</b>\n\nНажми <b>Создать обзор</b>, чтобы запустить свежий обзор из учебного Chat.\n\n<blockquote>Текстовые команды вроде <code>/run</code>, <code>/button</code> и <code>/help</code> теперь живут в служебном Status topic.</blockquote>\n\nЭтот топик можно использовать для учебных материалов, заметок, задач, фото и ручного общения."
 }
 
 func overviewStartedText() string {
@@ -409,8 +409,12 @@ func chatRunReply(cfg config.Config, result overview.Result, err error) string {
 	return "Не получилось запустить обзор: " + compactLine(err.Error(), 300)
 }
 
-func isChatTopicMessage(cfg config.Config, message nest.Message) bool {
+func isCommandTopicMessage(cfg config.Config, message nest.Message) bool {
 	return message.Chat.ID == cfg.NestChatID && cfg.IsCommandTopic(message.MessageThreadID)
+}
+
+func isControlButtonTopicMessage(cfg config.Config, message nest.Message) bool {
+	return message.Chat.ID == cfg.NestChatID && message.MessageThreadID == cfg.NestTopics.Chat
 }
 
 func isCalendarTopicMessage(cfg config.Config, message nest.Message) bool {

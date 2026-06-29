@@ -185,7 +185,7 @@ func (c Config) NestReady() bool {
 }
 
 func (c Config) IsCommandTopic(threadID int) bool {
-	return threadID == c.NestTopics.Chat
+	return threadID == c.NestTopics.Status
 }
 
 func valueOrDefault(key, fallback string) string {

@@ -5,8 +5,9 @@
 - Qwen performs bounded structured classification and extraction.
 - Codex receives a compact run bundle and produces the final digest.
 - No Telegram Desktop `tdata` fallback.
-- The Nest `Chat` topic is user-controlled and accepts commands but receives no
-  automated pipeline output.
+- The Nest `Status` topic is the service topic for text commands and operations.
+- The Nest `Chat` topic is user-controlled for study materials, manual notes,
+  and the pinned run button; it receives no automated pipeline output.
 - The Nest Chat control button is created explicitly for manual pinning; `serve`
   must not send a new control message on every startup.
 - All overview triggers share a 15-minute cooldown.

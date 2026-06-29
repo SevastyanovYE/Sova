@@ -240,19 +240,19 @@ func nestTopicIntroRequests(cfg config.Config) []nest.SendMessageRequest {
 		{
 			ChatID:          cfg.NestChatID,
 			MessageThreadID: cfg.NestTopics.Digest,
-			Text:            "<b>🦉 Sova Digest</b>\n\nЗдесь появляются финальные обзоры: главное из учебных Telegram-источников, календарные намёки и ссылки на исходные сообщения.\n\n<blockquote>Этот топик только для готовых автоматических дайджестов.</blockquote>",
+			Text:            "<b>🦉 Sova digest</b>\n\nЗдесь появляются финальные обзоры: главное из учебных Telegram-источников, календарные намёки и ссылки на исходные сообщения.\n\n<blockquote>Этот топик только для готовых автоматических дайджестов.</blockquote>",
 			ParseMode:       "HTML",
 		},
 		{
 			ChatID:          cfg.NestChatID,
 			MessageThreadID: cfg.NestTopics.Calendar,
-			Text:            "<b>📅 Sova Calendar</b>\n\nСюда приходят кандидаты в Google Calendar. У каждого будут кнопки <b>Approve</b>, <b>Reject</b> и <b>Изменить дату</b>.\n\nЕсли нажать <b>Изменить дату</b>, я попрошу новую дату: <code>2026-06-28</code> или <code>2026-06-28 11:00</code>.\n\n<blockquote>Реальное событие создаётся только после Approve.</blockquote>",
+			Text:            "<b>📅 Sova calendar</b>\n\nСюда приходят кандидаты в Google Calendar. У каждого будут кнопки <b>Approve</b>, <b>Reject</b> и <b>Изменить дату</b>.\n\nЕсли нажать <b>Изменить дату</b>, я попрошу новую дату: <code>2026-06-28</code> или <code>2026-06-28 11:00</code>.\n\n<blockquote>Реальное событие создаётся только после Approve.</blockquote>",
 			ParseMode:       "HTML",
 		},
 		{
 			ChatID:          cfg.NestChatID,
 			MessageThreadID: cfg.NestTopics.Status,
-			Text:            "<b>✅ Sova Status</b>\n\nЗдесь видно, что Sova делает прямо сейчас: sync, батчи модели, извлечение календаря, Codex и публикацию.\n\nЕсли обзор идёт долго, смотри сюда: я буду обновлять одно сообщение с примерным временем и результатом.",
+			Text:            "<b>✅ Sova service</b>\n\nЭто служебный топик: сюда можно писать <code>/run</code>, <code>/button</code> и <code>/help</code>. Здесь же видно, что Sova делает прямо сейчас: sync, батчи модели, извлечение календаря, Codex и публикацию.\n\nЕсли обзор идёт долго, смотри сюда: я буду обновлять одно сообщение с примерным временем и результатом.",
 			ParseMode:       "HTML",
 		},
 	}

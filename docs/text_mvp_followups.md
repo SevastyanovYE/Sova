@@ -18,8 +18,9 @@ branch:
   button, or by local schedule.
 - Digest output, status/progress output, and calendar approval output are routed
   to separate Nest topics.
-- The `Chat` topic stays user-controlled; `serve` no longer posts a new button
-  on every startup.
+- The `Chat` topic stays user-controlled for study materials, manual notes, and
+  the pinned run button; text commands live in the `Status` service topic.
+  `serve` no longer posts a new button on every startup.
 - Calendar candidates can be approved, rejected, or date-edited before approval.
 - Codex/Qwen failures degrade to fallback behavior instead of losing messages.
 - Runtime remains on `qwen3:14b`; `qwen3:8b` is the only retained alternative
@@ -69,8 +70,9 @@ branch:
 - Local-first storage and small compact indexes keep raw data out of prompt
   context.
 - One worker and one cooldown keep the MVP understandable and safe.
-- Topic separation in Sova Nest is a good product boundary: `Chat` for control,
-  `Digest` for final output, `Calendar` for approval, `Status` for operations.
+- Topic separation in Sova Nest is a good product boundary: `Chat` for study
+  materials and the pinned run button, `Digest` for final output, `Calendar`
+  for approval, `Status` for commands and operations.
 - Derived artifacts keep source IDs and Telegram links, which makes every
   digest item reviewable.
 - The fallback path is valuable: slow or malformed model output should degrade,

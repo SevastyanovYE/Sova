@@ -38,13 +38,13 @@ func TestRejectsTelegramDesktopSession(t *testing.T) {
 	}
 }
 
-func TestCommandsOnlyFromChatTopic(t *testing.T) {
+func TestCommandsOnlyFromStatusTopic(t *testing.T) {
 	cfg := Config{NestTopics: TopicIDs{Status: 10, Chat: 20}}
-	if !cfg.IsCommandTopic(20) {
-		t.Fatal("chat topic should accept commands")
+	if !cfg.IsCommandTopic(10) {
+		t.Fatal("status topic should accept commands")
 	}
-	if cfg.IsCommandTopic(10) {
-		t.Fatal("status topic should not accept commands")
+	if cfg.IsCommandTopic(20) {
+		t.Fatal("chat topic should not accept text commands")
 	}
 }
 

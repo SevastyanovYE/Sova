@@ -19,14 +19,14 @@
   conservative timeout/error fallback, and compact performance metrics. The
   production classification batch target is 16 messages after `qwen3:14b`
   timed out at larger batch sizes.
-- `sova serve` uses Bot API long polling for `/run`, an existing "Создать
-  обзор" button, Status topic progress updates, Calendar date-edit callbacks,
-  and the local daily scheduler. Control/button messages are created explicitly
-  through `nest-seed-topics`, `/button`, `/start`, or `/help`; `serve` no longer
-  sends a new Chat button on every startup. Short service messages in
-  Chat/Calendar/Status use Telegram HTML formatting; final digests stay plain
-  text. Polling uses IPv4 and bounded exponential backoff for temporary Telegram
-  network failures.
+- `sova serve` uses Bot API long polling for text commands in the Status service
+  topic, an existing "Создать обзор" button in the Chat study topic, Status
+  progress updates, Calendar date-edit callbacks, and the local daily scheduler.
+  Control/button messages are created explicitly through `nest-seed-topics`,
+  `/button`, `/start`, or `/help`; `serve` no longer sends a new Chat button on
+  every startup. Short service messages in Calendar/Status use Telegram HTML
+  formatting; final digests stay plain text. Polling uses IPv4 and bounded
+  exponential backoff for temporary Telegram network failures.
 - Codex CLI discovery supports both `PATH` and the standard macOS Codex app
   location. A Codex failure degrades to a fallback digest instead of losing
   synced messages; `sova retry-run --id` can recover older Codex/Qwen failures.
