@@ -121,7 +121,7 @@ func Run(ctx context.Context, cfg config.Config, trigger string, opts Options) (
 	}
 
 	emitProgress(ctx, opts, ProgressEvent{
-		RunID: runRecord.ID, Stage: "sync", Message: "Синхронизирую allowlisted Telegram-источники.", EstimatedRemaining: 13 * time.Minute,
+		RunID: runRecord.ID, Stage: "sync", Message: "Синхронизирую учебные Telegram-источники Sova Nest.", EstimatedRemaining: 13 * time.Minute,
 	})
 	syncResult, err := telegrammt.New(cfg).Sync(ctx, store, telegrammt.SyncOptions{})
 	if err != nil {

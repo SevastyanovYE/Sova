@@ -15,7 +15,8 @@ Nest** и помогает планировать события в Google Calen
 структурировать этот поток информации, выполняя первичную обработку локально на
 вашем Mac:
 
-- безопасно синхронизирует только источники из allowlist;
+- безопасно синхронизирует только учебные источники из
+  `SOVA_NEST_TELEGRAM_ALLOWED_CHATS`;
 - хранит состояние приложения локально в SQLite и директории `.state/`;
 - классифицирует короткие сообщения через локальную модель `qwen3:14b` в
   Ollama;
@@ -76,6 +77,11 @@ go run ./cmd/sova doctor
 После настройки Telegram credentials и выделенной MTProto session проверьте
 авторизацию и синхронизацию:
 
+Учебные источники для дайджеста указываются в
+`SOVA_NEST_TELEGRAM_ALLOWED_CHATS`. Личную Workspace-группу держите отдельно в
+`SOVA_WORKSPACE_LEGACY_SOURCE` или других `SOVA_WORKSPACE_*` переменных, чтобы
+она не попадала в учебный обзор.
+
 ```bash
 go run ./cmd/sova telegram-status
 go run ./cmd/sova sync --dry-run
@@ -111,7 +117,7 @@ go run ./cmd/sova nest-seed-topics
 | `go run ./cmd/sova telegram-status` | Показывает, авторизована ли выделенная MTProto session. |
 | `go run ./cmd/sova telegram-login` | Запускает интерактивную авторизацию в Telegram по коду. |
 | `go run ./cmd/sova telegram-login-qr` | Запускает авторизацию в Telegram через QR. |
-| `go run ./cmd/sova sync --dry-run` | Проверяет allowlist и считает новые сообщения без записи в БД. |
+| `go run ./cmd/sova sync --dry-run` | Проверяет учебный Nest allowlist и считает новые сообщения без записи в БД. |
 | `go run ./cmd/sova sync` | Записывает новые Telegram сообщения в SQLite/raw JSONL и обновляет индекс. |
 | `go run ./cmd/sova run --trigger manual` | Запускает один обзор вручную с проверкой общего cooldown. |
 | `go run ./cmd/sova serve` | Запускает локальный Nest controller для команд в `Status`, кнопки в `Chat` и daily scheduler. |

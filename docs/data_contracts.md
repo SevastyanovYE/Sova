@@ -56,7 +56,9 @@ plain text so long messages can be split safely.
 
 ## Telegram sync
 
-The allowlist is the only source selector. Each synced message preserves:
+The Sova Nest study allowlist is the only source selector for overview sync.
+It is configured with `SOVA_NEST_TELEGRAM_ALLOWED_CHATS`; personal Workspace
+sources must not be placed there. Each synced message preserves:
 
 - stable source ref: `telegram:<peer_kind>:<chat_id>`
 - Telegram identity: `(chat_id, message_id)`

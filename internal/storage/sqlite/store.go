@@ -565,6 +565,72 @@ LIMIT ?`, limit)
 	return messages, nil
 }
 
+func (s *Store) RecentTelegramMessagesBySourceRefs(ctx context.Context, sourceRefs []string, limit int) ([]TelegramRecentMessage, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	seen := map[string]struct{}{}
+	refs := make([]string, 0, len(sourceRefs))
+	for _, ref := range sourceRefs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+
+	placeholders := make([]string, len(refs))
+	args := make([]any, 0, len(refs)+1)
+	for i, ref := range refs {
+		placeholders[i] = "?"
+		args = append(args, ref)
+	}
+	args = append(args, limit)
+	query := `
+SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.text, m.media_type, m.source_link
+FROM telegram_messages m
+JOIN telegram_sources s ON s.id = m.source_id
+WHERE s.ref IN (` + strings.Join(placeholders, ",") + `)
+ORDER BY m.date DESC, m.chat_id DESC, m.message_id DESC
+LIMIT ?`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []TelegramRecentMessage
+	for rows.Next() {
+		var message TelegramRecentMessage
+		var dateRaw string
+		if err := rows.Scan(
+			&message.SourceRef, &message.SourceTitle, &message.Username, &message.ChatID,
+			&message.MessageID, &dateRaw, &message.Kind, &message.Text, &message.MediaType,
+			&message.SourceLink,
+		); err != nil {
+			return nil, err
+		}
+		date, err := time.Parse(time.RFC3339Nano, dateRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse telegram message date: %w", err)
+		}
+		message.Date = date
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
 func (s *Store) TelegramMessagesCreatedBetween(ctx context.Context, start, end time.Time) ([]TelegramRecentMessage, error) {
 	if start.IsZero() || end.IsZero() || end.Before(start) {
 		return nil, fmt.Errorf("valid Telegram message creation window is required")

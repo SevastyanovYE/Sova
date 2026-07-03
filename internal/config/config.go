@@ -31,25 +31,25 @@ type TopicIDs struct {
 }
 
 type Config struct {
-	Timezone             string
-	StateDir             string
-	DatabasePath         string
-	OverviewCooldown     time.Duration
-	DailyRunTime         string
-	TelegramAppID        int
-	TelegramAppHash      string
-	TelegramPhone        string
-	TelegramSessionPath  string
-	TelegramAllowedChats []string
-	NestBotToken         string
-	NestChatID           int64
-	NestTopics           TopicIDs
-	OllamaURL            string
-	OllamaModel          string
-	CodexPath            string
-	GoogleCredentials    string
-	GoogleToken          string
-	GoogleCalendarID     string
+	Timezone                 string
+	StateDir                 string
+	DatabasePath             string
+	OverviewCooldown         time.Duration
+	DailyRunTime             string
+	TelegramAppID            int
+	TelegramAppHash          string
+	TelegramPhone            string
+	TelegramSessionPath      string
+	NestTelegramAllowedChats []string
+	NestBotToken             string
+	NestChatID               int64
+	NestTopics               TopicIDs
+	OllamaURL                string
+	OllamaModel              string
+	CodexPath                string
+	GoogleCredentials        string
+	GoogleToken              string
+	GoogleCalendarID         string
 }
 
 func Load() (Config, error) {
@@ -87,18 +87,18 @@ func Load() (Config, error) {
 
 	stateDir := valueOrDefault("SOVA_STATE_DIR", defaultStateDir)
 	return Config{
-		Timezone:             valueOrDefault("SOVA_TIMEZONE", defaultTimezone),
-		StateDir:             stateDir,
-		DatabasePath:         valueOrDefault("SOVA_DATABASE_PATH", filepath.Join(stateDir, "sova.db")),
-		OverviewCooldown:     cooldown,
-		DailyRunTime:         valueOrDefault("SOVA_DAILY_RUN_TIME", defaultDailyRunTime),
-		TelegramAppID:        appID,
-		TelegramAppHash:      strings.TrimSpace(os.Getenv("SOVA_TELEGRAM_APP_HASH")),
-		TelegramPhone:        strings.TrimSpace(os.Getenv("SOVA_TELEGRAM_PHONE")),
-		TelegramSessionPath:  valueOrDefault("SOVA_TELEGRAM_SESSION_PATH", defaultTelegramSession),
-		TelegramAllowedChats: splitList(os.Getenv("SOVA_TELEGRAM_ALLOWED_CHATS")),
-		NestBotToken:         strings.TrimSpace(os.Getenv("SOVA_NEST_BOT_TOKEN")),
-		NestChatID:           nestChatID,
+		Timezone:                 valueOrDefault("SOVA_TIMEZONE", defaultTimezone),
+		StateDir:                 stateDir,
+		DatabasePath:             valueOrDefault("SOVA_DATABASE_PATH", filepath.Join(stateDir, "sova.db")),
+		OverviewCooldown:         cooldown,
+		DailyRunTime:             valueOrDefault("SOVA_DAILY_RUN_TIME", defaultDailyRunTime),
+		TelegramAppID:            appID,
+		TelegramAppHash:          strings.TrimSpace(os.Getenv("SOVA_TELEGRAM_APP_HASH")),
+		TelegramPhone:            strings.TrimSpace(os.Getenv("SOVA_TELEGRAM_PHONE")),
+		TelegramSessionPath:      valueOrDefault("SOVA_TELEGRAM_SESSION_PATH", defaultTelegramSession),
+		NestTelegramAllowedChats: splitList(os.Getenv("SOVA_NEST_TELEGRAM_ALLOWED_CHATS")),
+		NestBotToken:             strings.TrimSpace(os.Getenv("SOVA_NEST_BOT_TOKEN")),
+		NestChatID:               nestChatID,
 		NestTopics: TopicIDs{
 			Digest: digestID, Calendar: calendarID, Status: statusID, Chat: chatID,
 		},

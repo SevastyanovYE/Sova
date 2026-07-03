@@ -63,6 +63,24 @@ func TestNestReadyRequiresChatTopic(t *testing.T) {
 	}
 }
 
+func TestNestTelegramSourcesAreSeparatedFromLegacyTelegramSources(t *testing.T) {
+	t.Setenv("SOVA_NEST_TELEGRAM_ALLOWED_CHATS", "@study;https://t.me/study2")
+	t.Setenv("SOVA_TELEGRAM_ALLOWED_CHATS", "@personal")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"@study", "https://t.me/study2"}
+	if len(cfg.NestTelegramAllowedChats) != len(want) {
+		t.Fatalf("nest sources = %#v", cfg.NestTelegramAllowedChats)
+	}
+	for i := range want {
+		if cfg.NestTelegramAllowedChats[i] != want[i] {
+			t.Fatalf("nest source %d = %q, want %q", i, cfg.NestTelegramAllowedChats[i], want[i])
+		}
+	}
+}
+
 func TestLoadDotEnvDoesNotOverrideEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".env")

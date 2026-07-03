@@ -7,11 +7,14 @@
 - Shared overview cooldown: 15 minutes across all triggers.
 - Nest topics: Digest, Calendar, Status, Chat. Automated digest/status output
   does not go to Chat.
+- Sova Nest overview sync reads only `SOVA_NEST_TELEGRAM_ALLOWED_CHATS`.
+  Workspace/personal Telegram sources stay in `SOVA_WORKSPACE_*` config and are
+  not part of the study digest allowlist.
 - Local model: Ollama `qwen3:14b`.
 - Telegram auth: dedicated MTProto project session only.
-- Telegram sync verified end-to-end for two allowlisted sources: dry-run writes
-  nothing, sync stores 200 messages, repeat sync dedupes to zero new messages,
-  media metadata and one service message are handled.
+- Telegram sync verified end-to-end for two Sova Nest study sources: dry-run
+  writes nothing, sync stores 200 messages, repeat sync dedupes to zero new
+  messages, media metadata and one service message are handled.
 - `sova run --trigger manual` now calls Telegram sync and completes successfully
   when there are no new messages.
 - Qwen classification, compact run bundle generation, Codex digest generation,

@@ -1,8 +1,9 @@
 # Text MVP follow-ups
 
 This document is scoped only to the current Sova text MVP branch:
-Telegram allowlisted sources -> SQLite/local indexes -> Qwen classification ->
-Codex digest -> Sova Nest topics -> Google Calendar approval.
+Sova Nest study sources from `SOVA_NEST_TELEGRAM_ALLOWED_CHATS` ->
+SQLite/local indexes -> Qwen classification -> Codex digest -> Sova Nest
+topics -> Google Calendar approval.
 
 It is not the full Sova roadmap. Other project branches, such as broader
 knowledge management, richer personal assistant behavior, or non-Telegram
@@ -13,7 +14,8 @@ integrations, may evolve separately.
 The text MVP is usable enough to pause feature work and move to the next project
 branch:
 
-- Telegram sync is end-to-end verified for allowlisted sources.
+- Telegram sync is end-to-end verified for the dedicated Sova Nest study
+  allowlist.
 - Overview runs share one cooldown and can be triggered manually, by Nest
   button, or by local schedule.
 - Digest output, status/progress output, and calendar approval output are routed

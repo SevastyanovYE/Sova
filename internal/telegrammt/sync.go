@@ -65,6 +65,23 @@ func (r SyncResult) NewMessages() []SyncedMessage {
 	return messages
 }
 
+func syncResultSourceRefs(result SyncResult) []string {
+	seen := map[string]struct{}{}
+	refs := make([]string, 0, len(result.Sources))
+	for _, source := range result.Sources {
+		ref := strings.TrimSpace(source.SourceRef)
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
 type resolvedSource struct {
 	configuredRef string
 	source        sqlitestore.TelegramSource
@@ -93,8 +110,8 @@ func (c *Client) Sync(ctx context.Context, store *sqlitestore.Store, opts SyncOp
 	if err := c.validateRuntime(); err != nil {
 		return SyncResult{}, err
 	}
-	if len(c.cfg.TelegramAllowedChats) == 0 {
-		return SyncResult{}, fmt.Errorf("SOVA_TELEGRAM_ALLOWED_CHATS must contain at least one source")
+	if len(c.cfg.NestTelegramAllowedChats) == 0 {
+		return SyncResult{}, fmt.Errorf("SOVA_NEST_TELEGRAM_ALLOWED_CHATS must contain at least one Sova Nest study source")
 	}
 	if opts.LimitPerSource <= 0 {
 		opts.LimitPerSource = defaultSyncLimit
@@ -115,7 +132,7 @@ func (c *Client) Sync(ctx context.Context, store *sqlitestore.Store, opts SyncOp
 		}
 
 		resolver := peers.Options{}.Build(client.API())
-		for _, configuredRef := range c.cfg.TelegramAllowedChats {
+		for _, configuredRef := range c.cfg.NestTelegramAllowedChats {
 			source, err := c.resolveSyncSource(runCtx, store, client.API(), resolver, configuredRef)
 			if err != nil {
 				return fmt.Errorf("resolve %q: %w", configuredRef, err)
@@ -168,7 +185,7 @@ func (c *Client) Sync(ctx context.Context, store *sqlitestore.Store, opts SyncOp
 		}
 
 		if !opts.DryRun {
-			recent, err := store.RecentTelegramMessages(runCtx, recentIndexLimit)
+			recent, err := store.RecentTelegramMessagesBySourceRefs(runCtx, syncResultSourceRefs(result), recentIndexLimit)
 			if err != nil {
 				return fmt.Errorf("load recent telegram messages: %w", err)
 			}

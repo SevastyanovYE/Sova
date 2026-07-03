@@ -285,7 +285,7 @@ func telegramLoginQR(ctx context.Context, cfg config.Config) error {
 
 func telegramSync(ctx context.Context, cfg config.Config, args []string) error {
 	flags := flag.NewFlagSet("sync", flag.ContinueOnError)
-	limit := flags.Int("limit", 100, "maximum recent messages to fetch per allowlisted source")
+	limit := flags.Int("limit", 100, "maximum recent messages to fetch per Sova Nest study source")
 	dryRun := flags.Bool("dry-run", false, "fetch and report without writing SQLite, raw JSONL, or indexes")
 	if err := flags.Parse(args); err != nil {
 		return err

@@ -163,6 +163,39 @@ func TestTelegramMessagesAreIdempotentCursorAndRecent(t *testing.T) {
 	if recent[0].SourceTitle != "Study" || recent[0].Text != "room changed" {
 		t.Fatalf("recent[0] = %+v", recent[0])
 	}
+	personal, err := store.UpsertTelegramSource(ctx, TelegramSource{
+		Ref:      "telegram:channel:200",
+		PeerKind: "channel",
+		ChatID:   200,
+		Title:    "Personal",
+	}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.InsertTelegramMessages(ctx, []TelegramMessage{{
+		SourceID:   personal.ID,
+		ChatID:     200,
+		MessageID:  20,
+		Date:       time.Date(2026, 6, 17, 10, 10, 0, 0, time.UTC),
+		Kind:       "message",
+		Text:       "personal note",
+		SourceLink: "https://t.me/c/200/20",
+		RawJSON:    `{"message_id":20}`,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	filteredRecent, err := store.RecentTelegramMessagesBySourceRefs(ctx, []string{source.Ref}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filteredRecent) != 2 {
+		t.Fatalf("filtered recent messages = %d", len(filteredRecent))
+	}
+	for _, message := range filteredRecent {
+		if message.SourceRef != source.Ref {
+			t.Fatalf("filtered recent included %q", message.SourceRef)
+		}
+	}
 
 	olderNewMessage := TelegramMessage{
 		SourceID:   source.ID,

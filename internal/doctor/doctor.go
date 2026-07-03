@@ -32,7 +32,7 @@ func Run(ctx context.Context, cfg config.Config) []Check {
 	}
 	checks = append(checks,
 		configuredCheck("telegram_credentials", cfg.TelegramAppID != 0 && cfg.TelegramAppHash != "" && cfg.TelegramPhone != "", "set Telegram app ID, hash, and phone"),
-		configuredCheck("telegram_sources", len(cfg.TelegramAllowedChats) > 0, "set at least one allowlisted Telegram source"),
+		configuredCheck("nest_telegram_sources", len(cfg.NestTelegramAllowedChats) > 0, "set SOVA_NEST_TELEGRAM_ALLOWED_CHATS to at least one Sova Nest study source"),
 		configuredCheck("nest", cfg.NestReady(), "set bot token, Nest chat ID, and all four topic IDs"),
 		configuredCheck("google_calendar_id", cfg.GoogleCalendarID != "", "set SOVA_GOOGLE_CALENDAR_ID"),
 		configuredCheck("google_oauth_credentials", fileExists(cfg.GoogleCredentials), "place OAuth Desktop client JSON at "+cfg.GoogleCredentials),

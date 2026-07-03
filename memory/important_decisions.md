@@ -11,3 +11,6 @@
 - The Nest Chat control button is created explicitly for manual pinning; `serve`
   must not send a new control message on every startup.
 - All overview triggers share a 15-minute cooldown.
+- Sova.Nest overview sync uses only `SOVA_NEST_TELEGRAM_ALLOWED_CHATS`.
+  Workspace/personal Telegram sources must use `SOVA_WORKSPACE_*` config and
+  must not be added to the Nest study digest allowlist.
