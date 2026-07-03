@@ -240,19 +240,19 @@ func nestTopicIntroRequests(cfg config.Config) []nest.SendMessageRequest {
 		{
 			ChatID:          cfg.NestChatID,
 			MessageThreadID: cfg.NestTopics.Digest,
-			Text:            "<b>🦉 Sova digest</b>\n\nЗдесь появляются финальные обзоры: главное из учебных Telegram-источников, календарные намёки и ссылки на исходные сообщения.\n\n<blockquote>Этот топик только для готовых автоматических дайджестов.</blockquote>",
+			Text:            "<b>🧾 Sova digest</b>\n\nЗдесь появляются готовые обзоры: короткая выжимка из подключенных учебных Telegram-источников, важные пункты, календарные намёки и ссылки на исходные сообщения.\n\n<blockquote>Этот топик лучше держать чистым: только итоговые дайджесты, без команд и ручного обсуждения.</blockquote>",
 			ParseMode:       "HTML",
 		},
 		{
 			ChatID:          cfg.NestChatID,
 			MessageThreadID: cfg.NestTopics.Calendar,
-			Text:            "<b>📅 Sova calendar</b>\n\nСюда приходят кандидаты в Google Calendar. У каждого будут кнопки <b>Approve</b>, <b>Reject</b> и <b>Изменить дату</b>.\n\nЕсли нажать <b>Изменить дату</b>, я попрошу новую дату: <code>2026-06-28</code> или <code>2026-06-28 11:00</code>.\n\n<blockquote>Реальное событие создаётся только после Approve.</blockquote>",
+			Text:            "<b>📅 Sova calendar</b>\n\nСюда приходят кандидаты в Google Calendar. У каждого события есть кнопки <b>Approve</b>, <b>Reject</b> и <b>Изменить дату</b>.\n\nЕсли дата съехала из-за пересылки или неясного текста, нажми <b>Изменить дату</b> и отправь новую дату в формате <code>2026-06-28</code> или <code>2026-06-28 11:00</code>.\n\n<blockquote>Реальное событие создаётся только после Approve.</blockquote>",
 			ParseMode:       "HTML",
 		},
 		{
 			ChatID:          cfg.NestChatID,
 			MessageThreadID: cfg.NestTopics.Status,
-			Text:            "<b>✅ Sova service</b>\n\nЭто служебный топик: сюда можно писать <code>/run</code>, <code>/button</code> и <code>/help</code>. Здесь же видно, что Sova делает прямо сейчас: sync, батчи модели, извлечение календаря, Codex и публикацию.\n\nЕсли обзор идёт долго, смотри сюда: я буду обновлять одно сообщение с примерным временем и результатом.",
+			Text:            "<b>🛠 Sova service</b>\n\nЭто служебный топик: здесь работают <code>/run</code>, <code>/button</code> и <code>/help</code>. Сюда же приходят прогресс обзора, ошибки, cooldown, fallback и health-сообщения.\n\nВо время обзора я обновляю одно сообщение: sync, батчи модели, календарь, Codex, публикация и примерное время до конца.\n\n<blockquote>Если кнопка в учебном чате не реагирует, первым делом смотри сюда и в консоль serve: без getUpdates бот не видит команды.</blockquote>",
 			ParseMode:       "HTML",
 		},
 	}

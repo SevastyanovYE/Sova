@@ -42,7 +42,7 @@ func TestControlMessageRequestUsesChatTopicAndButton(t *testing.T) {
 	if button.Text != "Создать обзор" || button.CallbackData != createOverviewCallback {
 		t.Fatalf("button = %+v", button)
 	}
-	if !strings.Contains(request.Text, "<code>/run</code>") || !strings.Contains(request.Text, "служебном Status topic") {
+	if !strings.Contains(request.Text, "<code>/run</code>") || !strings.Contains(request.Text, "служебном топике") {
 		t.Fatalf("control text = %q", request.Text)
 	}
 }

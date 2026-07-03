@@ -329,11 +329,11 @@ func ControlMessageRequest(cfg config.Config) nest.SendMessageRequest {
 }
 
 func chatControlText() string {
-	return "<b>🦉 Sova control</b>\n\nНажми <b>Создать обзор</b>, чтобы запустить свежий обзор из учебного Chat.\n\n<blockquote>Текстовые команды вроде <code>/run</code>, <code>/button</code> и <code>/help</code> теперь живут в служебном Status topic.</blockquote>\n\nЭтот топик можно использовать для учебных материалов, заметок, задач, фото и ручного общения."
+	return "<b>🦉 Sova chat</b>\n\nЭто живой учебный топик: сюда можно складывать задачи, заметки, фото, пересланные материалы и всё, что хочется держать рядом с учебой.\n\nНажми <b>Создать обзор</b>, когда нужен свежий дайджест по подключенным Telegram-источникам.\n\n<blockquote>Материалы из этого топика пока не входят в пайплайн. Текстовые команды <code>/run</code>, <code>/button</code> и <code>/help</code> живут в служебном топике.</blockquote>"
 }
 
 func overviewStartedText() string {
-	return "<b>Запускаю обзор</b> ✨\n\nРезультат придёт в <b>Digest</b>, а ход выполнения буду обновлять в <b>Status</b>."
+	return "<b>Запускаю обзор</b> ✨\n\nРезультат придёт в топик дайджестов, а ход выполнения буду обновлять в служебном топике."
 }
 
 func controlMessageMarkup() *nest.InlineKeyboardMarkup {

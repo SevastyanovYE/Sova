@@ -2,7 +2,8 @@
 
 - Repository has a baseline commit and a working Go + SQLite MVP foundation.
 - Runtime: local Mac, Go, SQLite, one overview worker in `sova serve`.
-- Overview triggers: daily schedule, Nest Chat command/button, and manual CLI.
+- Overview triggers: daily schedule, Nest service commands, pinned Chat button,
+  and manual CLI.
 - Shared overview cooldown: 15 minutes across all triggers.
 - Nest topics: Digest, Calendar, Status, Chat. Automated digest/status output
   does not go to Chat.
@@ -25,8 +26,9 @@
   Control/button messages are created explicitly through `nest-seed-topics`,
   `/button`, `/start`, or `/help`; `serve` no longer sends a new Chat button on
   every startup. Short service messages in Calendar/Status use Telegram HTML
-  formatting; final digests stay plain text. Polling uses IPv4 and bounded
-  exponential backoff for temporary Telegram network failures.
+  formatting; final digests stay plain text. Bot API polling uses the default
+  TCP dialer with bounded exponential backoff for temporary Telegram network
+  failures.
 - Codex CLI discovery supports both `PATH` and the standard macOS Codex app
   location. A Codex failure degrades to a fallback digest instead of losing
   synced messages; `sova retry-run --id` can recover older Codex/Qwen failures.

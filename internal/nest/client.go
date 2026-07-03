@@ -90,9 +90,7 @@ func New(token string) *Client {
 func telegramTransport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-	transport.DialContext = func(ctx context.Context, _ string, address string) (net.Conn, error) {
-		return dialer.DialContext(ctx, "tcp4", address)
-	}
+	transport.DialContext = dialer.DialContext
 	return transport
 }
 
