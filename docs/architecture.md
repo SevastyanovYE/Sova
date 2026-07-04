@@ -26,3 +26,14 @@ launchd
 
 The controller and worker share a 15-minute run cooldown. Telegram Desktop
 sessions are outside the architecture.
+
+## Workspace branch
+
+`Sova.Workspace` is a separate branch of product logic for the personal
+`InSync v1.0` workspace. Stage 1 adds only non-destructive legacy audit support:
+Workspace config, forum-topic discovery, SQLite `workspace_*` tables, and review
+artifacts. It does not post, migrate, delete, or edit Telegram messages.
+
+Shared Telegram/SQLite/config code remains in core packages; Nest commands,
+topics, cooldowns, digest publishing, and Calendar approval behavior remain
+owned by `Sova.Nest`.

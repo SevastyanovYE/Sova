@@ -1,6 +1,7 @@
 package telegrammt
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/SevastyanovYE/Sova/internal/config"
 	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
+	"github.com/gotd/td/tg"
 )
 
 func TestWriteTelegramRecentIndex(t *testing.T) {
@@ -90,6 +92,42 @@ func TestSourceMessageLink(t *testing.T) {
 				t.Fatalf("sourceMessageLink() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveExplicitSourceAcceptsBotAPIChannelID(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	source, err := store.UpsertTelegramSource(ctx, sqlitestore.TelegramSource{
+		Ref:        "telegram:channel:2498436858",
+		PeerKind:   "channel",
+		ChatID:     2498436858,
+		AccessHash: 42,
+		Title:      "InSync",
+	}, time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, inputPeer, ok, err := resolveExplicitSource(ctx, store, "-1002498436858")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected explicit source")
+	}
+	if got.Ref != source.Ref {
+		t.Fatalf("source ref = %q, want %q", got.Ref, source.Ref)
+	}
+	channel, ok := inputPeer.(*tg.InputPeerChannel)
+	if !ok {
+		t.Fatalf("input peer type = %T, want *tg.InputPeerChannel", inputPeer)
+	}
+	if channel.ChannelID != source.ChatID || channel.AccessHash != source.AccessHash {
+		t.Fatalf("input peer = %+v, want channel_id=%d access_hash=%d", channel, source.ChatID, source.AccessHash)
 	}
 }
 

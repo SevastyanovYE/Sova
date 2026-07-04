@@ -31,7 +31,11 @@ type User struct {
 }
 
 type Chat struct {
-	ID int64 `json:"id"`
+	ID       int64  `json:"id"`
+	Type     string `json:"type,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Username string `json:"username,omitempty"`
+	IsForum  bool   `json:"is_forum,omitempty"`
 }
 
 type Message struct {
@@ -80,6 +84,20 @@ type EditMessageTextRequest struct {
 	ReplyMarkup *InlineKeyboardMarkup
 }
 
+type ForumTopic struct {
+	MessageThreadID   int    `json:"message_thread_id"`
+	Name              string `json:"name"`
+	IconColor         int    `json:"icon_color,omitempty"`
+	IconCustomEmojiID string `json:"icon_custom_emoji_id,omitempty"`
+}
+
+type CreateForumTopicRequest struct {
+	ChatID            int64
+	Name              string
+	IconColor         int
+	IconCustomEmojiID string
+}
+
 func New(token string) *Client {
 	return &Client{
 		token:      strings.TrimSpace(token),
@@ -105,6 +123,21 @@ func (c *Client) GetMe(ctx context.Context) (User, error) {
 	}
 	if !response.OK {
 		return User{}, fmt.Errorf("Bot API getMe failed: %s", response.Description)
+	}
+	return response.Result, nil
+}
+
+func (c *Client) GetChat(ctx context.Context, chatID int64) (Chat, error) {
+	var response struct {
+		OK          bool   `json:"ok"`
+		Result      Chat   `json:"result"`
+		Description string `json:"description"`
+	}
+	if err := c.call(ctx, "getChat", map[string]any{"chat_id": chatID}, &response); err != nil {
+		return Chat{}, err
+	}
+	if !response.OK {
+		return Chat{}, fmt.Errorf("Bot API getChat failed: %s", response.Description)
 	}
 	return response.Result, nil
 }
@@ -136,6 +169,31 @@ func (c *Client) SendMessageResult(ctx context.Context, request SendMessageReque
 	}
 	if !response.OK {
 		return Message{}, fmt.Errorf("Bot API sendMessage failed: %s", response.Description)
+	}
+	return response.Result, nil
+}
+
+func (c *Client) CreateForumTopic(ctx context.Context, request CreateForumTopicRequest) (ForumTopic, error) {
+	payload := map[string]any{
+		"chat_id": request.ChatID,
+		"name":    request.Name,
+	}
+	if request.IconColor != 0 {
+		payload["icon_color"] = request.IconColor
+	}
+	if strings.TrimSpace(request.IconCustomEmojiID) != "" {
+		payload["icon_custom_emoji_id"] = request.IconCustomEmojiID
+	}
+	var response struct {
+		OK          bool       `json:"ok"`
+		Result      ForumTopic `json:"result"`
+		Description string     `json:"description"`
+	}
+	if err := c.call(ctx, "createForumTopic", payload, &response); err != nil {
+		return ForumTopic{}, err
+	}
+	if !response.OK {
+		return ForumTopic{}, fmt.Errorf("Bot API createForumTopic failed: %s", response.Description)
 	}
 	return response.Result, nil
 }

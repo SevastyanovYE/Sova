@@ -20,13 +20,16 @@ import (
 )
 
 const (
-	defaultSyncLimit = 100
-	recentIndexLimit = 80
+	defaultSyncLimit     = 100
+	maxHistoryBatchLimit = 100
+	recentIndexLimit     = 80
 )
 
 type SyncOptions struct {
 	LimitPerSource int
 	DryRun         bool
+	Backfill       bool
+	FullScan       bool
 }
 
 type SyncSourceResult struct {
@@ -104,14 +107,29 @@ type rawMessageRecord struct {
 }
 
 func (c *Client) Sync(ctx context.Context, store *sqlitestore.Store, opts SyncOptions) (SyncResult, error) {
+	if len(c.cfg.NestTelegramAllowedChats) == 0 {
+		return SyncResult{}, fmt.Errorf("SOVA_NEST_TELEGRAM_ALLOWED_CHATS must contain at least one Sova Nest study source")
+	}
+	return c.syncSources(ctx, store, c.cfg.NestTelegramAllowedChats, opts, true)
+}
+
+func (c *Client) SyncWorkspaceLegacy(ctx context.Context, store *sqlitestore.Store, opts SyncOptions) (SyncResult, error) {
+	source := strings.TrimSpace(c.cfg.Workspace.LegacySource)
+	if source == "" {
+		return SyncResult{}, fmt.Errorf("SOVA_WORKSPACE_LEGACY_SOURCE must contain the old InSync source")
+	}
+	return c.syncSources(ctx, store, []string{source}, opts, false)
+}
+
+func (c *Client) syncSources(ctx context.Context, store *sqlitestore.Store, configuredRefs []string, opts SyncOptions, writeRecentIndex bool) (SyncResult, error) {
 	if store == nil {
 		return SyncResult{}, fmt.Errorf("store is required")
 	}
 	if err := c.validateRuntime(); err != nil {
 		return SyncResult{}, err
 	}
-	if len(c.cfg.NestTelegramAllowedChats) == 0 {
-		return SyncResult{}, fmt.Errorf("SOVA_NEST_TELEGRAM_ALLOWED_CHATS must contain at least one Sova Nest study source")
+	if len(configuredRefs) == 0 {
+		return SyncResult{}, fmt.Errorf("at least one Telegram source is required")
 	}
 	if opts.LimitPerSource <= 0 {
 		opts.LimitPerSource = defaultSyncLimit
@@ -132,7 +150,7 @@ func (c *Client) Sync(ctx context.Context, store *sqlitestore.Store, opts SyncOp
 		}
 
 		resolver := peers.Options{}.Build(client.API())
-		for _, configuredRef := range c.cfg.NestTelegramAllowedChats {
+		for _, configuredRef := range configuredRefs {
 			source, err := c.resolveSyncSource(runCtx, store, client.API(), resolver, configuredRef)
 			if err != nil {
 				return fmt.Errorf("resolve %q: %w", configuredRef, err)
@@ -148,7 +166,22 @@ func (c *Client) Sync(ctx context.Context, store *sqlitestore.Store, opts SyncOp
 				storedSource = existing
 			}
 
-			messages, err := c.fetchSourceMessages(runCtx, client.API(), source, storedSource, opts.LimitPerSource)
+			minID := storedSource.LastMessageID
+			maxID := 0
+			if opts.Backfill && storedSource.ID != 0 {
+				oldestMessageID, _, ok, err := store.TelegramMessageIDBounds(runCtx, storedSource.ID)
+				if err != nil {
+					return fmt.Errorf("read message bounds for %s: %w", source.source.Ref, err)
+				}
+				if ok {
+					maxID = oldestMessageID
+				}
+			}
+			if opts.Backfill || opts.FullScan {
+				minID = 0
+			}
+
+			messages, err := c.fetchSourceMessages(runCtx, client.API(), source, opts.LimitPerSource, minID, maxID)
 			if err != nil {
 				return fmt.Errorf("fetch %s: %w", source.source.Ref, err)
 			}
@@ -184,7 +217,7 @@ func (c *Client) Sync(ctx context.Context, store *sqlitestore.Store, opts SyncOp
 			})
 		}
 
-		if !opts.DryRun {
+		if !opts.DryRun && writeRecentIndex {
 			recent, err := store.RecentTelegramMessagesBySourceRefs(runCtx, syncResultSourceRefs(result), recentIndexLimit)
 			if err != nil {
 				return fmt.Errorf("load recent telegram messages: %w", err)
@@ -308,7 +341,19 @@ func sourceFromChatClass(chat tg.ChatClass) (sqlitestore.TelegramSource, tg.Inpu
 }
 
 func resolveExplicitSource(ctx context.Context, store *sqlitestore.Store, ref string) (sqlitestore.TelegramSource, tg.InputPeerClass, bool, error) {
-	trimmed := strings.TrimPrefix(strings.TrimSpace(ref), "telegram:")
+	trimmed := strings.TrimSpace(ref)
+	if strings.HasPrefix(trimmed, "-100") {
+		channelID := strings.TrimPrefix(trimmed, "-100")
+		if channelID == "" {
+			return sqlitestore.TelegramSource{}, nil, false, nil
+		}
+		if _, err := strconv.ParseInt(channelID, 10, 64); err != nil {
+			return sqlitestore.TelegramSource{}, nil, true, fmt.Errorf("parse channel id: %w", err)
+		}
+		trimmed = "channel:" + channelID
+	} else {
+		trimmed = strings.TrimPrefix(trimmed, "telegram:")
+	}
 	parts := strings.Split(trimmed, ":")
 	if len(parts) < 2 {
 		return sqlitestore.TelegramSource{}, nil, false, nil
@@ -373,29 +418,66 @@ func stableSourceRef(peerKind string, chatID int64) string {
 	return "telegram:" + peerKind + ":" + strconv.FormatInt(chatID, 10)
 }
 
-func (c *Client) fetchSourceMessages(ctx context.Context, api *tg.Client, source resolvedSource, storedSource sqlitestore.TelegramSource, limit int) ([]sqlitestore.TelegramMessage, error) {
-	history, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-		Peer:  source.inputPeer,
-		Limit: limit,
-		MinID: storedSource.LastMessageID,
-	})
-	if err != nil {
-		return nil, err
-	}
-	modified, ok := history.AsModified()
-	if !ok {
-		return nil, nil
-	}
-
+func (c *Client) fetchSourceMessages(ctx context.Context, api *tg.Client, source resolvedSource, limit int, minID int, maxID int) ([]sqlitestore.TelegramMessage, error) {
 	var messages []sqlitestore.TelegramMessage
-	for _, raw := range modified.GetMessages() {
-		message, ok, err := c.convertTelegramMessage(source, raw)
+	seen := map[int]struct{}{}
+	offsetID := 0
+	for len(messages) < limit {
+		batchLimit := limit - len(messages)
+		if batchLimit > maxHistoryBatchLimit {
+			batchLimit = maxHistoryBatchLimit
+		}
+		request := &tg.MessagesGetHistoryRequest{
+			Peer:     source.inputPeer,
+			Limit:    batchLimit,
+			OffsetID: offsetID,
+		}
+		if maxID > 0 {
+			request.MaxID = maxID
+		}
+		if minID > 0 {
+			request.MinID = minID
+		}
+		history, err := api.MessagesGetHistory(ctx, request)
 		if err != nil {
 			return nil, err
 		}
-		if ok {
-			messages = append(messages, message)
+		modified, ok := history.AsModified()
+		if !ok {
+			break
 		}
+		rawMessages := modified.GetMessages()
+		if len(rawMessages) == 0 {
+			break
+		}
+		oldestID := 0
+		for _, raw := range rawMessages {
+			if notEmpty, ok := raw.AsNotEmpty(); ok {
+				messageID := notEmpty.GetID()
+				if oldestID == 0 || messageID < oldestID {
+					oldestID = messageID
+				}
+			}
+			message, ok, err := c.convertTelegramMessage(source, raw)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			if _, ok := seen[message.MessageID]; ok {
+				continue
+			}
+			seen[message.MessageID] = struct{}{}
+			messages = append(messages, message)
+			if len(messages) >= limit {
+				break
+			}
+		}
+		if oldestID == 0 || oldestID == offsetID || len(rawMessages) < batchLimit {
+			break
+		}
+		offsetID = oldestID
 	}
 	sort.Slice(messages, func(i, j int) bool {
 		if messages[i].Date.Equal(messages[j].Date) {

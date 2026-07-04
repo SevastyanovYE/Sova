@@ -81,6 +81,41 @@ func TestNestTelegramSourcesAreSeparatedFromLegacyTelegramSources(t *testing.T) 
 	}
 }
 
+func TestWorkspaceAndControlConfigured(t *testing.T) {
+	cfg := Config{
+		Workspace: WorkspaceConfig{
+			BotToken: "token",
+			ChatID:   -100200,
+			Topics: WorkspaceTopicIDs{
+				Inbox: 1, Tasks: 2, Notes: 3, Experience: 4,
+				Useful: 5, Templates: 6, Collections: 7,
+			},
+		},
+		Control: ControlConfig{
+			BotToken: "token",
+			ChatID:   -100300,
+			Topics: ControlTopicIDs{
+				Status: 1, Errors: 2, Runs: 3, Review: 4,
+				TestLab: 5, Workspace: 6, Nest: 7, Ideas: 8,
+			},
+		},
+	}
+	if !cfg.WorkspaceConfigured() {
+		t.Fatal("Workspace should be configured with all seven topic IDs")
+	}
+	if !cfg.ControlConfigured() {
+		t.Fatal("Control should be configured with all eight topic IDs")
+	}
+	cfg.Workspace.Topics.Collections = 0
+	if cfg.WorkspaceConfigured() {
+		t.Fatal("Workspace should require Collections topic")
+	}
+	cfg.Control.Topics.Ideas = 0
+	if cfg.ControlConfigured() {
+		t.Fatal("Control should require Ideas topic")
+	}
+}
+
 func TestLoadDotEnvDoesNotOverrideEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".env")

@@ -58,3 +58,56 @@
 - The main README uses generated PNG diagrams under `docs/assets/readme/` and
   Russian sentence-case headings. Follow-up conclusions for this text MVP branch
   are captured in `docs/text_mvp_followups.md`.
+- Sova.Workspace Stage 1 foundation exists separately from Sova.Nest:
+  Workspace/Control config keys, `workspace doctor`, read-only forum-topic
+  discovery, heuristic legacy audit, SQLite `workspace_*` tables, and review
+  artifacts under `.state/artifacts/workspace/audit/<run-id>/`.
+- Workspace Stage 1 is non-destructive: it does not migrate, mass post, delete,
+  or edit Telegram messages. The audit currently uses a deterministic heuristic
+  fallback and marks uncertain material for manual review.
+- Sova.Workspace Stage 2 review integration is implemented:
+  `workspace review-preview` reads the user-filled review CSV, merges decisions
+  with stored audit records, writes compact migration preview Markdown/CSV under
+  `.state/artifacts/workspace/migration_preview/`, and stops for approval.
+- Workspace/Control topic bootstrap is implemented:
+  `workspace bootstrap-topics` resolves `InSync v1.0` and `Sova.Control` via
+  the dedicated MTProto session, checks bot access, creates only missing target
+  forum topics, and writes numeric IDs to
+  `.state/artifacts/workspace/bootstrap/workspace_control_topic_ids.env`.
+  Creation was not completed in the current Codex sandbox because DNS lookup for
+  `api.telegram.org` failed and MTProto calls timed out.
+- Sova.Workspace legacy sync is separated from Sova.Nest sync:
+  `workspace sync-legacy` indexes only `SOVA_WORKSPACE_LEGACY_SOURCE` and does
+  not update the Nest `.state/index/telegram-recent.md`. The Nest recent index
+  is filtered to Nest study source refs from `SOVA_NEST_TELEGRAM_ALLOWED_CHATS`.
+- Workspace audit run 3 processed the currently indexed old InSync batch
+  (1016 messages, including new messages added after the previous pass) with
+  tighter user rules: media stays review, punctuation-only placeholders go to
+  trash, old `Задачи`/`Заготовки` are mostly archived, latest 10 candidates are
+  auto-take, and Control-review card/topic-pin drafts are written under
+  `.state/artifacts/workspace/audit/20260703T204807Z/`. Its migration preview
+  at `.state/artifacts/workspace/migration_preview/20260703T204818Z/` was
+  superseded by run 4 after the user filled the review table.
+- Workspace audit run 4 reprocessed the indexed 1016-message old InSync batch
+  after the user filled the review table. User-filled decisions were normalized
+  into `.state/artifacts/workspace/user_review/workspace_review_candidates_run4_filled.csv`.
+  Review preview for audit 4 has `pending=0`, `migration=95`, and
+  `external_routes=85`; latest preview artifacts are under
+  `.state/artifacts/workspace/migration_preview/20260704T203209Z/`.
+- Workspace audit tag rules now force migration before legacy topic reduction:
+  `#мюсли`, `#идеи`, and `#связи` go to `Заметки`, `#опыт` to `Опыт`,
+  `#знания` to `Полезное`, and `#поэзия`/`#аниме` to `Коллекции`.
+- Workspace legacy full scan was completed after network/sandbox restrictions
+  were lifted. SQLite now contains 2324 visible old InSync messages
+  (`1..2437`), including the 1308 older messages that were missing after run 4.
+  Telegram returned `FLOOD_WAIT (18)` once after a large dry-run; waiting and
+  retrying completed the actual sync.
+- Workspace audit run 5 processed the remaining older 1308-message batch and
+  wrote review artifacts under
+  `.state/artifacts/workspace/audit/20260704T204004Z/`. It has 374 review
+  candidates. Its initial Stage 2 preview is under
+  `.state/artifacts/workspace/migration_preview/20260704T204044Z/` with
+  `migration=71`, `external_routes=44`, and `pending=374`; the review table
+  should be filled before publication.
+- `workspace bootstrap-topics --dry-run --timeout 2m` verified that all target
+  `InSync v1.0` topics and all `Sova.Control` topics already exist.

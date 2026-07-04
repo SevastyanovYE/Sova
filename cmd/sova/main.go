@@ -21,6 +21,7 @@ import (
 	"github.com/SevastyanovYE/Sova/internal/qwen"
 	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
 	"github.com/SevastyanovYE/Sova/internal/telegrammt"
+	"github.com/SevastyanovYE/Sova/internal/workspace"
 )
 
 func main() {
@@ -59,6 +60,8 @@ func run(ctx context.Context, args []string) error {
 		return rebuildIndexes(ctx, cfg)
 	case "serve":
 		return controller.Serve(ctx, cfg)
+	case "workspace":
+		return workspaceCommand(ctx, cfg, args[1:])
 	case "nest-check":
 		return nestCheck(ctx, cfg, args[1:])
 	case "nest-seed-topics":
@@ -94,6 +97,7 @@ func initState(cfg config.Config) error {
 		cfg.StateDir,
 		filepath.Join(cfg.StateDir, "raw", "telegram"),
 		filepath.Join(cfg.StateDir, "artifacts"),
+		filepath.Join(cfg.StateDir, "artifacts", "workspace", "audit"),
 		filepath.Join(cfg.StateDir, "media"),
 		filepath.Join(cfg.StateDir, "logs"),
 		filepath.Join(cfg.StateDir, "index"),
@@ -258,6 +262,224 @@ func nestTopicIntroRequests(cfg config.Config) []nest.SendMessageRequest {
 	}
 }
 
+func workspaceCommand(ctx context.Context, cfg config.Config, args []string) error {
+	if len(args) == 0 {
+		printWorkspaceUsage()
+		return nil
+	}
+	store, err := sqlitestore.Open(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	switch args[0] {
+	case "doctor":
+		fmt.Print(workspace.FormatChecks(workspace.DoctorChecks(ctx, cfg, store)))
+		return nil
+	case "discover":
+		return workspaceDiscover(ctx, cfg, store, args[1:])
+	case "sync-legacy":
+		return workspaceSyncLegacy(ctx, cfg, store, args[1:])
+	case "audit":
+		return workspaceAudit(ctx, cfg, store, args[1:])
+	case "review-preview":
+		return workspaceReviewPreview(ctx, cfg, store, args[1:])
+	case "bootstrap-topics":
+		return workspaceBootstrapTopics(ctx, cfg, args[1:])
+	case "help", "-h", "--help":
+		printWorkspaceUsage()
+		return nil
+	default:
+		return fmt.Errorf("unknown workspace command %q", args[0])
+	}
+}
+
+func workspaceSyncLegacy(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace sync-legacy", flag.ContinueOnError)
+	limit := flags.Int("limit", 100, "maximum recent messages to fetch from the legacy Workspace source")
+	dryRun := flags.Bool("dry-run", false, "fetch and report without writing SQLite or raw JSONL")
+	backfill := flags.Bool("backfill", false, "fetch older messages before the oldest stored legacy message")
+	fullScan := flags.Bool("full-scan", false, "ignore the cursor and rescan available legacy history from newest to oldest")
+	timeout := flags.Duration("timeout", 5*time.Minute, "maximum time for legacy Telegram sync calls; 0 disables the deadline")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *backfill && *fullScan {
+		return fmt.Errorf("--backfill and --full-scan cannot be used together")
+	}
+	syncCtx := ctx
+	cancel := func() {}
+	if *timeout > 0 {
+		syncCtx, cancel = context.WithTimeout(ctx, *timeout)
+	}
+	defer cancel()
+	result, err := telegrammt.New(cfg).SyncWorkspaceLegacy(syncCtx, store, telegrammt.SyncOptions{
+		LimitPerSource: *limit,
+		DryRun:         *dryRun,
+		Backfill:       *backfill,
+		FullScan:       *fullScan,
+	})
+	if err != nil {
+		return err
+	}
+	mode := "workspace sync-legacy"
+	if *dryRun {
+		mode += " dry-run"
+	}
+	if *backfill {
+		mode += " backfill"
+	}
+	if *fullScan {
+		mode += " full-scan"
+	}
+	for _, source := range result.Sources {
+		fmt.Printf("%s: %s (%s) fetched=%d new=%d inserted=%d\n",
+			mode, source.SourceRef, source.Title, source.Fetched, source.New, source.Inserted)
+	}
+	return nil
+}
+
+func workspaceDiscover(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace discover", flag.ContinueOnError)
+	dryRun := flags.Bool("dry-run", false, "discover topics without writing SQLite")
+	limit := flags.Int("limit", 100, "maximum forum topics to read")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	discovery, err := telegrammt.New(cfg).DiscoverForumTopics(ctx, store, cfg.Workspace.LegacySource, *limit)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if !*dryRun {
+		if _, err := store.UpsertTelegramSource(ctx, discovery.Source, now); err != nil {
+			return err
+		}
+		for i := range discovery.Topics {
+			discovery.Topics[i].DiscoveredAt = now
+		}
+		if err := store.UpsertWorkspaceTopics(ctx, discovery.Topics, now); err != nil {
+			return err
+		}
+	}
+	mode := "workspace discover"
+	if *dryRun {
+		mode = "workspace discover dry-run"
+	}
+	fmt.Printf("%s: %s (%s) topics=%d\n", mode, discovery.Source.Ref, discovery.Source.Title, len(discovery.Topics))
+	for _, topic := range discovery.Topics {
+		pin := ""
+		if topic.Pinned {
+			pin = " pinned"
+		}
+		fmt.Printf("- id=%d top=%d%s title=%s\n", topic.TopicID, topic.TopMessageID, pin, topic.Title)
+	}
+	if *dryRun {
+		fmt.Println("no SQLite writes performed")
+	} else {
+		fmt.Println("cached workspace topic metadata in SQLite")
+	}
+	return nil
+}
+
+func workspaceAudit(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace audit", flag.ContinueOnError)
+	dryRun := flags.Bool("dry-run", false, "classify and summarize without writing SQLite or artifacts")
+	limit := flags.Int("limit", 0, "maximum indexed legacy messages to audit; 0 means all indexed messages")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	result, err := workspace.RunAudit(ctx, cfg, store, workspace.AuditOptions{
+		DryRun: *dryRun,
+		Limit:  *limit,
+		Now:    time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	if *dryRun {
+		fmt.Print(result.Summary)
+		return nil
+	}
+	fmt.Printf("workspace audit %d finished: messages=%d review_candidates=%d\n", result.RunID, result.Messages, result.ReviewCount)
+	fmt.Println("summary:", result.SummaryPath)
+	fmt.Println("review csv:", result.ReviewCSVPath)
+	fmt.Println("review md:", result.ReviewMDPath)
+	fmt.Println("control card drafts:", result.ControlCardsPath)
+	fmt.Println("topic pin drafts:", result.TopicPinsPath)
+	fmt.Println("next: fill user_decision/user_comment in the review file before Stage 2")
+	return nil
+}
+
+func workspaceReviewPreview(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace review-preview", flag.ContinueOnError)
+	auditRunID := flags.Int64("audit-run", 0, "workspace audit run ID; 0 means latest successful audit")
+	reviewCSV := flags.String("review-csv", "", "user-filled workspace_review_candidates.csv; default uses the audit artifact")
+	outputDir := flags.String("out-dir", "", "output directory for migration preview")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	result, err := workspace.BuildReviewPreview(ctx, cfg, store, workspace.ReviewPreviewOptions{
+		AuditRunID:    *auditRunID,
+		ReviewCSVPath: *reviewCSV,
+		OutputDir:     *outputDir,
+		Now:           time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("workspace review preview for audit %d: records=%d migration=%d external_routes=%d pending=%d\n",
+		result.AuditRunID, result.Records, result.MigrationItems, result.ExternalRoutes, result.PendingDecisions)
+	fmt.Println("preview:", result.PreviewPath)
+	fmt.Println("preview csv:", result.PreviewCSVPath)
+	if result.NeedsApproval {
+		fmt.Println("next: review and approve this preview before migration publication")
+	} else {
+		fmt.Println("next: fill missing user_decision values, then rerun review-preview")
+	}
+	return nil
+}
+
+func workspaceBootstrapTopics(ctx context.Context, cfg config.Config, args []string) error {
+	flags := flag.NewFlagSet("workspace bootstrap-topics", flag.ContinueOnError)
+	workspaceTitle := flags.String("workspace-title", workspace.DefaultWorkspaceTitle, "Telegram dialog title for InSync v1.0")
+	controlTitle := flags.String("control-title", workspace.DefaultControlTitle, "Telegram dialog title for Sova.Control")
+	outputPath := flags.String("out", "", "env-style output file with chat/topic IDs")
+	dryRun := flags.Bool("dry-run", false, "discover and report without creating missing topics")
+	timeout := flags.Duration("timeout", 2*time.Minute, "maximum time for Telegram bootstrap calls; 0 disables the deadline")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	bootstrapCtx := ctx
+	cancel := func() {}
+	if *timeout > 0 {
+		bootstrapCtx, cancel = context.WithTimeout(ctx, *timeout)
+	}
+	defer cancel()
+	result, err := workspace.BootstrapTopics(bootstrapCtx, cfg, workspace.BootstrapOptions{
+		WorkspaceTitle: *workspaceTitle,
+		ControlTitle:   *controlTitle,
+		OutputPath:     *outputPath,
+		DryRun:         *dryRun,
+		Now:            time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	for _, group := range result.Groups {
+		fmt.Printf("%s %q chat_id=%d source=%s\n", group.Kind, group.Title, group.BotAPIChatID, group.SourceRef)
+		for _, topic := range group.Topics {
+			fmt.Printf("- %-12s id=%d status=%s\n", topic.Name, topic.TopicID, topic.Status)
+		}
+	}
+	fmt.Println("wrote ids:", result.OutputPath)
+	if result.DryRun {
+		fmt.Println("dry-run: no missing topics were created")
+	}
+	return nil
+}
+
 func telegramStatus(ctx context.Context, cfg config.Config) error {
 	status, err := telegrammt.New(cfg).AuthStatus(ctx)
 	if err != nil {
@@ -287,6 +509,7 @@ func telegramSync(ctx context.Context, cfg config.Config, args []string) error {
 	flags := flag.NewFlagSet("sync", flag.ContinueOnError)
 	limit := flags.Int("limit", 100, "maximum recent messages to fetch per Sova Nest study source")
 	dryRun := flags.Bool("dry-run", false, "fetch and report without writing SQLite, raw JSONL, or indexes")
+	backfill := flags.Bool("backfill", false, "fetch older messages before the oldest stored message for each source")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -299,6 +522,7 @@ func telegramSync(ctx context.Context, cfg config.Config, args []string) error {
 	result, err := telegrammt.New(cfg).Sync(ctx, store, telegrammt.SyncOptions{
 		LimitPerSource: *limit,
 		DryRun:         *dryRun,
+		Backfill:       *backfill,
 	})
 	if err != nil {
 		return err
@@ -306,6 +530,9 @@ func telegramSync(ctx context.Context, cfg config.Config, args []string) error {
 	mode := "sync"
 	if *dryRun {
 		mode = "sync dry-run"
+	}
+	if *backfill {
+		mode += " backfill"
 	}
 	for _, source := range result.Sources {
 		fmt.Printf("%s: %s (%s) fetched=%d new=%d inserted=%d\n",
@@ -1034,12 +1261,18 @@ Usage:
   sova status
   sova index
   sova serve
+  sova workspace doctor
+  sova workspace discover [--dry-run] [--limit 100]
+  sova workspace sync-legacy [--limit 100] [--dry-run] [--backfill|--full-scan] [--timeout 5m]
+  sova workspace audit [--dry-run] [--limit 0]
+  sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
+  sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
   sova nest-check [--send-status]
   sova nest-seed-topics
   sova telegram-status
   sova telegram-login
   sova telegram-login-qr
-  sova sync [--limit 100] [--dry-run]
+  sova sync [--limit 100] [--dry-run] [--backfill]
   sova qwen-smoke
   sova qwen-calibrate --input examples.jsonl
   sova qwen-calibrate --run-id RUN_ID
@@ -1047,4 +1280,23 @@ Usage:
   sova qwen-benchmark --run-id RUN_ID --models qwen3:14b,qwen3:8b,qwen3:4b,gemma3:4b,llama3.2:3b
   sova qwen-eval --labels labels.jsonl --models qwen3:14b,qwen3:8b
   sova google-login`)
+}
+
+func printWorkspaceUsage() {
+	fmt.Println(`Sova.Workspace MVP
+
+Usage:
+  sova workspace doctor
+  sova workspace discover [--dry-run] [--limit 100]
+  sova workspace sync-legacy [--limit 100] [--dry-run] [--backfill|--full-scan] [--timeout 5m]
+  sova workspace audit [--dry-run] [--limit 0]
+  sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
+  sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
+
+Notes:
+  discover reads forum topic metadata from the legacy InSync source.
+  sync-legacy indexes only SOVA_WORKSPACE_LEGACY_SOURCE and does not update the Nest recent index.
+  audit uses already indexed Telegram messages and writes review artifacts unless --dry-run is set.
+  review-preview merges user-filled review decisions into a migration preview and stops for approval.
+  bootstrap-topics creates only missing target forum topics and writes an env-style ID file.`)
 }

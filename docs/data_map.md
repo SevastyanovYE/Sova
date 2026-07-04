@@ -14,6 +14,11 @@ Read this file before opening runtime data.
 | Qwen labeled eval | generated `.state/index/qwen-eval.md` | `.state/artifacts/qwen-eval/*.jsonl` |
 | Extracted knowledge | generated `.state/index/facts.md` | SQLite facts/artifacts |
 | Calendar candidates | generated `.state/index/calendar.md` | SQLite event candidates/events |
+| Workspace foundation | `docs/workspace/overview.md` | Workspace config and future stage docs |
+| Workspace audit rules | `docs/workspace/audit.md` | `.state/artifacts/workspace/audit/` |
+| Workspace data contracts | `docs/workspace/data_contracts.md` | SQLite `workspace_*` tables |
+| Workspace migration preview | `docs/workspace/audit.md` | `.state/artifacts/workspace/migration_preview/` |
+| Workspace/Control topic IDs | `docs/workspace/data_contracts.md` | `.state/artifacts/workspace/bootstrap/` |
 | A particular file | artifact index entry | `.state/media/` or `.state/artifacts/` |
 
 Generated indexes are compact navigation surfaces. They may be rebuilt from

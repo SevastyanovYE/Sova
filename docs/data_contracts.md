@@ -90,3 +90,20 @@ Google Calendar events are created only after approval and use reminders at
 Before approval, a pending candidate date may be edited from the Calendar topic
 with the formats `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`. Date-only edits preserve
 the existing event time and duration.
+
+## Workspace audit
+
+Workspace Stage 1 uses dedicated `workspace_*` tables and generated artifacts
+under `.state/artifacts/workspace/audit/<run-id>/`.
+
+Forum topic discovery stores only compact topic metadata in `workspace_topics`.
+Durable audits store compact per-message records in `workspace_audit_runs` and
+`workspace_audit_records`. Each audit record preserves `source_ref`, `chat_id`,
+`message_id`, and `message_link`; it does not replace immutable raw Telegram
+records.
+
+Review artifacts contain uncertain rows only. User decisions are captured in
+empty `user_decision` and `user_comment` columns for Stage 2 merge/preview.
+
+Workspace Stage 1 must not migrate, mass post, delete, or edit Telegram
+messages.

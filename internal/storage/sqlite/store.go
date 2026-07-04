@@ -111,6 +111,68 @@ type CalendarCandidate struct {
 	UpdatedAt       time.Time
 }
 
+type WorkspaceTopic struct {
+	SourceRef    string
+	ChatID       int64
+	TopicID      int
+	TopMessageID int
+	Title        string
+	Pinned       bool
+	Closed       bool
+	Hidden       bool
+	CreatedAt    time.Time
+	DiscoveredAt time.Time
+}
+
+type WorkspaceAuditRun struct {
+	ID          int64
+	SourceRef   string
+	Status      string
+	DryRun      bool
+	StartedAt   time.Time
+	FinishedAt  *time.Time
+	ArtifactDir string
+	Summary     string
+	Error       string
+}
+
+type WorkspaceSourceMessage struct {
+	SourceRef   string
+	SourceTitle string
+	Username    string
+	ChatID      int64
+	MessageID   int
+	Date        time.Time
+	Kind        string
+	Text        string
+	MediaType   string
+	SourceLink  string
+	RawJSON     string
+}
+
+type WorkspaceAuditRecord struct {
+	RunID           int64
+	SourceRef       string
+	ChatID          int64
+	MessageID       int
+	SourceTopic     string
+	TopicID         int
+	TopMessageID    int
+	MessageDate     time.Time
+	EditDate        *time.Time
+	MessageLink     string
+	ShortSummary    string
+	DetectedType    string
+	ModelDecision   string
+	Confidence      string
+	SuggestedTarget string
+	Reason          string
+	MediaType       string
+	Pinned          bool
+	LongMessage     bool
+	Edited          bool
+}
+
 type CooldownError struct {
 	NextAllowedAt time.Time
 }
@@ -245,6 +307,61 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_candidates_run_message
     ON calendar_candidates(run_id, chat_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_calendar_candidates_status
     ON calendar_candidates(status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS workspace_topics (
+    source_ref TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    topic_id INTEGER NOT NULL,
+    top_message_id INTEGER NOT NULL DEFAULT 0,
+    title TEXT NOT NULL DEFAULT '',
+    pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
+    closed INTEGER NOT NULL CHECK (closed IN (0, 1)),
+    hidden INTEGER NOT NULL CHECK (hidden IN (0, 1)),
+    created_at TEXT,
+    discovered_at TEXT NOT NULL,
+    PRIMARY KEY(source_ref, topic_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_topics_chat
+    ON workspace_topics(chat_id, topic_id);
+CREATE TABLE IF NOT EXISTS workspace_audit_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_ref TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed')),
+    dry_run INTEGER NOT NULL CHECK (dry_run IN (0, 1)),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    artifact_dir TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_audit_runs_started
+    ON workspace_audit_runs(started_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS workspace_audit_records (
+    run_id INTEGER NOT NULL REFERENCES workspace_audit_runs(id),
+    source_ref TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    source_topic TEXT NOT NULL DEFAULT '',
+    topic_id INTEGER NOT NULL DEFAULT 0,
+    top_message_id INTEGER NOT NULL DEFAULT 0,
+    message_date TEXT NOT NULL,
+    edit_date TEXT,
+    message_link TEXT NOT NULL DEFAULT '',
+    short_summary TEXT NOT NULL DEFAULT '',
+    detected_type TEXT NOT NULL,
+    model_decision TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    suggested_target TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    media_type TEXT NOT NULL DEFAULT '',
+    pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
+    long_message INTEGER NOT NULL CHECK (long_message IN (0, 1)),
+    edited INTEGER NOT NULL CHECK (edited IN (0, 1)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, chat_id, message_id),
+    FOREIGN KEY(chat_id, message_id) REFERENCES telegram_messages(chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_audit_records_decision
+    ON workspace_audit_records(run_id, model_decision, detected_type);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate SQLite: %w", err)
@@ -456,6 +573,33 @@ WHERE ref = ?`, ref).Scan(
 	return source, nil
 }
 
+func (s *Store) TelegramSources(ctx context.Context) ([]TelegramSource, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, ref, peer_kind, chat_id, access_hash, title, username, last_message_id
+FROM telegram_sources
+ORDER BY title, ref`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sources []TelegramSource
+	for rows.Next() {
+		var source TelegramSource
+		if err := rows.Scan(
+			&source.ID, &source.Ref, &source.PeerKind, &source.ChatID,
+			&source.AccessHash, &source.Title, &source.Username, &source.LastMessageID,
+		); err != nil {
+			return nil, err
+		}
+		sources = append(sources, source)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return sources, nil
+}
+
 func (s *Store) InsertTelegramMessages(ctx context.Context, messages []TelegramMessage) (int, int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -524,6 +668,24 @@ WHERE chat_id = ? AND message_id = ?`,
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) TelegramMessageIDBounds(ctx context.Context, sourceID int64) (minID int, maxID int, ok bool, err error) {
+	if sourceID == 0 {
+		return 0, 0, false, fmt.Errorf("source id is required")
+	}
+	var minRaw, maxRaw sql.NullInt64
+	err = s.db.QueryRowContext(ctx, `
+SELECT MIN(message_id), MAX(message_id)
+FROM telegram_messages
+WHERE source_id = ?`, sourceID).Scan(&minRaw, &maxRaw)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if !minRaw.Valid || !maxRaw.Valid {
+		return 0, 0, false, nil
+	}
+	return int(minRaw.Int64), int(maxRaw.Int64), true, nil
 }
 
 func (s *Store) RecentTelegramMessages(ctx context.Context, limit int) ([]TelegramRecentMessage, error) {
@@ -706,6 +868,271 @@ LIMIT ?`, seed, limit)
 		return nil, err
 	}
 	return messages, nil
+}
+
+func (s *Store) WorkspaceMessagesBySourceRef(ctx context.Context, sourceRef string, limit int) ([]WorkspaceSourceMessage, error) {
+	sourceRef = strings.TrimSpace(sourceRef)
+	if sourceRef == "" {
+		return nil, fmt.Errorf("source ref is required")
+	}
+	query := `
+SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind,
+       m.text, m.media_type, m.source_link, m.raw_json
+FROM telegram_messages m
+JOIN telegram_sources s ON s.id = m.source_id
+WHERE s.ref = ?
+ORDER BY m.date, m.chat_id, m.message_id`
+	args := []any{sourceRef}
+	if limit > 0 {
+		query += "\nLIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []WorkspaceSourceMessage
+	for rows.Next() {
+		var message WorkspaceSourceMessage
+		var dateRaw string
+		if err := rows.Scan(
+			&message.SourceRef, &message.SourceTitle, &message.Username,
+			&message.ChatID, &message.MessageID, &dateRaw, &message.Kind,
+			&message.Text, &message.MediaType, &message.SourceLink, &message.RawJSON,
+		); err != nil {
+			return nil, err
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, dateRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse workspace message date: %w", err)
+		}
+		message.Date = parsed
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+func (s *Store) UpsertWorkspaceTopics(ctx context.Context, topics []WorkspaceTopic, now time.Time) error {
+	if len(topics) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, topic := range topics {
+		if strings.TrimSpace(topic.SourceRef) == "" || topic.ChatID == 0 || topic.TopicID == 0 {
+			return fmt.Errorf("invalid workspace topic identity")
+		}
+		var created any
+		if !topic.CreatedAt.IsZero() {
+			created = topic.CreatedAt.UTC().Format(time.RFC3339Nano)
+		}
+		discoveredAt := topic.DiscoveredAt
+		if discoveredAt.IsZero() {
+			discoveredAt = now
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO workspace_topics(
+    source_ref, chat_id, topic_id, top_message_id, title, pinned, closed,
+    hidden, created_at, discovered_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(source_ref, topic_id) DO UPDATE SET
+    chat_id = excluded.chat_id,
+    top_message_id = excluded.top_message_id,
+    title = excluded.title,
+    pinned = excluded.pinned,
+    closed = excluded.closed,
+    hidden = excluded.hidden,
+    created_at = excluded.created_at,
+    discovered_at = excluded.discovered_at`,
+			topic.SourceRef, topic.ChatID, topic.TopicID, topic.TopMessageID,
+			topic.Title, boolInt(topic.Pinned), boolInt(topic.Closed),
+			boolInt(topic.Hidden), created, discoveredAt.UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) WorkspaceTopicsBySource(ctx context.Context, sourceRef string) ([]WorkspaceTopic, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT source_ref, chat_id, topic_id, top_message_id, title, pinned, closed,
+       hidden, created_at, discovered_at
+FROM workspace_topics
+WHERE source_ref = ?
+ORDER BY pinned DESC, title, topic_id`, sourceRef)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var topics []WorkspaceTopic
+	for rows.Next() {
+		topic, err := scanWorkspaceTopic(rows)
+		if err != nil {
+			return nil, err
+		}
+		topics = append(topics, topic)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return topics, nil
+}
+
+func (s *Store) StartWorkspaceAudit(ctx context.Context, sourceRef string, dryRun bool, artifactDir string, now time.Time) (WorkspaceAuditRun, error) {
+	sourceRef = strings.TrimSpace(sourceRef)
+	if sourceRef == "" {
+		return WorkspaceAuditRun{}, fmt.Errorf("source ref is required")
+	}
+	result, err := s.db.ExecContext(ctx, `
+INSERT INTO workspace_audit_runs(source_ref, status, dry_run, started_at, artifact_dir)
+VALUES (?, 'running', ?, ?, ?)`,
+		sourceRef, boolInt(dryRun), now.UTC().Format(time.RFC3339Nano), artifactDir)
+	if err != nil {
+		return WorkspaceAuditRun{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return WorkspaceAuditRun{}, err
+	}
+	return WorkspaceAuditRun{
+		ID: id, SourceRef: sourceRef, Status: "running", DryRun: dryRun,
+		StartedAt: now.UTC(), ArtifactDir: artifactDir,
+	}, nil
+}
+
+func (s *Store) FinishWorkspaceAudit(ctx context.Context, id int64, status, summary, runErr string, now time.Time) error {
+	if status != "success" && status != "failed" {
+		return fmt.Errorf("invalid workspace audit status %q", status)
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workspace_audit_runs
+SET status = ?, finished_at = ?, summary = ?, error = ?
+WHERE id = ? AND status = 'running'`,
+		status, now.UTC().Format(time.RFC3339Nano), summary, runErr, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("running workspace audit %d not found", id)
+	}
+	return nil
+}
+
+func (s *Store) WorkspaceAuditRunByID(ctx context.Context, id int64) (WorkspaceAuditRun, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, source_ref, status, dry_run, started_at, finished_at, artifact_dir, summary, error
+FROM workspace_audit_runs
+WHERE id = ?`, id)
+	run, err := scanWorkspaceAuditRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkspaceAuditRun{}, false, nil
+	}
+	if err != nil {
+		return WorkspaceAuditRun{}, false, err
+	}
+	return run, true, nil
+}
+
+func (s *Store) LatestSuccessfulWorkspaceAuditRun(ctx context.Context) (WorkspaceAuditRun, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, source_ref, status, dry_run, started_at, finished_at, artifact_dir, summary, error
+FROM workspace_audit_runs
+WHERE status = 'success' AND dry_run = 0
+ORDER BY started_at DESC, id DESC
+LIMIT 1`)
+	run, err := scanWorkspaceAuditRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkspaceAuditRun{}, false, nil
+	}
+	if err != nil {
+		return WorkspaceAuditRun{}, false, err
+	}
+	return run, true, nil
+}
+
+func (s *Store) WorkspaceAuditRecordsByRun(ctx context.Context, runID int64) ([]WorkspaceAuditRecord, error) {
+	if runID <= 0 {
+		return nil, fmt.Errorf("workspace audit run id is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT run_id, source_ref, chat_id, message_id, source_topic, topic_id,
+       top_message_id, message_date, edit_date, message_link, short_summary,
+       detected_type, model_decision, confidence, suggested_target, reason,
+       media_type, pinned, long_message, edited
+FROM workspace_audit_records
+WHERE run_id = ?
+ORDER BY message_date, chat_id, message_id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []WorkspaceAuditRecord
+	for rows.Next() {
+		record, err := scanWorkspaceAuditRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func (s *Store) InsertWorkspaceAuditRecords(ctx context.Context, records []WorkspaceAuditRecord, now time.Time) error {
+	if len(records) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, record := range records {
+		if record.RunID == 0 || strings.TrimSpace(record.SourceRef) == "" ||
+			record.ChatID == 0 || record.MessageID == 0 || record.MessageDate.IsZero() {
+			return fmt.Errorf("invalid workspace audit record identity")
+		}
+		var editDate any
+		if record.EditDate != nil && !record.EditDate.IsZero() {
+			editDate = record.EditDate.UTC().Format(time.RFC3339Nano)
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO workspace_audit_records(
+    run_id, source_ref, chat_id, message_id, source_topic, topic_id,
+    top_message_id, message_date, edit_date, message_link, short_summary,
+    detected_type, model_decision, confidence, suggested_target, reason,
+    media_type, pinned, long_message, edited, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			record.RunID, record.SourceRef, record.ChatID, record.MessageID,
+			record.SourceTopic, record.TopicID, record.TopMessageID,
+			record.MessageDate.UTC().Format(time.RFC3339Nano), editDate,
+			record.MessageLink, record.ShortSummary, record.DetectedType,
+			record.ModelDecision, record.Confidence, record.SuggestedTarget,
+			record.Reason, record.MediaType, boolInt(record.Pinned),
+			boolInt(record.LongMessage), boolInt(record.Edited),
+			now.UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) InsertMessageDecisions(ctx context.Context, decisions []MessageDecision, now time.Time) error {
@@ -994,6 +1421,95 @@ func boolInt(value bool) int {
 
 type calendarCandidateScanner interface {
 	Scan(dest ...any) error
+}
+
+func scanWorkspaceTopic(scanner interface{ Scan(dest ...any) error }) (WorkspaceTopic, error) {
+	var topic WorkspaceTopic
+	var pinned, closed, hidden int
+	var createdRaw sql.NullString
+	var discoveredRaw string
+	if err := scanner.Scan(
+		&topic.SourceRef, &topic.ChatID, &topic.TopicID, &topic.TopMessageID,
+		&topic.Title, &pinned, &closed, &hidden, &createdRaw, &discoveredRaw,
+	); err != nil {
+		return WorkspaceTopic{}, err
+	}
+	topic.Pinned = pinned == 1
+	topic.Closed = closed == 1
+	topic.Hidden = hidden == 1
+	if createdRaw.Valid && strings.TrimSpace(createdRaw.String) != "" {
+		created, err := time.Parse(time.RFC3339Nano, createdRaw.String)
+		if err != nil {
+			return WorkspaceTopic{}, fmt.Errorf("parse workspace topic created_at: %w", err)
+		}
+		topic.CreatedAt = created
+	}
+	discovered, err := time.Parse(time.RFC3339Nano, discoveredRaw)
+	if err != nil {
+		return WorkspaceTopic{}, fmt.Errorf("parse workspace topic discovered_at: %w", err)
+	}
+	topic.DiscoveredAt = discovered
+	return topic, nil
+}
+
+func scanWorkspaceAuditRun(scanner interface{ Scan(dest ...any) error }) (WorkspaceAuditRun, error) {
+	var run WorkspaceAuditRun
+	var dryRun int
+	var startedRaw string
+	var finishedRaw sql.NullString
+	if err := scanner.Scan(
+		&run.ID, &run.SourceRef, &run.Status, &dryRun, &startedRaw,
+		&finishedRaw, &run.ArtifactDir, &run.Summary, &run.Error,
+	); err != nil {
+		return WorkspaceAuditRun{}, err
+	}
+	run.DryRun = dryRun == 1
+	started, err := time.Parse(time.RFC3339Nano, startedRaw)
+	if err != nil {
+		return WorkspaceAuditRun{}, fmt.Errorf("parse workspace audit started_at: %w", err)
+	}
+	run.StartedAt = started
+	if finishedRaw.Valid && strings.TrimSpace(finishedRaw.String) != "" {
+		finished, err := time.Parse(time.RFC3339Nano, finishedRaw.String)
+		if err != nil {
+			return WorkspaceAuditRun{}, fmt.Errorf("parse workspace audit finished_at: %w", err)
+		}
+		run.FinishedAt = &finished
+	}
+	return run, nil
+}
+
+func scanWorkspaceAuditRecord(scanner interface{ Scan(dest ...any) error }) (WorkspaceAuditRecord, error) {
+	var record WorkspaceAuditRecord
+	var messageDateRaw string
+	var editDateRaw sql.NullString
+	var pinned, longMessage, edited int
+	if err := scanner.Scan(
+		&record.RunID, &record.SourceRef, &record.ChatID, &record.MessageID,
+		&record.SourceTopic, &record.TopicID, &record.TopMessageID,
+		&messageDateRaw, &editDateRaw, &record.MessageLink, &record.ShortSummary,
+		&record.DetectedType, &record.ModelDecision, &record.Confidence,
+		&record.SuggestedTarget, &record.Reason, &record.MediaType,
+		&pinned, &longMessage, &edited,
+	); err != nil {
+		return WorkspaceAuditRecord{}, err
+	}
+	messageDate, err := time.Parse(time.RFC3339Nano, messageDateRaw)
+	if err != nil {
+		return WorkspaceAuditRecord{}, fmt.Errorf("parse workspace audit message_date: %w", err)
+	}
+	record.MessageDate = messageDate
+	if editDateRaw.Valid && strings.TrimSpace(editDateRaw.String) != "" {
+		editDate, err := time.Parse(time.RFC3339Nano, editDateRaw.String)
+		if err != nil {
+			return WorkspaceAuditRecord{}, fmt.Errorf("parse workspace audit edit_date: %w", err)
+		}
+		record.EditDate = &editDate
+	}
+	record.Pinned = pinned == 1
+	record.LongMessage = longMessage == 1
+	record.Edited = edited == 1
+	return record, nil
 }
 
 func (s *Store) calendarCandidateByQuery(ctx context.Context, query string, args ...any) (CalendarCandidate, error) {

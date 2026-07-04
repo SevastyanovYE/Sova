@@ -221,6 +221,13 @@ func TestTelegramMessagesAreIdempotentCursorAndRecent(t *testing.T) {
 	if source.LastMessageID != 12 {
 		t.Fatalf("last message id after older insert = %d", source.LastMessageID)
 	}
+	minID, maxID, ok, err := store.TelegramMessageIDBounds(ctx, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || minID != 10 || maxID != 12 {
+		t.Fatalf("message bounds = min:%d max:%d ok:%v", minID, maxID, ok)
+	}
 }
 
 func TestTelegramMessagesCreatedBetween(t *testing.T) {
@@ -250,6 +257,56 @@ func TestTelegramMessagesCreatedBetween(t *testing.T) {
 	}
 	if len(messages) != 1 || messages[0].MessageID != 90 || messages[0].SourceTitle != "Study" {
 		t.Fatalf("messages = %+v", messages)
+	}
+}
+
+func TestWorkspaceTopicsAndAuditRecords(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	source, err := store.UpsertTelegramSource(ctx, TelegramSource{
+		Ref: "telegram:channel:100", PeerKind: "channel", ChatID: 100, Title: "InSync",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorkspaceTopics(ctx, []WorkspaceTopic{{
+		SourceRef: source.Ref, ChatID: source.ChatID, TopicID: 10, TopMessageID: 10,
+		Title: "Заметки", Pinned: true, CreatedAt: now.Add(-time.Hour),
+	}}, now); err != nil {
+		t.Fatal(err)
+	}
+	topics, err := store.WorkspaceTopicsBySource(ctx, source.Ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(topics) != 1 || topics[0].Title != "Заметки" || !topics[0].Pinned {
+		t.Fatalf("topics = %+v", topics)
+	}
+	if _, _, err := store.InsertTelegramMessages(ctx, []TelegramMessage{{
+		SourceID: source.ID, ChatID: 100, MessageID: 11, Date: now,
+		Kind: "message", Text: "#мюсли draft", SourceLink: "https://t.me/c/100/11",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.StartWorkspaceAudit(ctx, source.Ref, false, ".state/artifacts/workspace/audit/test", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertWorkspaceAuditRecords(ctx, []WorkspaceAuditRecord{{
+		RunID: run.ID, SourceRef: source.Ref, ChatID: 100, MessageID: 11,
+		SourceTopic: "Заметки", MessageDate: now, MessageLink: "https://t.me/c/100/11",
+		ShortSummary: "#мюсли draft", DetectedType: "draft_note", ModelDecision: "review",
+		Confidence: "medium", SuggestedTarget: "Заметки", Reason: "test",
+	}}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishWorkspaceAudit(ctx, run.ID, "success", "done", "", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
 	}
 }
 

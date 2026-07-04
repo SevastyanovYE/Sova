@@ -30,6 +30,40 @@ type TopicIDs struct {
 	Chat     int
 }
 
+type WorkspaceTopicIDs struct {
+	Inbox       int
+	Tasks       int
+	Notes       int
+	Experience  int
+	Useful      int
+	Templates   int
+	Collections int
+}
+
+type ControlTopicIDs struct {
+	Status    int
+	Errors    int
+	Runs      int
+	Review    int
+	TestLab   int
+	Workspace int
+	Nest      int
+	Ideas     int
+}
+
+type WorkspaceConfig struct {
+	BotToken     string
+	LegacySource string
+	ChatID       int64
+	Topics       WorkspaceTopicIDs
+}
+
+type ControlConfig struct {
+	BotToken string
+	ChatID   int64
+	Topics   ControlTopicIDs
+}
+
 type Config struct {
 	Timezone                 string
 	StateDir                 string
@@ -44,6 +78,8 @@ type Config struct {
 	NestBotToken             string
 	NestChatID               int64
 	NestTopics               TopicIDs
+	Workspace                WorkspaceConfig
+	Control                  ControlConfig
 	OllamaURL                string
 	OllamaModel              string
 	CodexPath                string
@@ -84,6 +120,74 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	workspaceChatID, err := int64Env("SOVA_WORKSPACE_CHAT_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	workspaceInboxID, err := intEnv("SOVA_WORKSPACE_TOPIC_INBOX_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	workspaceTasksID, err := intEnv("SOVA_WORKSPACE_TOPIC_TASKS_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	workspaceNotesID, err := intEnv("SOVA_WORKSPACE_TOPIC_NOTES_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	workspaceExperienceID, err := intEnv("SOVA_WORKSPACE_TOPIC_EXPERIENCE_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	workspaceUsefulID, err := intEnv("SOVA_WORKSPACE_TOPIC_USEFUL_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	workspaceTemplatesID, err := intEnv("SOVA_WORKSPACE_TOPIC_TEMPLATES_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	workspaceCollectionsID, err := intEnv("SOVA_WORKSPACE_TOPIC_COLLECTIONS_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	controlChatID, err := int64Env("SOVA_CONTROL_CHAT_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	controlStatusID, err := intEnv("SOVA_CONTROL_TOPIC_STATUS_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	controlErrorsID, err := intEnv("SOVA_CONTROL_TOPIC_ERRORS_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	controlRunsID, err := intEnv("SOVA_CONTROL_TOPIC_RUNS_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	controlReviewID, err := intEnv("SOVA_CONTROL_TOPIC_REVIEW_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	controlTestLabID, err := intEnv("SOVA_CONTROL_TOPIC_TEST_LAB_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	controlWorkspaceID, err := intEnv("SOVA_CONTROL_TOPIC_WORKSPACE_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	controlNestID, err := intEnv("SOVA_CONTROL_TOPIC_NEST_ID")
+	if err != nil {
+		return Config{}, err
+	}
+	controlIdeasID, err := intEnv("SOVA_CONTROL_TOPIC_IDEAS_ID")
+	if err != nil {
+		return Config{}, err
+	}
 
 	stateDir := valueOrDefault("SOVA_STATE_DIR", defaultStateDir)
 	return Config{
@@ -101,6 +205,25 @@ func Load() (Config, error) {
 		NestChatID:               nestChatID,
 		NestTopics: TopicIDs{
 			Digest: digestID, Calendar: calendarID, Status: statusID, Chat: chatID,
+		},
+		Workspace: WorkspaceConfig{
+			BotToken:     strings.TrimSpace(os.Getenv("SOVA_WORKSPACE_BOT_TOKEN")),
+			LegacySource: strings.TrimSpace(os.Getenv("SOVA_WORKSPACE_LEGACY_SOURCE")),
+			ChatID:       workspaceChatID,
+			Topics: WorkspaceTopicIDs{
+				Inbox: workspaceInboxID, Tasks: workspaceTasksID, Notes: workspaceNotesID,
+				Experience: workspaceExperienceID, Useful: workspaceUsefulID,
+				Templates: workspaceTemplatesID, Collections: workspaceCollectionsID,
+			},
+		},
+		Control: ControlConfig{
+			BotToken: strings.TrimSpace(os.Getenv("SOVA_CONTROL_BOT_TOKEN")),
+			ChatID:   controlChatID,
+			Topics: ControlTopicIDs{
+				Status: controlStatusID, Errors: controlErrorsID, Runs: controlRunsID,
+				Review: controlReviewID, TestLab: controlTestLabID, Workspace: controlWorkspaceID,
+				Nest: controlNestID, Ideas: controlIdeasID,
+			},
 		},
 		OllamaURL:         valueOrDefault("SOVA_OLLAMA_URL", defaultOllamaURL),
 		OllamaModel:       valueOrDefault("SOVA_OLLAMA_MODEL", defaultOllamaModel),
@@ -182,6 +305,27 @@ func (c Config) NestReady() bool {
 	return c.NestBotToken != "" && c.NestChatID != 0 &&
 		c.NestTopics.Digest > 0 && c.NestTopics.Calendar > 0 &&
 		c.NestTopics.Status > 0 && c.NestTopics.Chat > 0
+}
+
+func (c Config) WorkspaceConfigured() bool {
+	return strings.TrimSpace(c.Workspace.BotToken) != "" && c.Workspace.ChatID != 0 &&
+		c.Workspace.Topics.Inbox > 0 && c.Workspace.Topics.Tasks > 0 &&
+		c.Workspace.Topics.Notes > 0 && c.Workspace.Topics.Experience > 0 &&
+		c.Workspace.Topics.Useful > 0 && c.Workspace.Topics.Templates > 0 &&
+		c.Workspace.Topics.Collections > 0
+}
+
+func (c Config) WorkspaceAuditConfigured() bool {
+	return strings.TrimSpace(c.Workspace.LegacySource) != "" &&
+		c.TelegramAppID != 0 && strings.TrimSpace(c.TelegramAppHash) != ""
+}
+
+func (c Config) ControlConfigured() bool {
+	return strings.TrimSpace(c.Control.BotToken) != "" && c.Control.ChatID != 0 &&
+		c.Control.Topics.Status > 0 && c.Control.Topics.Errors > 0 &&
+		c.Control.Topics.Runs > 0 && c.Control.Topics.Review > 0 &&
+		c.Control.Topics.TestLab > 0 && c.Control.Topics.Workspace > 0 &&
+		c.Control.Topics.Nest > 0 && c.Control.Topics.Ideas > 0
 }
 
 func (c Config) IsCommandTopic(threadID int) bool {
