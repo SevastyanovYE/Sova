@@ -64,6 +64,8 @@ go run ./cmd/sova workspace audit
 go run ./cmd/sova workspace review-preview
 go run ./cmd/sova workspace bootstrap-topics --dry-run
 go run ./cmd/sova workspace bootstrap-topics
+go run ./cmd/sova workspace seed-topic-pins --dry-run
+go run ./cmd/sova workspace seed-topic-pins
 ```
 
 `discover` reads forum topic metadata for the old `InSync` source through the
@@ -90,3 +92,7 @@ under `.state/artifacts/workspace/migration_preview/`. It does not publish.
 dedicated MTProto session, reads existing forum topics, creates only missing
 target topics through Bot API, and writes an env-style ID file under
 `.state/artifacts/workspace/bootstrap/`. It requires network access to Telegram.
+
+`seed-topic-pins` sends the raw first-pass pin text into each configured
+`InSync v1.0` topic. It does not pin messages automatically; use the sent
+messages as the human-reviewable starting point for future topic pins.

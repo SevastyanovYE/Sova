@@ -330,7 +330,7 @@ func applyAuditDecision(item *previewItem) {
 
 func targetFromAudit(record sqlitestore.WorkspaceAuditRecord) string {
 	target := strings.TrimSpace(record.SuggestedTarget)
-	if target != "" && target != "Review" {
+	if isWorkspaceTarget(target) {
 		return target
 	}
 	switch record.DetectedType {
@@ -347,7 +347,16 @@ func targetFromAudit(record sqlitestore.WorkspaceAuditRecord) string {
 	case TypeIdea, TypeDraftNote, TypeNoteDocument:
 		return "Заметки"
 	default:
-		return "Review"
+		return "Inbox"
+	}
+}
+
+func isWorkspaceTarget(target string) bool {
+	switch strings.TrimSpace(target) {
+	case "Inbox", "Задачи", "Заметки", "Опыт", "Полезное", "Заготовки", "Коллекции":
+		return true
+	default:
+		return false
 	}
 }
 

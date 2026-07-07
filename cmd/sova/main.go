@@ -287,6 +287,8 @@ func workspaceCommand(ctx context.Context, cfg config.Config, args []string) err
 		return workspaceReviewPreview(ctx, cfg, store, args[1:])
 	case "bootstrap-topics":
 		return workspaceBootstrapTopics(ctx, cfg, args[1:])
+	case "seed-topic-pins":
+		return workspaceSeedTopicPins(ctx, cfg, args[1:])
 	case "help", "-h", "--help":
 		printWorkspaceUsage()
 		return nil
@@ -476,6 +478,44 @@ func workspaceBootstrapTopics(ctx context.Context, cfg config.Config, args []str
 	fmt.Println("wrote ids:", result.OutputPath)
 	if result.DryRun {
 		fmt.Println("dry-run: no missing topics were created")
+	}
+	return nil
+}
+
+func workspaceSeedTopicPins(ctx context.Context, cfg config.Config, args []string) error {
+	flags := flag.NewFlagSet("workspace seed-topic-pins", flag.ContinueOnError)
+	dryRun := flags.Bool("dry-run", false, "print planned topic messages without sending them")
+	timeout := flags.Duration("timeout", 2*time.Minute, "maximum time for Bot API send calls; 0 disables the deadline")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	seedCtx := ctx
+	cancel := func() {}
+	if *timeout > 0 {
+		seedCtx, cancel = context.WithTimeout(ctx, *timeout)
+	}
+	defer cancel()
+	result, err := workspace.SeedWorkspaceTopicPins(seedCtx, cfg, workspace.SeedTopicPinsOptions{
+		DryRun: *dryRun,
+		Now:    time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	mode := "workspace seed-topic-pins"
+	if result.DryRun {
+		mode += " dry-run"
+	}
+	for _, item := range result.Items {
+		fmt.Printf("%s: %-12s topic_id=%d status=%s", mode, item.Topic, item.TopicID, item.Status)
+		if item.MessageID > 0 {
+			fmt.Printf(" message_id=%d", item.MessageID)
+		}
+		fmt.Println()
+		if result.DryRun {
+			fmt.Println(item.Text)
+			fmt.Println()
+		}
 	}
 	return nil
 }
@@ -1267,6 +1307,7 @@ Usage:
   sova workspace audit [--dry-run] [--limit 0]
   sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
   sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
+  sova workspace seed-topic-pins [--dry-run] [--timeout 2m]
   sova nest-check [--send-status]
   sova nest-seed-topics
   sova telegram-status
@@ -1292,11 +1333,13 @@ Usage:
   sova workspace audit [--dry-run] [--limit 0]
   sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
   sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
+  sova workspace seed-topic-pins [--dry-run] [--timeout 2m]
 
 Notes:
   discover reads forum topic metadata from the legacy InSync source.
   sync-legacy indexes only SOVA_WORKSPACE_LEGACY_SOURCE and does not update the Nest recent index.
   audit uses already indexed Telegram messages and writes review artifacts unless --dry-run is set.
   review-preview merges user-filled review decisions into a migration preview and stops for approval.
-  bootstrap-topics creates only missing target forum topics and writes an env-style ID file.`)
+  bootstrap-topics creates only missing target forum topics and writes an env-style ID file.
+  seed-topic-pins sends raw first-pass pin messages into configured Workspace topics.`)
 }

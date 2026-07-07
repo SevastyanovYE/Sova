@@ -174,6 +174,48 @@ func TestBuildReviewPreviewMergesUserDecisions(t *testing.T) {
 	}
 }
 
+func TestManualTakeUsesWorkspaceTarget(t *testing.T) {
+	record := sqlitestore.WorkspaceAuditRecord{
+		DetectedType:    TypeExternalBranchReference,
+		ModelDecision:   DecisionArchive,
+		SuggestedTarget: "Legacy archive",
+		SourceTopic:     "Учёба",
+		MessageDate:     time.Date(2026, 7, 7, 8, 0, 0, 0, time.UTC),
+		MessageLink:     "https://t.me/c/100/42",
+		ShortSummary:    "fresh message",
+		Confidence:      "high",
+		Reason:          "legacy archive by heuristic",
+		MediaType:       "",
+	}
+	item := mergePreviewItem(record, reviewRow{UserDecision: "take"}, true)
+	if item.FinalAction != "migrate" {
+		t.Fatalf("final action = %q, want migrate", item.FinalAction)
+	}
+	if item.Target != "Inbox" {
+		t.Fatalf("manual take target = %q, want Inbox", item.Target)
+	}
+}
+
+func TestTopicPinDraftsMapToConfiguredTopics(t *testing.T) {
+	cfg := config.Config{
+		Workspace: config.WorkspaceConfig{
+			Topics: config.WorkspaceTopicIDs{
+				Inbox: 1, Tasks: 2, Notes: 3, Experience: 4,
+				Useful: 5, Templates: 6, Collections: 7,
+			},
+		},
+	}
+	for _, draft := range TopicPinDrafts() {
+		if workspaceTopicID(cfg, draft.Topic) == 0 {
+			t.Fatalf("topic %q has no configured id mapping", draft.Topic)
+		}
+		text := TopicPinMessageText(draft)
+		if !strings.Contains(text, "Закреп: "+draft.Topic) {
+			t.Fatalf("pin text for %q missing heading: %q", draft.Topic, text)
+		}
+	}
+}
+
 func workspaceAuditFixture(t *testing.T) (config.Config, *sqlitestore.Store, string) {
 	t.Helper()
 	stateDir := t.TempDir()

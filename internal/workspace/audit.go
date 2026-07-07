@@ -803,12 +803,13 @@ func renderControlCardDrafts(classified []classifiedMessage, classifyCtx classif
 	return b.String()
 }
 
-func renderTopicPinDrafts() string {
-	type topicDraft struct {
-		Topic string
-		Text  string
-	}
-	drafts := []topicDraft{
+type TopicPinDraft struct {
+	Topic string
+	Text  string
+}
+
+func TopicPinDrafts() []TopicPinDraft {
+	return []TopicPinDraft{
 		{"Inbox", "Входящие мысли и материалы для первичной обработки. Всё, что ещё не получило устойчивого места, сначала попадает сюда."},
 		{"Задачи", "Активные личные задачи. Старый InSync переносится выборочно: закреплённое важное и последние 10 сообщений из legacy-топика после проверки."},
 		{"Заметки", "Сырые заметки, наблюдения и связки. Материал из старого закрепа и спорные заметки проходят ручной разбор перед переносом."},
@@ -817,6 +818,10 @@ func renderTopicPinDrafts() string {
 		{"Заготовки", "Промпты, шаблоны и черновики. Перед публикацией карточки проверяются в Sova.Control; закреп содержит индекс карточек со ссылками."},
 		{"Коллекции", "Рецепты, подборки, списки, культурные материалы и другие коллекционные элементы."},
 	}
+}
+
+func renderTopicPinDrafts() string {
+	drafts := TopicPinDrafts()
 	var b strings.Builder
 	b.WriteString("# Workspace Topic Pin Drafts\n\n")
 	b.WriteString("Raw first-pass pin texts. Send to Sova.Control for style/format check before pinning in InSync v1.0.\n\n")

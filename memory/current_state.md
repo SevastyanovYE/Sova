@@ -111,3 +111,19 @@
   should be filled before publication.
 - `workspace bootstrap-topics --dry-run --timeout 2m` verified that all target
   `InSync v1.0` topics and all `Sova.Control` topics already exist.
+- On 2026-07-07, `workspace sync-legacy --limit 300` inserted 8 newer old
+  InSync messages (`2438..2445`). SQLite now contains 2332 visible old InSync
+  messages (`1..2445`).
+- Workspace audit run 6 processed all 2332 currently indexed old InSync
+  messages. User decisions were merged from run 4, the filled run 5 Numbers
+  table, and the 8 new messages were forced to `take` per user instruction.
+  The merged CSV is
+  `.state/artifacts/workspace/user_review/workspace_review_candidates_run6_filled.csv`.
+  Preview artifacts are under
+  `.state/artifacts/workspace/migration_preview/20260707T081735Z/` with
+  `migration=170`, `external_routes=137`, and `pending=0`.
+- `workspace seed-topic-pins` was added and used to send raw first-pass pin
+  messages into the real `InSync v1.0` topics. Sent message IDs:
+  Inbox `29`, `Задачи` `30`, `Заметки` `31`, `Опыт` `32`, `Полезное` `33`,
+  `Заготовки` `34`, `Коллекции` `35`. The command does not pin messages
+  automatically.
