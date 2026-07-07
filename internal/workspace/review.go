@@ -89,7 +89,11 @@ func BuildReviewPreview(ctx context.Context, cfg config.Config, store *sqlitesto
 		if row.UserDecision != "" {
 			userDecisions++
 		}
-		reviewByKey[reviewRowKey(row)] = row
+		key := reviewRowKey(row)
+		if _, exists := reviewByKey[key]; exists {
+			return ReviewPreviewResult{}, fmt.Errorf("review CSV contains duplicate row for %s", key)
+		}
+		reviewByKey[key] = row
 	}
 
 	records, err := store.WorkspaceAuditRecordsByRun(ctx, run.ID)
@@ -173,12 +177,12 @@ func resolveAuditRun(ctx context.Context, store *sqlitestore.Store, id int64) (s
 }
 
 func readReviewRows(path string) ([]reviewRow, error) {
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open review csv %s: %w", path, err)
 	}
-	defer file.Close()
-	reader := csv.NewReader(file)
+	reader := csv.NewReader(strings.NewReader(string(data)))
+	reader.Comma = detectReviewCSVDelimiter(string(data))
 	reader.FieldsPerRecord = -1
 	rows, err := reader.ReadAll()
 	if err != nil {
@@ -216,9 +220,41 @@ func readReviewRows(path string) ([]reviewRow, error) {
 		if row.UserDecision != "" && !validUserDecision(row.UserDecision) {
 			return nil, fmt.Errorf("review csv row %d has invalid user_decision %q", i+2, row.UserDecision)
 		}
+		if reviewRowEmpty(row) {
+			continue
+		}
 		out = append(out, row)
 	}
 	return out, nil
+}
+
+func detectReviewCSVDelimiter(data string) rune {
+	header := data
+	if idx := strings.IndexAny(header, "\r\n"); idx >= 0 {
+		header = header[:idx]
+	}
+	header = strings.TrimPrefix(header, "\ufeff")
+	counts := map[rune]int{
+		',':  strings.Count(header, ","),
+		';':  strings.Count(header, ";"),
+		'\t': strings.Count(header, "\t"),
+	}
+	delimiter := ','
+	best := counts[delimiter]
+	for _, candidate := range []rune{';', '\t'} {
+		if counts[candidate] > best {
+			delimiter = candidate
+			best = counts[candidate]
+		}
+	}
+	return delimiter
+}
+
+func reviewRowEmpty(row reviewRow) bool {
+	return row.SourceTopic == "" && row.MessageDate == "" && row.MessageLink == "" &&
+		row.ShortSummary == "" && row.DetectedType == "" && row.ModelDecision == "" &&
+		row.Confidence == "" && row.SuggestedTarget == "" && row.Reason == "" &&
+		row.MediaType == "" && row.UserDecision == "" && row.UserComment == ""
 }
 
 func csvValue(row []string, header map[string]int, name string) string {

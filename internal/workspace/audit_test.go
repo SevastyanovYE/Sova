@@ -196,6 +196,58 @@ func TestManualTakeUsesWorkspaceTarget(t *testing.T) {
 	}
 }
 
+func TestReadReviewRowsAcceptsNumbersSemicolonCSV(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "review.csv")
+	data := strings.Join([]string{
+		"source_topic;message_date;message_link;short_summary;detected_type;model_decision;confidence;suggested_target;reason;media_type;user_decision;user_comment",
+		"Заметки;2026-07-07T08:00:00Z;https://t.me/c/100/42;summary;draft_note;review;low;Заметки;reason;;take;ok",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := readReviewRows(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0].UserDecision != "take" || rows[0].MessageLink != "https://t.me/c/100/42" {
+		t.Fatalf("unexpected row = %+v", rows[0])
+	}
+}
+
+func TestBuildReviewPreviewRejectsDuplicateReviewRows(t *testing.T) {
+	cfg, store, _ := workspaceAuditFixture(t)
+	audit, err := RunAudit(context.Background(), cfg, store, AuditOptions{
+		Now: time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicatePath := filepath.Join(t.TempDir(), "review_duplicate.csv")
+	data, err := os.ReadFile(audit.ReviewCSVPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected review rows in %s", audit.ReviewCSVPath)
+	}
+	content := strings.Join(append(lines, lines[1]), "\n") + "\n"
+	if err := os.WriteFile(duplicatePath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = BuildReviewPreview(context.Background(), cfg, store, ReviewPreviewOptions{
+		ReviewCSVPath: duplicatePath,
+		Now:           time.Date(2026, 6, 30, 13, 0, 0, 0, time.UTC),
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate row") {
+		t.Fatalf("expected duplicate row error, got %v", err)
+	}
+}
+
 func TestTopicPinDraftsMapToConfiguredTopics(t *testing.T) {
 	cfg := config.Config{
 		Workspace: config.WorkspaceConfig{

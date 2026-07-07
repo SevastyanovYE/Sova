@@ -95,6 +95,9 @@ pointed at a specific run/file:
 go run ./cmd/sova workspace review-preview --audit-run 12 --review-csv path/to/workspace_review_candidates.csv
 ```
 
+Comma, semicolon, and tab-delimited CSV exports are accepted. This keeps
+Numbers exports usable without a separate delimiter-normalization step.
+
 It writes a compact migration preview and stops for approval. It does not post,
 migrate, delete, or edit Telegram messages.
 
