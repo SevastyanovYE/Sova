@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -18,9 +19,8 @@ import (
 )
 
 const (
-	defaultGeminiPublishModel = "gemini-2.0-flash"
-	geminiGenerateEndpoint    = "https://generativelanguage.googleapis.com/v1beta"
-	telegramPublishSoftLimit  = 3800
+	geminiGenerateEndpoint   = "https://generativelanguage.googleapis.com/v1beta"
+	telegramPublishSoftLimit = 3800
 )
 
 type NotePublishProvider interface {
@@ -43,23 +43,49 @@ func NewNotePublishProvider(cfg config.Config) NotePublishProvider {
 	if strings.TrimSpace(cfg.Gemini.APIKey) != "" {
 		model := strings.TrimSpace(cfg.Gemini.Model)
 		if model == "" {
-			model = defaultGeminiPublishModel
+			model = config.DefaultGeminiModel
 		}
 		return geminiNotePublishProvider{
-			apiKey:     strings.TrimSpace(cfg.Gemini.APIKey),
-			model:      model,
-			endpoint:   geminiGenerateEndpoint,
-			httpClient: &http.Client{Timeout: 90 * time.Second},
+			apiKey:         strings.TrimSpace(cfg.Gemini.APIKey),
+			model:          model,
+			fallbackModels: cfg.Gemini.FallbackModels,
+			endpoint:       geminiGenerateEndpoint,
+			httpClient:     &http.Client{Timeout: 90 * time.Second},
 		}
 	}
 	return mockNotePublishProvider{}
 }
 
 type geminiNotePublishProvider struct {
-	apiKey     string
-	model      string
-	endpoint   string
-	httpClient *http.Client
+	apiKey         string
+	model          string
+	fallbackModels []string
+	endpoint       string
+	httpClient     *http.Client
+}
+
+type geminiAPIError struct {
+	Model      string
+	StatusCode int
+	Status     string
+	Message    string
+}
+
+func (err geminiAPIError) Error() string {
+	var parts []string
+	if strings.TrimSpace(err.Model) != "" {
+		parts = append(parts, "model "+err.Model)
+	}
+	if err.StatusCode != 0 {
+		parts = append(parts, "status "+strconv.Itoa(err.StatusCode))
+	}
+	if strings.TrimSpace(err.Status) != "" {
+		parts = append(parts, err.Status)
+	}
+	if strings.TrimSpace(err.Message) != "" {
+		parts = append(parts, compactWorkspaceLine(err.Message, 300))
+	}
+	return "gemini generateContent " + strings.Join(parts, ": ")
 }
 
 type geminiGenerateRequest struct {
@@ -126,7 +152,32 @@ func (provider geminiNotePublishProvider) FormatNote(ctx context.Context, reques
 	if err != nil {
 		return NotePublishResult{}, err
 	}
-	endpoint, err := provider.generateURL()
+
+	models := provider.candidateModels()
+	var lastErr error
+	var temporaryFailures []string
+	for i, model := range models {
+		result, err := provider.formatNoteWithModel(ctx, client, body, model)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if !isGeminiTemporaryError(err) {
+			return NotePublishResult{}, err
+		}
+		temporaryFailures = append(temporaryFailures, model)
+		if i+1 >= len(models) {
+			break
+		}
+	}
+	if len(temporaryFailures) > 0 {
+		return NotePublishResult{}, fmt.Errorf("Gemini временно перегружен или недоступен; попробуй публикацию позже. Модели уже пробовала: %s. Последняя ошибка: %w", strings.Join(temporaryFailures, ", "), lastErr)
+	}
+	return NotePublishResult{}, lastErr
+}
+
+func (provider geminiNotePublishProvider) formatNoteWithModel(ctx context.Context, client *http.Client, body []byte, model string) (NotePublishResult, error) {
+	endpoint, err := provider.generateURL(model)
 	if err != nil {
 		return NotePublishResult{}, err
 	}
@@ -137,22 +188,27 @@ func (provider geminiNotePublishProvider) FormatNote(ctx context.Context, reques
 	httpRequest.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(httpRequest)
 	if err != nil {
-		return NotePublishResult{}, fmt.Errorf("gemini generateContent: %w", err)
+		return NotePublishResult{}, fmt.Errorf("gemini generateContent model %s: %w", model, err)
 	}
 	defer response.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
 	if err != nil {
 		return NotePublishResult{}, err
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return NotePublishResult{}, fmt.Errorf("gemini generateContent status %d: %s", response.StatusCode, compactWorkspaceLine(string(raw), 300))
-	}
 	var parsed geminiGenerateResponse
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return NotePublishResult{}, fmt.Errorf("decode gemini response: %w", err)
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &parsed)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return NotePublishResult{}, geminiErrorFromResponse(model, response.StatusCode, parsed, raw)
 	}
 	if parsed.Error != nil && strings.TrimSpace(parsed.Error.Message) != "" {
-		return NotePublishResult{}, fmt.Errorf("gemini error: %s", parsed.Error.Message)
+		return NotePublishResult{}, geminiErrorFromResponse(model, response.StatusCode, parsed, raw)
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			return NotePublishResult{}, fmt.Errorf("decode gemini response: %w", err)
+		}
 	}
 	if strings.TrimSpace(parsed.PromptFeedback.BlockReason) != "" {
 		return NotePublishResult{}, fmt.Errorf("gemini blocked prompt: %s", parsed.PromptFeedback.BlockReason)
@@ -169,12 +225,34 @@ func (provider geminiNotePublishProvider) FormatNote(ctx context.Context, reques
 	return NotePublishResult{Messages: messages}, nil
 }
 
-func (provider geminiNotePublishProvider) generateURL() (string, error) {
+func (provider geminiNotePublishProvider) candidateModels() []string {
+	candidates := append([]string{provider.model}, provider.fallbackModels...)
+	out := make([]string, 0, len(candidates)+1)
+	seen := map[string]struct{}{}
+	for _, model := range candidates {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	if len(out) == 0 {
+		out = append(out, config.DefaultGeminiModel)
+	}
+	return out
+}
+
+func (provider geminiNotePublishProvider) generateURL(model string) (string, error) {
 	base := strings.TrimRight(provider.endpoint, "/")
-	model := strings.Trim(strings.TrimSpace(provider.model), "/")
+	model = strings.Trim(strings.TrimSpace(model), "/")
 	model = strings.TrimPrefix(model, "models/")
 	if model == "" {
-		model = defaultGeminiPublishModel
+		model = config.DefaultGeminiModel
 	}
 	endpoint, err := url.Parse(base + "/models/" + url.PathEscape(model) + ":generateContent")
 	if err != nil {
@@ -184,6 +262,47 @@ func (provider geminiNotePublishProvider) generateURL() (string, error) {
 	values.Set("key", provider.apiKey)
 	endpoint.RawQuery = values.Encode()
 	return endpoint.String(), nil
+}
+
+func geminiErrorFromResponse(model string, statusCode int, parsed geminiGenerateResponse, raw []byte) error {
+	apiErr := geminiAPIError{Model: model, StatusCode: statusCode}
+	if parsed.Error != nil {
+		apiErr.Status = strings.TrimSpace(parsed.Error.Status)
+		apiErr.Message = strings.TrimSpace(parsed.Error.Message)
+	}
+	if apiErr.Message == "" {
+		apiErr.Message = compactWorkspaceLine(string(raw), 300)
+	}
+	return apiErr
+}
+
+func isGeminiTemporaryError(err error) bool {
+	var apiErr geminiAPIError
+	if !errors.As(err, &apiErr) {
+		lower := strings.ToLower(err.Error())
+		return strings.Contains(lower, "timeout") ||
+			strings.Contains(lower, "temporar") ||
+			strings.Contains(lower, "try again") ||
+			strings.Contains(lower, "overload") ||
+			strings.Contains(lower, "busy")
+	}
+	switch apiErr.StatusCode {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	status := strings.ToUpper(apiErr.Status)
+	for _, token := range []string{"RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "ABORTED"} {
+		if strings.Contains(status, token) {
+			return true
+		}
+	}
+	lower := strings.ToLower(apiErr.Message)
+	for _, token := range []string{"overload", "busy", "high demand", "try again", "temporar", "quota", "resource exhausted", "unavailable", "deadline"} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func geminiResponseText(response geminiGenerateResponse) string {

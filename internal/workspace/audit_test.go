@@ -271,6 +271,123 @@ func TestTopicPinDraftsMapToConfiguredTopics(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCommandHelpSkipsTopicsWithoutCommands(t *testing.T) {
+	cfg := config.Config{
+		Workspace: config.WorkspaceConfig{
+			Topics: config.WorkspaceTopicIDs{
+				Inbox: 1, Tasks: 2, Notes: 3, Experience: 4,
+				Useful: 5, Templates: 6, Collections: 7,
+			},
+		},
+	}
+	var topics []string
+	for _, draft := range WorkspaceCommandHelpDrafts(cfg) {
+		topics = append(topics, draft.Topic)
+	}
+	joined := strings.Join(topics, ",")
+	for _, forbidden := range []string{"Опыт", "Полезное"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("command help includes %s: %v", forbidden, topics)
+		}
+	}
+	for _, required := range []string{"Inbox", "Задачи", "Заметки", "Заготовки", "Коллекции"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("command help missing %s: %v", required, topics)
+		}
+	}
+}
+
+func TestPreparePinnedMigrationReviewBuildsFocusedArtifacts(t *testing.T) {
+	stateDir := t.TempDir()
+	cfg := config.Config{
+		StateDir:     stateDir,
+		DatabasePath: filepath.Join(stateDir, "sova.db"),
+		Workspace: config.WorkspaceConfig{
+			LegacySource: "telegram:channel:100",
+		},
+	}
+	store, err := sqlitestore.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	source, err := store.UpsertTelegramSource(ctx, sqlitestore.TelegramSource{
+		Ref: "telegram:channel:100", PeerKind: "channel", ChatID: 100, Title: "Old InSync",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorkspaceTopics(ctx, []sqlitestore.WorkspaceTopic{
+		{SourceRef: source.Ref, ChatID: source.ChatID, TopicID: 10, TopMessageID: 10, Title: "Заметки"},
+		{SourceRef: source.Ref, ChatID: source.ChatID, TopicID: 17, TopMessageID: 17, Title: "Заготовки"},
+		{SourceRef: source.Ref, ChatID: source.ChatID, TopicID: 18, TopMessageID: 18, Title: "Полезное"},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	messages := []sqlitestore.TelegramMessage{
+		{
+			SourceID: source.ID, ChatID: 100, MessageID: 101, Date: now,
+			Kind: "message", Text: "https://t.me/c/100/17/201", SourceLink: "https://t.me/c/100/17/101",
+			RawJSON: `{"tl":{"ReplyTo":{"ReplyToTopID":17},"Pinned":true}}`,
+		},
+		{
+			SourceID: source.ID, ChatID: 100, MessageID: 201, Date: now.Add(time.Minute),
+			Kind: "message", Text: "1. Alpha prompt\nBody A\n\n2. Beta prompt\nBody B", SourceLink: "https://t.me/c/100/17/201",
+			RawJSON: `{"tl":{"ReplyTo":{"ReplyToTopID":17}}}`,
+		},
+		{
+			SourceID: source.ID, ChatID: 100, MessageID: 301, Date: now.Add(2 * time.Minute),
+			Kind: "message", Text: "https://t.me/c/100/18/302", SourceLink: "https://t.me/c/100/18/301",
+			RawJSON: `{"tl":{"ReplyTo":{"ReplyToTopID":18},"Pinned":true}}`,
+		},
+		{
+			SourceID: source.ID, ChatID: 100, MessageID: 302, Date: now.Add(3 * time.Minute),
+			Kind: "message", Text: "Готовая полезная заметка", SourceLink: "https://t.me/c/100/18/302",
+			RawJSON: `{"tl":{"ReplyTo":{"ReplyToTopID":18}}}`,
+		},
+		{
+			SourceID: source.ID, ChatID: 100, MessageID: 401, Date: now.Add(4 * time.Minute),
+			Kind: "message", Text: "https://t.me/c/100/10/402", SourceLink: "https://t.me/c/100/10/401",
+			RawJSON: `{"tl":{"ReplyTo":{"ReplyToTopID":10},"Pinned":true}}`,
+		},
+		{
+			SourceID: source.ID, ChatID: 100, MessageID: 402, Date: now.Add(5 * time.Minute),
+			Kind: "message", Text: "Личный вывод #опыт", SourceLink: "https://t.me/c/100/10/402",
+			RawJSON: `{"tl":{"ReplyTo":{"ReplyToTopID":10}}}`,
+		},
+	}
+	if _, _, err := store.InsertTelegramMessages(ctx, messages); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := PreparePinnedMigrationReview(ctx, cfg, store, PinnedMigrationOptions{Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Items != 4 {
+		t.Fatalf("items = %d, want 4", result.Items)
+	}
+	csvData, err := os.ReadFile(result.ReviewCSV)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(csvData)
+	for _, want := range []string{"legacy_topic,source_message_link,source_message_ids,cluster_id", "Alpha prompt", "Beta prompt", "Полезное", "Опыт"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("csv missing %q:\n%s", want, content)
+		}
+	}
+	mdData, err := os.ReadFile(result.ReviewMD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mdData), "# Pinned Migration Review") {
+		t.Fatalf("markdown missing title:\n%s", string(mdData))
+	}
+}
+
 func workspaceAuditFixture(t *testing.T) (config.Config, *sqlitestore.Store, string) {
 	t.Helper()
 	stateDir := t.TempDir()

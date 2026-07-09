@@ -21,6 +21,10 @@ const (
 	defaultOllamaModel     = "qwen3:14b"
 	defaultGoogleCredsPath = ".secrets/google-calendar-client.json"
 	defaultGoogleTokenPath = ".secrets/google-calendar-token.json"
+
+	DefaultGeminiModel          = "gemini-3.5-flash"
+	DefaultGeminiFallbackModel1 = "gemini-3-flash-preview"
+	DefaultGeminiFallbackModel2 = "gemini-3.1-flash-lite"
 )
 
 type TopicIDs struct {
@@ -65,8 +69,9 @@ type ControlConfig struct {
 }
 
 type GeminiConfig struct {
-	APIKey string
-	Model  string
+	APIKey         string
+	Model          string
+	FallbackModels []string
 }
 
 type Config struct {
@@ -234,8 +239,9 @@ func Load() (Config, error) {
 		OllamaURL:   valueOrDefault("SOVA_OLLAMA_URL", defaultOllamaURL),
 		OllamaModel: valueOrDefault("SOVA_OLLAMA_MODEL", defaultOllamaModel),
 		Gemini: GeminiConfig{
-			APIKey: strings.TrimSpace(os.Getenv("SOVA_GEMINI_API_KEY")),
-			Model:  strings.TrimSpace(os.Getenv("SOVA_GEMINI_MODEL")),
+			APIKey:         strings.TrimSpace(os.Getenv("SOVA_GEMINI_API_KEY")),
+			Model:          valueOrDefault("SOVA_GEMINI_MODEL", DefaultGeminiModel),
+			FallbackModels: geminiFallbackModels(),
 		},
 		CodexPath:         strings.TrimSpace(os.Getenv("SOVA_CODEX_PATH")),
 		GoogleCredentials: valueOrDefault("SOVA_GOOGLE_CREDENTIALS_PATH", defaultGoogleCredsPath),
@@ -347,6 +353,28 @@ func valueOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func geminiFallbackModels() []string {
+	models := []string{
+		valueOrDefault("SOVA_GEMINI_FALLBACK_MODEL_1", DefaultGeminiFallbackModel1),
+		valueOrDefault("SOVA_GEMINI_FALLBACK_MODEL_2", DefaultGeminiFallbackModel2),
+	}
+	out := make([]string, 0, len(models))
+	seen := map[string]struct{}{}
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	return out
 }
 
 func durationEnv(key string, fallback time.Duration) (time.Duration, error) {

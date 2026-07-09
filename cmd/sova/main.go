@@ -285,10 +285,14 @@ func workspaceCommand(ctx context.Context, cfg config.Config, args []string) err
 		return workspaceAudit(ctx, cfg, store, args[1:])
 	case "review-preview":
 		return workspaceReviewPreview(ctx, cfg, store, args[1:])
+	case "prepare-pinned-migration":
+		return workspacePreparePinnedMigration(ctx, cfg, store, args[1:])
 	case "bootstrap-topics":
 		return workspaceBootstrapTopics(ctx, cfg, args[1:])
 	case "seed-topic-pins":
 		return workspaceSeedTopicPins(ctx, cfg, args[1:])
+	case "reset-topic-pins":
+		return workspaceResetTopicPins(ctx, cfg, args[1:])
 	case "seed-command-help":
 		return workspaceSeedCommandHelp(ctx, cfg, args[1:])
 	case "seed-document-indexes":
@@ -451,6 +455,28 @@ func workspaceReviewPreview(ctx context.Context, cfg config.Config, store *sqlit
 	return nil
 }
 
+func workspacePreparePinnedMigration(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace prepare-pinned-migration", flag.ContinueOnError)
+	outputDir := flags.String("out-dir", "", "output directory; default is .state/artifacts/workspace/migration/<run-id>")
+	limit := flags.Int("limit", 0, "maximum indexed legacy messages to inspect; 0 means all indexed messages")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	result, err := workspace.PreparePinnedMigrationReview(ctx, cfg, store, workspace.PinnedMigrationOptions{
+		OutputDir: *outputDir,
+		Limit:     *limit,
+		Now:       time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("workspace pinned migration prep %s: items=%d\n", result.RunID, result.Items)
+	fmt.Println("review md:", result.ReviewMD)
+	fmt.Println("review csv:", result.ReviewCSV)
+	fmt.Println("next: review this table before any real transfer")
+	return nil
+}
+
 func workspaceBootstrapTopics(ctx context.Context, cfg config.Config, args []string) error {
 	flags := flag.NewFlagSet("workspace bootstrap-topics", flag.ContinueOnError)
 	workspaceTitle := flags.String("workspace-title", workspace.DefaultWorkspaceTitle, "Telegram dialog title for InSync v1.0")
@@ -555,6 +581,71 @@ func workspaceSeedTopicPins(ctx context.Context, cfg config.Config, args []strin
 				fmt.Println()
 			}
 		}
+	}
+	return nil
+}
+
+func workspaceResetTopicPins(ctx context.Context, cfg config.Config, args []string) error {
+	flags := flag.NewFlagSet("workspace reset-topic-pins", flag.ContinueOnError)
+	execute := flags.Bool("execute", false, "unpin existing topic pins, send clean main pin messages, pin them, and send command help where applicable")
+	target := flags.String("target", "all", "workspace, control, or all")
+	timeout := flags.Duration("timeout", 3*time.Minute, "maximum time for Bot API unpin/send/pin calls; 0 disables the deadline")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	seedCtx := ctx
+	cancel := func() {}
+	if *timeout > 0 {
+		seedCtx, cancel = context.WithTimeout(ctx, *timeout)
+	}
+	defer cancel()
+	opts := workspace.SeedTopicPinsOptions{DryRun: !*execute, Now: time.Now().UTC()}
+	var results []workspace.SeedTopicPinsResult
+	switch strings.ToLower(strings.TrimSpace(*target)) {
+	case "workspace":
+		result, err := workspace.ResetWorkspaceTopicPins(seedCtx, cfg, opts)
+		if err != nil {
+			return err
+		}
+		results = append(results, result)
+	case "control":
+		result, err := workspace.ResetControlTopicPins(seedCtx, cfg, opts)
+		if err != nil {
+			return err
+		}
+		results = append(results, result)
+	case "all":
+		workspaceResult, err := workspace.ResetWorkspaceTopicPins(seedCtx, cfg, opts)
+		if err != nil {
+			return err
+		}
+		controlResult, err := workspace.ResetControlTopicPins(seedCtx, cfg, opts)
+		if err != nil {
+			return err
+		}
+		results = append(results, workspaceResult, controlResult)
+	default:
+		return fmt.Errorf("--target must be workspace, control, or all")
+	}
+	for _, result := range results {
+		mode := "workspace reset-topic-pins"
+		if result.DryRun {
+			mode += " dry-run"
+		}
+		for _, item := range result.Items {
+			fmt.Printf("%s: %-14s %-12s topic_id=%d status=%s", mode, item.Group, item.Topic, item.TopicID, item.Status)
+			if item.MessageID > 0 {
+				fmt.Printf(" message_id=%d", item.MessageID)
+			}
+			fmt.Println()
+			if result.DryRun && strings.TrimSpace(item.Text) != "" {
+				fmt.Println(item.Text)
+				fmt.Println()
+			}
+		}
+	}
+	if !*execute {
+		fmt.Println("dry-run only; add --execute to unpin and recreate live pinned messages")
 	}
 	return nil
 }
@@ -1470,8 +1561,10 @@ Usage:
   sova workspace sync-legacy [--limit 100] [--dry-run] [--backfill|--full-scan] [--timeout 5m]
   sova workspace audit [--dry-run] [--limit 0]
   sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
+  sova workspace prepare-pinned-migration [--limit 0] [--out-dir PATH]
   sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
+  sova workspace reset-topic-pins [--target workspace|control|all] [--execute] [--timeout 3m]
   sova workspace seed-command-help [--dry-run] [--timeout 2m]
   sova workspace seed-document-indexes [--dry-run] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
@@ -1500,8 +1593,10 @@ Usage:
   sova workspace sync-legacy [--limit 100] [--dry-run] [--backfill|--full-scan] [--timeout 5m]
   sova workspace audit [--dry-run] [--limit 0]
   sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
+  sova workspace prepare-pinned-migration [--limit 0] [--out-dir PATH]
   sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
+  sova workspace reset-topic-pins [--target workspace|control|all] [--execute] [--timeout 3m]
   sova workspace seed-command-help [--dry-run] [--timeout 2m]
   sova workspace seed-document-indexes [--dry-run] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
@@ -1512,8 +1607,10 @@ Notes:
   sync-legacy indexes only SOVA_WORKSPACE_LEGACY_SOURCE and does not update the Nest recent index.
   audit uses already indexed Telegram messages and writes review artifacts unless --dry-run is set.
   review-preview merges user-filled review decisions into a migration preview and stops for approval.
+  prepare-pinned-migration builds a focused review table for old pinned Заметки/Заготовки/Полезное material and performs no transfer.
   bootstrap-topics creates only missing target forum topics and writes an env-style ID file.
   seed-topic-pins sends human-friendly pin draft messages into Workspace and/or Control topics.
+  reset-topic-pins unpins each configured forum topic, sends and pins the clean main message, then sends command help only in command topics.
   seed-command-help sends command reference messages into Workspace topics.
   seed-document-indexes creates or updates active note/template/collection index messages.
   cleanup-test-tasks deletes bot-created test task cards/backlog and marks matching tasks cancelled.

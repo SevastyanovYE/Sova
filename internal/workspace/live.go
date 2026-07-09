@@ -156,6 +156,12 @@ func handleWorkspaceMessage(ctx context.Context, cfg config.Config, store *sqlit
 		return
 	}
 	if !edited && command == "publish" {
+		if strings.EqualFold(strings.TrimSpace(rest), "cleanup") {
+			if err := handlePublishCleanup(ctx, cfg, client, publishDrafts, threadID); err != nil {
+				sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось очистить publish preview", err)
+			}
+			return
+		}
 		if err := handleNotePublishCommand(ctx, cfg, store, client, publishDrafts, message, threadID, strings.TrimSpace(rest), time.Now().UTC()); err != nil {
 			sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось подготовить публикацию", err)
 		}
@@ -1715,8 +1721,9 @@ func renderCollectionDocumentMessage(doc sqlitestore.WorkspaceDocument, parts []
 	b.WriteString("</b> ")
 	b.WriteString(pleasantDocumentEmoji(doc.ID))
 	if strings.TrimSpace(doc.Category) != "" {
-		b.WriteString("\n\n")
+		b.WriteString("\n<blockquote>")
 		b.WriteString(html.EscapeString(doc.Category))
+		b.WriteString("</blockquote>")
 	}
 	b.WriteString("\n\n")
 	if len(parts) == 0 {
@@ -2029,6 +2036,21 @@ func rerunPublishPreview(ctx context.Context, cfg config.Config, store *sqlitest
 		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, draft.PreviewMessageIDs)
 	}
 	return createPublishPreview(ctx, cfg, store, client, publishDrafts, documentID, revision, now)
+}
+
+func handlePublishCleanup(ctx context.Context, cfg config.Config, client *nest.Client, publishDrafts map[int64]publishPreviewDraft, threadID int) error {
+	if len(publishDrafts) == 0 {
+		return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Активных publish preview сейчас нет.")
+	}
+	drafts := 0
+	messages := 0
+	for documentID, draft := range publishDrafts {
+		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, draft.PreviewMessageIDs)
+		messages += len(draft.PreviewMessageIDs)
+		delete(publishDrafts, documentID)
+		drafts++
+	}
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, fmt.Sprintf("Очистила publish preview: драфтов <b>%d</b>, сообщений <b>%d</b>.", drafts, messages))
 }
 
 func createPublishPreview(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, publishDrafts map[int64]publishPreviewDraft, documentID int64, revision string, now time.Time) error {
@@ -2771,6 +2793,7 @@ func WorkspaceDocumentHelpText(command string) string {
 • <code>/doc delete-part</code> — убрать часть из активного индекса.
 • <code>/doc delete</code> — архивировать всю заметку.
 • <code>/doc publish</code> или <code>/publish</code> — собрать preview в Inbox и после approve отправить в Полезное.
+• <code>/publish cleanup</code> — удалить активные preview-сообщения, если текущий serve ещё держит их в памяти.
 • <code>/doc show</code> или <code>/doc show Название</code> — обновить индекс или показать конкретную заметку.
 • <code>/id</code> в reply — показать Telegram/source/document IDs.
 
@@ -2817,7 +2840,7 @@ func TaskHelpMessageText() string {
 }
 
 func UsefulHelpMessageText() string {
-	return "💎 <b>Полезное</b>\n\nСюда попадают материалы после preview и кнопки <b>Опубликовать</b> из Заметок. Если задан <code>SOVA_GEMINI_API_KEY</code>, preview форматирует Gemini; без ключа работает локальный mock. Исходники остаются в <b>Заметки</b>, а опубликованный материал получает связь с source IDs.\n\nЕсли исходная заметка потом меняется, опубликованная версия не переписывается молча: она помечается как needing review."
+	return "💎 <b>Полезное</b>\n\nСюда попадают материалы после preview и кнопки <b>Опубликовать</b> из Заметок. Если задан <code>SOVA_GEMINI_API_KEY</code>, preview форматирует Gemini с fallback-моделями из <code>SOVA_GEMINI_*</code>; без ключа работает локальный mock. Исходники остаются в <b>Заметки</b>, а опубликованный материал получает связь с source IDs.\n\nЕсли исходная заметка потом меняется, опубликованная версия не переписывается молча: она помечается как needing review."
 }
 
 func InboxHelpMessageText() string {

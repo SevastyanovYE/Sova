@@ -172,6 +172,12 @@ type CreateForumTopicRequest struct {
 	IconCustomEmojiID string
 }
 
+type PinChatMessageRequest struct {
+	ChatID              int64
+	MessageID           int
+	DisableNotification bool
+}
+
 func New(token string) *Client {
 	return &Client{
 		token:      strings.TrimSpace(token),
@@ -339,6 +345,45 @@ func (c *Client) EditMessageText(ctx context.Context, request EditMessageTextReq
 	}
 	if !response.OK {
 		return fmt.Errorf("Bot API editMessageText failed: %s", response.Description)
+	}
+	return nil
+}
+
+func (c *Client) PinChatMessage(ctx context.Context, request PinChatMessageRequest) error {
+	payload := map[string]any{
+		"chat_id":    request.ChatID,
+		"message_id": request.MessageID,
+	}
+	if request.DisableNotification {
+		payload["disable_notification"] = true
+	}
+	var response struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := c.call(ctx, "pinChatMessage", payload, &response); err != nil {
+		return err
+	}
+	if !response.OK {
+		return fmt.Errorf("Bot API pinChatMessage failed: %s", response.Description)
+	}
+	return nil
+}
+
+func (c *Client) UnpinAllForumTopicMessages(ctx context.Context, chatID int64, messageThreadID int) error {
+	payload := map[string]any{
+		"chat_id":           chatID,
+		"message_thread_id": messageThreadID,
+	}
+	var response struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := c.call(ctx, "unpinAllForumTopicMessages", payload, &response); err != nil {
+		return err
+	}
+	if !response.OK {
+		return fmt.Errorf("Bot API unpinAllForumTopicMessages failed: %s", response.Description)
 	}
 	return nil
 }
