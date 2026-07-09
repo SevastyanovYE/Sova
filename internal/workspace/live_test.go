@@ -176,6 +176,28 @@ func TestDocumentInputCallbacks(t *testing.T) {
 	}
 }
 
+func TestPendingWorkspaceInputDoesNotConsumeSlashCommand(t *testing.T) {
+	cfg := testWorkspaceLiveConfig()
+	pending := map[pendingTaskDateKey]pendingWorkspaceInput{
+		{chatID: cfg.Workspace.ChatID, threadID: cfg.Workspace.Topics.Templates, userID: 7}: {
+			Kind:       "template_rename",
+			DocumentID: 42,
+		},
+	}
+	handled := handlePendingWorkspaceInputMessage(context.Background(), cfg, nil, nil, pending, nil, nest.Message{
+		Chat:            nest.Chat{ID: cfg.Workspace.ChatID},
+		MessageThreadID: cfg.Workspace.Topics.Templates,
+		From:            &nest.User{ID: 7},
+		Text:            "/template rename Старое | Новое",
+	}, cfg.Workspace.Topics.Templates)
+	if handled {
+		t.Fatal("slash command was consumed as pending input")
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending input was not cleared: %+v", pending)
+	}
+}
+
 func TestWorkspaceDocumentIndexesRenderLinks(t *testing.T) {
 	noteDoc := sqlitestore.WorkspaceDocument{ID: 1, Type: "note", Status: "active", Title: "Связки"}
 	noteParts := map[int64][]sqlitestore.WorkspaceDocumentPart{1: {
@@ -235,6 +257,62 @@ func TestDocumentCommandParsers(t *testing.T) {
 	ref, title, category = parseCollectionAddBody("Любимое | Ссылка")
 	if ref != "Любимое" || title != "Ссылка" || category != "" {
 		t.Fatalf("collection ref=%q title=%q category=%q", ref, title, category)
+	}
+}
+
+func TestResolveCollectionPartRefByReplyAndTitle(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	doc, err := store.CreateWorkspaceDocument(ctx, sqlitestore.WorkspaceDocument{
+		Type:   "collection",
+		Status: "active",
+		Title:  "Проверка",
+	}, sqlitestore.WorkspaceDocumentPart{
+		Title:           "Первая часть",
+		SourceChatID:    -1004301779750,
+		SourceMessageID: 10,
+		SourceLink:      "https://t.me/c/4301779750/20/10",
+		Text:            "one",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.AddWorkspaceDocumentPart(ctx, sqlitestore.WorkspaceDocumentPart{
+		DocumentID:      doc.ID,
+		Title:           "Вторая часть",
+		SourceChatID:    -1004301779750,
+		SourceMessageID: 11,
+		SourceLink:      "https://t.me/c/4301779750/20/11",
+		Text:            "two",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := nest.Message{
+		Chat: nest.Chat{ID: -1004301779750},
+		ReplyToMessage: &nest.Message{
+			MessageID: 11,
+			Chat:      nest.Chat{ID: -1004301779750},
+		},
+	}
+	byReply, err := resolveCollectionPartRef(ctx, store, message, doc, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byReply.ID != second.ID {
+		t.Fatalf("reply part = %+v, want %+v", byReply, second)
+	}
+	byTitle, err := resolveCollectionPartRef(ctx, store, nest.Message{}, doc, "Вторая часть")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byTitle.ID != second.ID {
+		t.Fatalf("title part = %+v, want %+v", byTitle, second)
 	}
 }
 

@@ -28,9 +28,11 @@
 - Workspace task backlog is a tracked bot-created index message. If editing the
   known index fails, `serve` must not create a fresh backlog on every callback;
   cleanup/reseed should repair a bad stored index deliberately.
-- Workspace note publication uses a provider boundary. When Gemini config is
-  empty or unavailable, the live preview path must still work through a local
-  meaning-preserving mock formatter and must not invent new source facts.
+- Workspace note publication uses a provider boundary. When
+  `SOVA_GEMINI_API_KEY` is configured, live preview calls Gemini
+  `generateContent`; when Gemini config is empty, the path falls back to a
+  local meaning-preserving mock formatter. Neither path may invent new source
+  facts.
 - Workspace document indexes are bot-maintained navigation surfaces, not raw
   content stores. Template types may exist empty, collections are indexed as
   links to collection-card messages, and published notes leave the active Notes

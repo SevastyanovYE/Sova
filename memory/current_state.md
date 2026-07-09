@@ -170,10 +170,11 @@
 - Stage 6 manual document foundation exists: `workspace_documents` and
   `workspace_document_parts` store notes, templates, and collection items with
   source IDs/links plus optional target message IDs. Live Workspace bot supports
-  `/doc new|append|rename|rename-part|delete-part|delete|publish|show`,
-  reply `/publish`, `/template new|append|rename|type|show`, `/new collection`,
-  and `/collection add|rename|show`. Commands may be sent from the matching
-  topic or Inbox; source messages are read from the matching topic (`Заметки`,
+  `/doc new|append|rename|delete-part|delete|publish|show`, reply `/publish`,
+  `/template new|append|rename|type|move|rename-type|delete-type|show`,
+  `/collection new|add|rename|description|delete|rename-item|delete-item|move-item|order-item|show`,
+  and diagnostic reply `/id`. Commands may be sent from the matching topic or
+  Inbox; source messages are read from the matching topic (`Заметки`,
   `Заготовки`, `Коллекции`) unless a valid reply is provided. Note/template
   append resolves by ID or exact title and asks for clarification when a title
   is ambiguous.
@@ -182,12 +183,14 @@
   indexes prefer the bot-created collection-card message link over the first
   item link.
 - Note publish MVP exists: `/doc publish` or reply `/publish` assembles ordered
-  note parts, uses a provider boundary, falls back to a local meaning-preserving
-  mock formatter when Gemini config is empty, sends preview messages to Inbox,
-  and supports approve/cancel/edit buttons. Approve posts final material to
-  `Полезное`, persists source-to-derived published mappings, updates document
-  target IDs, and updates a Useful index message. Repeat publish warns when a
-  note already has a target unless `force` is passed.
+  note parts, uses a provider boundary, calls Gemini `generateContent` when
+  `SOVA_GEMINI_API_KEY` is configured, falls back to a local
+  meaning-preserving mock formatter only when Gemini config is empty, sends
+  preview messages to Inbox, and supports approve/cancel/edit buttons. Approve
+  posts final material to `Полезное`, persists source-to-derived published
+  mappings, updates document target IDs, and updates a Useful index message.
+  Repeat publish warns when a note already has a target unless `force` is
+  passed.
 - Repeated edits of bot-maintained indexes/backlogs treat Telegram
   `message is not modified` as a no-op success instead of creating duplicate
   index messages. This was verified for document indexes `149`, `150`, `151`
@@ -198,15 +201,19 @@
 - Stage 6 template types are now first-class rows in
   `workspace_document_types`. `/template type <name>` creates an empty active
   type, `/template new <title>` asks for the type, `/template move` changes the
-  type by buttons/text, and the `Заготовки` index renders type headings plus
-  bold prompt links. `Остальные` is normalized to `Остальное`.
-- Stage 6 document commands have reverse `/new` aliases for notes, templates,
-  and collections (`/new doc`, `/new template`, `/new collection`) while the
-  direct forms still work. `workspace seed-command-help` sends current command
-  reference messages into each Workspace topic.
+  type by buttons/text, and `/template delete-type` asks whether to move
+  templates to `Остальное` or archive them with the type. The `Заготовки` index
+  renders type headings plus bold prompt links. `Остальные` is normalized to
+  `Остальное`.
+- Stage 6 document commands no longer support reverse `/new ...` aliases; new
+  items are created through their command namespace (`/doc new`,
+  `/template new`, `/collection new`). `workspace seed-command-help` sends
+  current command reference messages into each Workspace topic.
 - Stage 6 collection indexes now render as one flat list of collection-card
-  links. Each collection remains its own bot message with description, ordered
-  item links, and edit/delete/reorder/move commands for items.
+  links and quote-formatted descriptions. Each collection remains its own bot
+  message with description, ordered item links, and edit/delete/reorder/move
+  commands for items. Item commands accept reply-to-item, item number, or item
+  title where applicable.
 - Published notes leave the active Notes index after approve. Later edits to a
   published note source mark the Workspace document and derived published rows
   `needs_review`; the Useful index shows that review marker.
@@ -214,3 +221,8 @@
   messages into real `InSync v1.0` topics. Message IDs: Inbox `356`,
   `Задачи` `357`, `Заметки` `358`, `Опыт` `359`, `Полезное` `360`,
   `Заготовки` `361`, `Коллекции` `362`.
+- Later on 2026-07-09, command help was resent after removing `/new ...`
+  aliases, adding `/id`, documenting collection item reply/title handling, and
+  noting real Gemini publish formatting. Message IDs: Inbox `497`, `Задачи`
+  `498`, `Заметки` `499`, `Опыт` `500`, `Полезное` `501`, `Заготовки` `502`,
+  `Коллекции` `503`.

@@ -14,7 +14,7 @@ Workspace config keys:
 - `SOVA_WORKSPACE_TOPIC_USEFUL_ID`
 - `SOVA_WORKSPACE_TOPIC_TEMPLATES_ID`
 - `SOVA_WORKSPACE_TOPIC_COLLECTIONS_ID`
-- optional publish formatter placeholders:
+- optional publish formatter:
   - `SOVA_GEMINI_API_KEY`
   - `SOVA_GEMINI_MODEL`
 

@@ -782,6 +782,23 @@ WHERE doc_type = ? AND category = ?`,
 	return tx.Commit()
 }
 
+func (s *Store) ArchiveWorkspaceDocumentsByTypeAndCategory(ctx context.Context, docType string, category string, now time.Time) error {
+	docType = normalizeWorkspaceDocumentType(docType)
+	category = strings.TrimSpace(category)
+	if docType == "" || category == "" {
+		return fmt.Errorf("workspace document archive requires type and category")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+UPDATE workspace_documents
+SET status = 'archived', updated_at = ?
+WHERE doc_type = ? AND category = ? AND status = 'active'`,
+		now.UTC().Format(time.RFC3339Nano), docType, category)
+	return err
+}
+
 func (s *Store) WorkspaceDocumentPartsBySource(ctx context.Context, chatID int64, messageID int) ([]WorkspaceDocumentPart, error) {
 	rows, err := s.db.QueryContext(ctx, workspaceDocumentPartSelect()+`
 WHERE source_chat_id = ? AND source_message_id = ?

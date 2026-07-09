@@ -131,11 +131,11 @@ callbacks in `Задачи`, and accepts manual cluster/document commands:
 /doc new
 /doc append
 /doc rename
-/doc rename-part
 /doc delete-part
 /doc delete
 /doc publish
 /publish
+/id
 /template new
 /template append
 /template rename
@@ -145,7 +145,6 @@ callbacks in `Задачи`, and accepts manual cluster/document commands:
 /template delete-type
 /template show
 /collection new
-/new collection
 /collection add
 /collection rename
 /collection description
@@ -175,17 +174,14 @@ IDs/links.
 /doc append 3
 /doc append Название заметки | Часть 2
 /doc rename
-/doc rename-part
 /doc delete-part
 /doc delete
 /doc publish
 /template type Тип
 /template new Документ
-/new template Документ
 /template new Тип | Документ | Часть
 /template append Название шаблона | Название части
 /collection new Название
-/new collection Название
 /collection add Название коллекции | Название элемента
 ```
 
@@ -197,11 +193,17 @@ messages when they exist, not only to individual items.
 `/template type Тип` is standalone and creates an empty template type in the
 index. `/template new Название` asks which existing type should receive the
 template; `/template move` in reply changes an existing template's type through
-buttons or text.
+buttons or text. `/template delete-type` asks whether to move templates to
+`Остальное` or archive them with the type.
+
+`/doc rename` is reply-driven: replying to the first note part renames the note,
+replying to a later part renames that part. `/id` in reply shows Telegram,
+cluster, document, and part IDs known to Workspace.
 
 `/doc publish` and reply `/publish` assemble the ordered note parts, send a
-preview to `Inbox`, and expose approve/cancel/edit buttons. With empty Gemini
-config the publish provider uses a local meaning-preserving mock formatter; the
+preview to `Inbox`, and expose approve/cancel/edit buttons. With
+`SOVA_GEMINI_API_KEY` configured the preview is formatted through Gemini;
+without it the provider uses a local meaning-preserving mock formatter. The
 final approved material is posted to `Полезное`, source-to-derived mappings are
 persisted, the note leaves the active Notes index, and a Useful index message is
 updated. Later source edits mark the published document/derived rows
