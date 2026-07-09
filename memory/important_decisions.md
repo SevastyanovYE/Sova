@@ -25,3 +25,9 @@
 - Workspace topic bootstrap may create only missing target forum topics and a
   local numeric ID helper file; help messages, pinned messages, migration posts,
   deletion, and editing remain separate approval-gated actions.
+- Workspace task backlog is a tracked bot-created index message. If editing the
+  known index fails, `serve` must not create a fresh backlog on every callback;
+  cleanup/reseed should repair a bad stored index deliberately.
+- Workspace note publication uses a provider boundary. When Gemini config is
+  empty or unavailable, the live preview path must still work through a local
+  meaning-preserving mock formatter and must not invent new source facts.

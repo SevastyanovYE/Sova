@@ -565,3 +565,285 @@ func TestCalendarCandidatesLifecycle(t *testing.T) {
 		t.Fatalf("recent = %+v", recent)
 	}
 }
+
+func TestWorkspaceLiveClustersTasksAndDerivedMessages(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+	first := WorkspaceMessage{
+		ChatID:     -100200,
+		MessageID:  10,
+		TopicID:    2,
+		FromUserID: 7,
+		Date:       now,
+		Text:       "#task Сделать аудит закрепа",
+		SourceLink: "https://t.me/c/200/2/10",
+	}
+	if err := store.UpsertWorkspaceMessage(ctx, first, now); err != nil {
+		t.Fatal(err)
+	}
+	cluster, err := store.CreateWorkspaceClusterWithMessage(ctx, first, "primary", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := WorkspaceMessage{
+		ChatID: -100200, MessageID: 11, TopicID: 2, FromUserID: 7,
+		Date: now.Add(time.Minute), MediaType: "photo", Forwarded: true,
+		SourceLink: "https://t.me/c/200/2/11",
+	}
+	if err := store.UpsertWorkspaceMessage(ctx, second, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddWorkspaceMessageToCluster(ctx, cluster.ID, second.ChatID, second.MessageID, "part", now); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.WorkspaceClusterMessages(ctx, cluster.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].Message.MessageID != 10 || messages[1].Message.MediaType != "photo" {
+		t.Fatalf("cluster messages = %+v", messages)
+	}
+	tail, ok, err := store.LatestWorkspaceClusterTail(ctx, -100200, 2, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || tail.Cluster.ID != cluster.ID || tail.Message.MessageID != 11 {
+		t.Fatalf("tail = %+v ok=%t", tail, ok)
+	}
+
+	task, err := store.CreateWorkspaceTask(ctx, WorkspaceTask{
+		SourceChatID: first.ChatID, SourceMessageID: first.MessageID,
+		SourceLink: first.SourceLink, SourceClusterID: cluster.ID,
+		Text: "Сделать аудит закрепа", Emoji: "🟦", Status: "open",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetWorkspaceTaskCard(ctx, task.ID, -100200, 3, 50, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorkspaceDerivedMessage(ctx, WorkspaceDerivedMessage{
+		SourceChatID: first.ChatID, SourceMessageID: first.MessageID, SourceClusterID: cluster.ID,
+		DerivedType: "task_card", DerivedChatID: -100200, DerivedTopicID: 3,
+		DerivedMessageID: 50, Status: "active",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	deferred := now.AddDate(0, 0, 7)
+	if err := store.UpdateWorkspaceTaskStatus(ctx, task.ID, "deferred", &deferred, now); err != nil {
+		t.Fatal(err)
+	}
+	openTask, err := store.CreateWorkspaceTask(ctx, WorkspaceTask{
+		SourceChatID: first.ChatID, SourceMessageID: first.MessageID,
+		Text: "Открытая проверочная задача", Emoji: "✨", Status: "open",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := store.WorkspaceTasksBySource(ctx, first.ChatID, first.MessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 || tasks[0].CardMessageID != 50 || tasks[0].Status != "deferred" || tasks[0].DeferredUntil == nil || tasks[1].ID != openTask.ID {
+		t.Fatalf("tasks = %+v", tasks)
+	}
+	deferredTasks, err := store.DeferredWorkspaceTasks(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deferredTasks) != 1 || deferredTasks[0].ID != task.ID {
+		t.Fatalf("deferred tasks = %+v", deferredTasks)
+	}
+	matchedTasks, err := store.WorkspaceTasksContaining(ctx, []string{"провер"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matchedTasks) != 1 || matchedTasks[0].ID != openTask.ID {
+		t.Fatalf("matched tasks = %+v", matchedTasks)
+	}
+	if affected, err := store.MarkWorkspacePublishedSourceNeedsReview(ctx, first.ChatID, first.MessageID, now); err != nil || affected != 0 {
+		t.Fatalf("active derived review mark affected=%d err=%v", affected, err)
+	}
+	if err := store.UpsertWorkspaceDerivedMessage(ctx, WorkspaceDerivedMessage{
+		SourceChatID: first.ChatID, SourceMessageID: first.MessageID, SourceClusterID: cluster.ID,
+		DerivedType: "useful_material", DerivedChatID: -100200, DerivedTopicID: 4,
+		DerivedMessageID: 60, Status: "published",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if affected, err := store.MarkWorkspacePublishedSourceNeedsReview(ctx, first.ChatID, first.MessageID, now); err != nil || affected != 1 {
+		t.Fatalf("published derived review mark affected=%d err=%v", affected, err)
+	}
+}
+
+func TestWorkspaceAttachTrackedReplyMessage(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+	target := WorkspaceMessage{ChatID: -100200, MessageID: 10, TopicID: 2, FromUserID: 7, Date: now, Text: "target"}
+	if err := store.UpsertWorkspaceMessage(ctx, target, now); err != nil {
+		t.Fatal(err)
+	}
+	cluster, err := store.CreateWorkspaceClusterWithMessage(ctx, target, "primary", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replyMessage := WorkspaceMessage{
+		ChatID:           -100200,
+		MessageID:        11,
+		TopicID:          2,
+		FromUserID:       7,
+		Date:             now.Add(time.Minute),
+		Text:             "this message replies to another one",
+		ReplyToMessageID: 9,
+	}
+	if err := store.UpsertWorkspaceMessage(ctx, replyMessage, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachWorkspaceMessagesToCluster(ctx, cluster.ID, replyMessage.ChatID, []int{replyMessage.MessageID}, now); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.WorkspaceClusterMessages(ctx, cluster.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[1].Message.MessageID != replyMessage.MessageID || messages[1].Message.ReplyToMessageID != 9 {
+		t.Fatalf("cluster messages = %+v", messages)
+	}
+}
+
+func TestLatestWorkspaceMessageInTopic(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+	for _, message := range []WorkspaceMessage{
+		{ChatID: -100200, MessageID: 10, TopicID: 12, FromUserID: 7, Date: now, Text: "note source"},
+		{ChatID: -100200, MessageID: 11, TopicID: 12, FromUserID: 7, Date: now, Text: "/note new Test"},
+		{ChatID: -100200, MessageID: 12, TopicID: 20, FromUserID: 7, Date: now, Text: "collection source"},
+	} {
+		if err := store.UpsertWorkspaceMessage(ctx, message, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source, ok, err := store.LatestWorkspaceMessageInTopic(ctx, -100200, 12, 7, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || source.MessageID != 10 {
+		t.Fatalf("latest note source = %+v ok=%t", source, ok)
+	}
+	if _, ok, err := store.LatestWorkspaceMessageInTopic(ctx, -100200, 12, 8, 20); err != nil || ok {
+		t.Fatalf("unexpected source for other user ok=%t err=%v", ok, err)
+	}
+}
+
+func TestWorkspaceDocumentsLifecycle(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+	doc, err := store.CreateWorkspaceDocument(ctx, WorkspaceDocument{
+		Type:     "note",
+		Status:   "active",
+		Title:    "Связки про Workspace",
+		Category: "Личное",
+	}, WorkspaceDocumentPart{
+		Title:           "Начало",
+		SourceChatID:    -100200,
+		SourceMessageID: 10,
+		SourceClusterID: 3,
+		SourceLink:      "https://t.me/c/200/12/10",
+		Text:            "первая часть",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := store.AddWorkspaceDocumentPart(ctx, WorkspaceDocumentPart{
+		DocumentID:      doc.ID,
+		Title:           "Продолжение",
+		SourceChatID:    -100200,
+		SourceMessageID: 11,
+		SourceLink:      "https://t.me/c/200/12/11",
+		Text:            "вторая часть",
+	}, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if part.PartNo != 2 {
+		t.Fatalf("part no = %d", part.PartNo)
+	}
+	docs, err := store.WorkspaceDocumentsByType(ctx, "note", []string{"active"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 || docs[0].ID != doc.ID || docs[0].Title != "Связки про Workspace" {
+		t.Fatalf("docs = %+v", docs)
+	}
+	parts, err := store.WorkspaceDocumentParts(ctx, doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 2 || parts[0].SourceMessageID != 10 || parts[1].SourceMessageID != 11 {
+		t.Fatalf("parts = %+v", parts)
+	}
+	sourceParts, err := store.WorkspaceDocumentPartsBySource(ctx, -100200, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sourceParts) != 1 || sourceParts[0].DocumentID != doc.ID {
+		t.Fatalf("source parts = %+v", sourceParts)
+	}
+	if err := store.UpdateWorkspaceDocumentTitle(ctx, doc.ID, "Связки", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateWorkspaceDocumentPartTitle(ctx, part.ID, "Вторая часть", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateWorkspaceDocumentTarget(ctx, doc.ID, -100200, 18, 50, &now, now); err != nil {
+		t.Fatal(err)
+	}
+	byTarget, ok, err := store.WorkspaceDocumentByTargetMessage(ctx, -100200, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || byTarget.ID != doc.ID || byTarget.Title != "Связки" {
+		t.Fatalf("target doc = %+v ok=%t", byTarget, ok)
+	}
+	published, err := store.PublishedWorkspaceDocuments(ctx, "note", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(published) != 1 || published[0].TargetMessageID != 50 {
+		t.Fatalf("published docs = %+v", published)
+	}
+	if err := store.DeleteWorkspaceDocumentPart(ctx, part.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	parts, err = store.WorkspaceDocumentParts(ctx, doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 1 || parts[0].PartNo != 1 || parts[0].SourceMessageID != 10 {
+		t.Fatalf("parts after delete = %+v", parts)
+	}
+}

@@ -11,8 +11,9 @@ import (
 )
 
 type SeedTopicPinsOptions struct {
-	DryRun bool
-	Now    time.Time
+	DryRun             bool
+	Now                time.Time
+	IncludeClusterHelp bool
 }
 
 type SeedTopicPinsResult struct {
@@ -21,6 +22,7 @@ type SeedTopicPinsResult struct {
 }
 
 type SeedTopicPinItem struct {
+	Group     string
 	Topic     string
 	TopicID   int
 	MessageID int
@@ -40,6 +42,7 @@ func SeedWorkspaceTopicPins(ctx context.Context, cfg config.Config, opts SeedTop
 			return SeedTopicPinsResult{}, fmt.Errorf("workspace topic %q is not configured", draft.Topic)
 		}
 		item := SeedTopicPinItem{
+			Group:   "workspace",
 			Topic:   draft.Topic,
 			TopicID: topicID,
 			Text:    TopicPinMessageText(draft),
@@ -50,9 +53,69 @@ func SeedWorkspaceTopicPins(ctx context.Context, cfg config.Config, opts SeedTop
 				ChatID:          cfg.Workspace.ChatID,
 				MessageThreadID: topicID,
 				Text:            item.Text,
+				ParseMode:       "HTML",
 			})
 			if err != nil {
 				return SeedTopicPinsResult{}, fmt.Errorf("send topic pin draft to %s: %w", draft.Topic, err)
+			}
+			item.MessageID = message.MessageID
+			item.Status = "sent"
+		}
+		result.Items = append(result.Items, item)
+	}
+	if opts.IncludeClusterHelp {
+		item := SeedTopicPinItem{
+			Group:   "workspace",
+			Topic:   "Inbox",
+			TopicID: cfg.Workspace.Topics.Inbox,
+			Text:    ClusterHelpMessageText(),
+			Status:  "dry_run",
+		}
+		if !opts.DryRun {
+			message, err := client.SendMessageResult(ctx, nest.SendMessageRequest{
+				ChatID:          cfg.Workspace.ChatID,
+				MessageThreadID: cfg.Workspace.Topics.Inbox,
+				Text:            item.Text,
+				ParseMode:       "HTML",
+			})
+			if err != nil {
+				return SeedTopicPinsResult{}, fmt.Errorf("send cluster help to Inbox: %w", err)
+			}
+			item.MessageID = message.MessageID
+			item.Status = "sent"
+		}
+		result.Items = append(result.Items, item)
+	}
+	return result, nil
+}
+
+func SeedControlTopicPins(ctx context.Context, cfg config.Config, opts SeedTopicPinsOptions) (SeedTopicPinsResult, error) {
+	if !cfg.ControlConfigured() {
+		return SeedTopicPinsResult{}, fmt.Errorf("control group is not fully configured")
+	}
+	result := SeedTopicPinsResult{DryRun: opts.DryRun}
+	client := nest.New(cfg.Control.BotToken)
+	for _, draft := range ControlTopicPinDrafts() {
+		topicID := controlTopicID(cfg, draft.Topic)
+		if topicID == 0 {
+			return SeedTopicPinsResult{}, fmt.Errorf("control topic %q is not configured", draft.Topic)
+		}
+		item := SeedTopicPinItem{
+			Group:   "control",
+			Topic:   draft.Topic,
+			TopicID: topicID,
+			Text:    TopicPinMessageText(draft),
+			Status:  "dry_run",
+		}
+		if !opts.DryRun {
+			message, err := client.SendMessageResult(ctx, nest.SendMessageRequest{
+				ChatID:          cfg.Control.ChatID,
+				MessageThreadID: topicID,
+				Text:            item.Text,
+				ParseMode:       "HTML",
+			})
+			if err != nil {
+				return SeedTopicPinsResult{}, fmt.Errorf("send control topic pin draft to %s: %w", draft.Topic, err)
 			}
 			item.MessageID = message.MessageID
 			item.Status = "sent"
@@ -68,10 +131,39 @@ func TopicPinMessageText(draft TopicPinDraft) string {
 	if topic == "" {
 		return text
 	}
+	heading := topicPinHeading(topic)
 	if text == "" {
-		return "Закреп: " + topic
+		return heading
 	}
-	return "Закреп: " + topic + "\n\n" + text
+	return heading + "\n\n" + text
+}
+
+func topicPinHeading(topic string) string {
+	emoji := map[string]string{
+		"Inbox":     "📥",
+		"Задачи":    "✅",
+		"Заметки":   "📝",
+		"Опыт":      "🌱",
+		"Полезное":  "💎",
+		"Заготовки": "🧰",
+		"Коллекции": "🗂",
+		"Status":    "🟢",
+		"Errors":    "🚨",
+		"Runs":      "🧭",
+		"Review":    "🔎",
+		"Test Lab":  "🧪",
+		"Workspace": "🧱",
+		"Nest":      "🌿",
+		"Ideas":     "💡",
+	}[topic]
+	if emoji == "" {
+		emoji = "✨"
+	}
+	return emoji + " <b>" + htmlEscapeTopic(topic) + "</b>"
+}
+
+func htmlEscapeTopic(topic string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(topic)
 }
 
 func workspaceTopicID(cfg config.Config, topic string) int {
@@ -90,6 +182,29 @@ func workspaceTopicID(cfg config.Config, topic string) int {
 		return cfg.Workspace.Topics.Templates
 	case "Коллекции":
 		return cfg.Workspace.Topics.Collections
+	default:
+		return 0
+	}
+}
+
+func controlTopicID(cfg config.Config, topic string) int {
+	switch strings.TrimSpace(topic) {
+	case "Status":
+		return cfg.Control.Topics.Status
+	case "Errors":
+		return cfg.Control.Topics.Errors
+	case "Runs":
+		return cfg.Control.Topics.Runs
+	case "Review":
+		return cfg.Control.Topics.Review
+	case "Test Lab":
+		return cfg.Control.Topics.TestLab
+	case "Workspace":
+		return cfg.Control.Topics.Workspace
+	case "Nest":
+		return cfg.Control.Topics.Nest
+	case "Ideas":
+		return cfg.Control.Topics.Ideas
 	default:
 		return 0
 	}

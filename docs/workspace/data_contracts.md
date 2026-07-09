@@ -14,6 +14,9 @@ Workspace config keys:
 - `SOVA_WORKSPACE_TOPIC_USEFUL_ID`
 - `SOVA_WORKSPACE_TOPIC_TEMPLATES_ID`
 - `SOVA_WORKSPACE_TOPIC_COLLECTIONS_ID`
+- optional publish formatter placeholders:
+  - `SOVA_GEMINI_API_KEY`
+  - `SOVA_GEMINI_MODEL`
 
 Control config keys:
 
@@ -81,6 +84,67 @@ be committed.
 
 These records preserve source IDs and links. They do not replace immutable raw
 Telegram storage.
+
+`workspace_messages` stores compact live Bot API message metadata for
+`InSync v1.0`:
+
+- source identity: `chat_id`, `message_id`, `topic_id`, `source_link`
+- sender metadata: `from_user_id`, `from_is_bot`
+- body fields: `text`, `caption`, `media_type`
+- relationship fields: `forwarded`, `forward_chat_id`,
+  `forward_message_id`, `reply_to_message_id`
+- timing fields: `date`, `edit_date`, `created_at`, `updated_at`
+
+It is not raw Telegram storage and does not store full Bot API payloads.
+
+`workspace_clusters` and `workspace_cluster_messages` store logical clusters:
+
+- cluster identity: `id`, `chat_id`, `topic_id`, `status`
+- ordered parts: `cluster_id`, `chat_id`, `message_id`, `position`, `role`
+- every part keeps its own Telegram source IDs and link through
+  `workspace_messages`
+
+Cluster order follows Telegram message order. The live bot may auto-attach
+reply-linked messages and immediately following forwarded/media messages, but
+manual `/cluster` commands remain the correction path.
+
+`workspace_tasks` stores bot-created task cards:
+
+- source mapping: `source_chat_id`, `source_message_id`, `source_link`,
+  `source_cluster_id`
+- card mapping: `card_chat_id`, `card_topic_id`, `card_message_id`
+- user-visible data: `text`, `emoji`, `status`, `deferred_until`
+
+Task cards live in `Задачи`. The visible card text does not include a "Задача"
+heading or source link. Defer presets (`На неделю`, `На месяц`) resolve to
+08:00 in the configured project timezone; explicit user-entered dates keep the
+entered time or use the date-only default.
+
+`workspace_derived_messages` maps source messages/clusters to bot-created
+derived messages. Published derived messages can be marked `needs_review` when
+their source is edited, instead of silently rewriting final material.
+
+`workspace_topic_indexes` stores bot-created index/backlog message IDs, such as
+the delayed-task backlog in `Задачи`. The task backlog intentionally lists only
+`deferred` tasks and links each item back to its original task card; open tasks
+stay visible as individual cards.
+
+`workspace_documents` and `workspace_document_parts` store Stage 6
+note/template/collection metadata:
+
+- `doc_type`: `note`, `template`, or `collection`
+- `status`: `active`, `published`, `archived`, or `needs_review`
+- document title/category and optional target message IDs. Target IDs are used
+  for collection-card messages and published Useful material.
+- per-part source mapping: `source_chat_id`, `source_message_id`,
+  `source_cluster_id`, `source_link`
+- compact part text only; raw Telegram JSON remains outside prompt context
+
+The live bot maintains index messages for active notes in `Заметки`, templates
+in `Заготовки`, collection-card links in `Коллекции`, and published Useful
+links in `Полезное`. Notes render as a bold first-part link plus bracketed
+part links. Published material is not silently rewritten on source edit:
+published derived rows are marked `needs_review`.
 
 ## Audit Artifacts
 

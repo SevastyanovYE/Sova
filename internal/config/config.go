@@ -64,6 +64,11 @@ type ControlConfig struct {
 	Topics   ControlTopicIDs
 }
 
+type GeminiConfig struct {
+	APIKey string
+	Model  string
+}
+
 type Config struct {
 	Timezone                 string
 	StateDir                 string
@@ -82,6 +87,7 @@ type Config struct {
 	Control                  ControlConfig
 	OllamaURL                string
 	OllamaModel              string
+	Gemini                   GeminiConfig
 	CodexPath                string
 	GoogleCredentials        string
 	GoogleToken              string
@@ -225,8 +231,12 @@ func Load() (Config, error) {
 				Nest: controlNestID, Ideas: controlIdeasID,
 			},
 		},
-		OllamaURL:         valueOrDefault("SOVA_OLLAMA_URL", defaultOllamaURL),
-		OllamaModel:       valueOrDefault("SOVA_OLLAMA_MODEL", defaultOllamaModel),
+		OllamaURL:   valueOrDefault("SOVA_OLLAMA_URL", defaultOllamaURL),
+		OllamaModel: valueOrDefault("SOVA_OLLAMA_MODEL", defaultOllamaModel),
+		Gemini: GeminiConfig{
+			APIKey: strings.TrimSpace(os.Getenv("SOVA_GEMINI_API_KEY")),
+			Model:  strings.TrimSpace(os.Getenv("SOVA_GEMINI_MODEL")),
+		},
 		CodexPath:         strings.TrimSpace(os.Getenv("SOVA_CODEX_PATH")),
 		GoogleCredentials: valueOrDefault("SOVA_GOOGLE_CREDENTIALS_PATH", defaultGoogleCredsPath),
 		GoogleToken:       valueOrDefault("SOVA_GOOGLE_TOKEN_PATH", defaultGoogleTokenPath),

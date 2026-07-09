@@ -289,6 +289,12 @@ func workspaceCommand(ctx context.Context, cfg config.Config, args []string) err
 		return workspaceBootstrapTopics(ctx, cfg, args[1:])
 	case "seed-topic-pins":
 		return workspaceSeedTopicPins(ctx, cfg, args[1:])
+	case "seed-document-indexes":
+		return workspaceSeedDocumentIndexes(ctx, cfg, store, args[1:])
+	case "cleanup-test-tasks":
+		return workspaceCleanupTestTasks(ctx, cfg, store, args[1:])
+	case "serve":
+		return workspace.Serve(ctx, cfg, store)
 	case "help", "-h", "--help":
 		printWorkspaceUsage()
 		return nil
@@ -485,6 +491,7 @@ func workspaceBootstrapTopics(ctx context.Context, cfg config.Config, args []str
 func workspaceSeedTopicPins(ctx context.Context, cfg config.Config, args []string) error {
 	flags := flag.NewFlagSet("workspace seed-topic-pins", flag.ContinueOnError)
 	dryRun := flags.Bool("dry-run", false, "print planned topic messages without sending them")
+	target := flags.String("target", "workspace", "workspace, control, or all")
 	timeout := flags.Duration("timeout", 2*time.Minute, "maximum time for Bot API send calls; 0 disables the deadline")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -495,19 +502,87 @@ func workspaceSeedTopicPins(ctx context.Context, cfg config.Config, args []strin
 		seedCtx, cancel = context.WithTimeout(ctx, *timeout)
 	}
 	defer cancel()
-	result, err := workspace.SeedWorkspaceTopicPins(seedCtx, cfg, workspace.SeedTopicPinsOptions{
+	var results []workspace.SeedTopicPinsResult
+	switch strings.ToLower(strings.TrimSpace(*target)) {
+	case "workspace":
+		result, err := workspace.SeedWorkspaceTopicPins(seedCtx, cfg, workspace.SeedTopicPinsOptions{
+			DryRun: *dryRun, Now: time.Now().UTC(), IncludeClusterHelp: true,
+		})
+		if err != nil {
+			return err
+		}
+		results = append(results, result)
+	case "control":
+		result, err := workspace.SeedControlTopicPins(seedCtx, cfg, workspace.SeedTopicPinsOptions{
+			DryRun: *dryRun, Now: time.Now().UTC(),
+		})
+		if err != nil {
+			return err
+		}
+		results = append(results, result)
+	case "all":
+		workspaceResult, err := workspace.SeedWorkspaceTopicPins(seedCtx, cfg, workspace.SeedTopicPinsOptions{
+			DryRun: *dryRun, Now: time.Now().UTC(), IncludeClusterHelp: true,
+		})
+		if err != nil {
+			return err
+		}
+		controlResult, err := workspace.SeedControlTopicPins(seedCtx, cfg, workspace.SeedTopicPinsOptions{
+			DryRun: *dryRun, Now: time.Now().UTC(),
+		})
+		if err != nil {
+			return err
+		}
+		results = append(results, workspaceResult, controlResult)
+	default:
+		return fmt.Errorf("--target must be workspace, control, or all")
+	}
+	for _, result := range results {
+		mode := "workspace seed-topic-pins"
+		if result.DryRun {
+			mode += " dry-run"
+		}
+		for _, item := range result.Items {
+			fmt.Printf("%s: %-9s %-12s topic_id=%d status=%s", mode, item.Group, item.Topic, item.TopicID, item.Status)
+			if item.MessageID > 0 {
+				fmt.Printf(" message_id=%d", item.MessageID)
+			}
+			fmt.Println()
+			if result.DryRun {
+				fmt.Println(item.Text)
+				fmt.Println()
+			}
+		}
+	}
+	return nil
+}
+
+func workspaceSeedDocumentIndexes(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace seed-document-indexes", flag.ContinueOnError)
+	dryRun := flags.Bool("dry-run", false, "print planned document indexes without sending them")
+	timeout := flags.Duration("timeout", 2*time.Minute, "maximum time for Bot API send/edit calls; 0 disables the deadline")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	seedCtx := ctx
+	cancel := func() {}
+	if *timeout > 0 {
+		seedCtx, cancel = context.WithTimeout(ctx, *timeout)
+	}
+	defer cancel()
+	result, err := workspace.SeedWorkspaceDocumentIndexes(seedCtx, cfg, store, workspace.SeedDocumentIndexesOptions{
 		DryRun: *dryRun,
 		Now:    time.Now().UTC(),
 	})
 	if err != nil {
 		return err
 	}
-	mode := "workspace seed-topic-pins"
+	mode := "workspace seed-document-indexes"
 	if result.DryRun {
 		mode += " dry-run"
 	}
 	for _, item := range result.Items {
-		fmt.Printf("%s: %-12s topic_id=%d status=%s", mode, item.Topic, item.TopicID, item.Status)
+		fmt.Printf("%s: %-10s %-12s topic_id=%d status=%s", mode, item.Type, item.Topic, item.TopicID, item.Status)
 		if item.MessageID > 0 {
 			fmt.Printf(" message_id=%d", item.MessageID)
 		}
@@ -516,6 +591,55 @@ func workspaceSeedTopicPins(ctx context.Context, cfg config.Config, args []strin
 			fmt.Println(item.Text)
 			fmt.Println()
 		}
+	}
+	return nil
+}
+
+func workspaceCleanupTestTasks(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace cleanup-test-tasks", flag.ContinueOnError)
+	execute := flags.Bool("execute", false, "delete matching bot task cards and the backlog message; default is dry-run")
+	contains := flags.String("contains", "", "comma-separated task text terms; default: Провер,Проверочная,тест")
+	deleteBacklog := flags.Bool("delete-backlog", true, "also delete the bot-created delayed-task backlog message")
+	limit := flags.Int("limit", 100, "maximum matching tasks to inspect")
+	timeout := flags.Duration("timeout", 2*time.Minute, "maximum time for Bot API delete calls; 0 disables the deadline")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cleanupCtx := ctx
+	cancel := func() {}
+	if *timeout > 0 {
+		cleanupCtx, cancel = context.WithTimeout(ctx, *timeout)
+	}
+	defer cancel()
+	result, err := workspace.CleanupTestTasks(cleanupCtx, cfg, store, workspace.CleanupTestTasksOptions{
+		Execute:       *execute,
+		Terms:         []string{*contains},
+		DeleteBacklog: *deleteBacklog,
+		Limit:         *limit,
+		Now:           time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	mode := "dry-run"
+	if result.Execute {
+		mode = "execute"
+	}
+	fmt.Printf("workspace cleanup-test-tasks %s: matched=%d deleted_cards=%d cancelled_tasks=%d",
+		mode, result.MatchedTasks, result.DeletedCards, result.CancelledTasks)
+	if result.BacklogMessageID > 0 {
+		fmt.Printf(" backlog_message_id=%d deleted_backlog=%t", result.BacklogMessageID, result.DeletedBacklog)
+	}
+	fmt.Println()
+	for _, item := range result.Items {
+		fmt.Printf("- task=%d card=%d status=%s action=%s text=%q", item.TaskID, item.CardMessageID, item.Status, item.Action, item.Text)
+		if item.Error != "" {
+			fmt.Printf(" error=%q", item.Error)
+		}
+		fmt.Println()
+	}
+	if !result.Execute {
+		fmt.Println("dry-run only; add --execute to delete bot-created task cards/backlog")
 	}
 	return nil
 }
@@ -1307,7 +1431,10 @@ Usage:
   sova workspace audit [--dry-run] [--limit 0]
   sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
   sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
-  sova workspace seed-topic-pins [--dry-run] [--timeout 2m]
+  sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
+  sova workspace seed-document-indexes [--dry-run] [--timeout 2m]
+  sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
+  sova workspace serve
   sova nest-check [--send-status]
   sova nest-seed-topics
   sova telegram-status
@@ -1333,7 +1460,10 @@ Usage:
   sova workspace audit [--dry-run] [--limit 0]
   sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
   sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
-  sova workspace seed-topic-pins [--dry-run] [--timeout 2m]
+  sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
+  sova workspace seed-document-indexes [--dry-run] [--timeout 2m]
+  sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
+  sova workspace serve
 
 Notes:
   discover reads forum topic metadata from the legacy InSync source.
@@ -1341,5 +1471,8 @@ Notes:
   audit uses already indexed Telegram messages and writes review artifacts unless --dry-run is set.
   review-preview merges user-filled review decisions into a migration preview and stops for approval.
   bootstrap-topics creates only missing target forum topics and writes an env-style ID file.
-  seed-topic-pins sends raw first-pass pin messages into configured Workspace topics.`)
+  seed-topic-pins sends human-friendly pin draft messages into Workspace and/or Control topics.
+  seed-document-indexes creates or updates active note/template/collection index messages.
+  cleanup-test-tasks deletes bot-created test task cards/backlog and marks matching tasks cancelled.
+  serve runs the live Workspace bot for clusters, edit-sync, task cards, and task callbacks.`)
 }

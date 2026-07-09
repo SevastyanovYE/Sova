@@ -107,3 +107,30 @@ empty `user_decision` and `user_comment` columns for Stage 2 merge/preview.
 
 Workspace Stage 1 must not migrate, mass post, delete, or edit Telegram
 messages.
+
+## Workspace live bot
+
+`sova workspace serve` is separate from Nest `sova serve`. It polls only
+`SOVA_WORKSPACE_BOT_TOKEN` for the configured `InSync v1.0` chat and uses
+Workspace topic IDs from `SOVA_WORKSPACE_*`.
+
+Live Workspace messages are stored as compact metadata in `workspace_messages`,
+not as raw Bot API JSON. Each message preserves Telegram `(chat_id, message_id)`,
+topic ID, source link, text/caption, media type, forward/reply metadata, and
+edit timestamp when present.
+
+Logical message clusters are stored in `workspace_clusters` and
+`workspace_cluster_messages`. Replies attach explicitly. Forwarded/media
+messages attach only when they immediately follow the user's previous message in
+the same topic; the system does not use a broad time-window grouping rule.
+
+Task cards are stored in `workspace_tasks` and published to the Workspace
+`Задачи` topic with Done/Cancel/Defer buttons. Source-to-card mappings are also
+recorded in `workspace_derived_messages` so edited source messages can update
+open/deferred task cards or mark already published derived material as
+`needs_review`.
+
+Stage 6 document metadata is stored in `workspace_documents` and
+`workspace_document_parts`. Notes, templates, and collection items keep compact
+titles/categories plus per-part Telegram source IDs/links; active indexes are
+tracked in `workspace_topic_indexes`.

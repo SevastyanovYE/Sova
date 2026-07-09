@@ -39,11 +39,70 @@ type Chat struct {
 }
 
 type Message struct {
-	MessageID       int    `json:"message_id"`
-	MessageThreadID int    `json:"message_thread_id"`
-	Chat            Chat   `json:"chat"`
-	From            *User  `json:"from,omitempty"`
-	Text            string `json:"text"`
+	MessageID            int             `json:"message_id"`
+	MessageThreadID      int             `json:"message_thread_id"`
+	Chat                 Chat            `json:"chat"`
+	From                 *User           `json:"from,omitempty"`
+	Date                 int64           `json:"date,omitempty"`
+	EditDate             int64           `json:"edit_date,omitempty"`
+	Text                 string          `json:"text"`
+	Caption              string          `json:"caption,omitempty"`
+	Photo                []PhotoSize     `json:"photo,omitempty"`
+	Video                *Video          `json:"video,omitempty"`
+	Voice                *Voice          `json:"voice,omitempty"`
+	Audio                *Audio          `json:"audio,omitempty"`
+	Document             *Document       `json:"document,omitempty"`
+	ForwardOrigin        json.RawMessage `json:"forward_origin,omitempty"`
+	ForwardFrom          *User           `json:"forward_from,omitempty"`
+	ForwardFromChat      *Chat           `json:"forward_from_chat,omitempty"`
+	ForwardFromMessageID int             `json:"forward_from_message_id,omitempty"`
+	ReplyToMessage       *Message        `json:"reply_to_message,omitempty"`
+}
+
+type PhotoSize struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id,omitempty"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	FileSize     int    `json:"file_size,omitempty"`
+}
+
+type Video struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id,omitempty"`
+	Duration     int    `json:"duration,omitempty"`
+	Width        int    `json:"width,omitempty"`
+	Height       int    `json:"height,omitempty"`
+	FileName     string `json:"file_name,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	FileSize     int    `json:"file_size,omitempty"`
+}
+
+type Voice struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id,omitempty"`
+	Duration     int    `json:"duration,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	FileSize     int    `json:"file_size,omitempty"`
+}
+
+type Audio struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id,omitempty"`
+	Duration     int    `json:"duration,omitempty"`
+	Performer    string `json:"performer,omitempty"`
+	Title        string `json:"title,omitempty"`
+	FileName     string `json:"file_name,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	FileSize     int    `json:"file_size,omitempty"`
+}
+
+type Document struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id,omitempty"`
+	FileName     string `json:"file_name,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	FileSize     int    `json:"file_size,omitempty"`
 }
 
 type CallbackQuery struct {
@@ -56,6 +115,7 @@ type CallbackQuery struct {
 type Update struct {
 	UpdateID      int            `json:"update_id"`
 	Message       *Message       `json:"message"`
+	EditedMessage *Message       `json:"edited_message"`
 	CallbackQuery *CallbackQuery `json:"callback_query"`
 }
 
@@ -82,6 +142,20 @@ type EditMessageTextRequest struct {
 	Text        string
 	ParseMode   string
 	ReplyMarkup *InlineKeyboardMarkup
+}
+
+type CopyMessageRequest struct {
+	ChatID          int64
+	MessageThreadID int
+	FromChatID      int64
+	MessageID       int
+}
+
+type ForwardMessageRequest struct {
+	ChatID          int64
+	MessageThreadID int
+	FromChatID      int64
+	MessageID       int
 }
 
 type ForumTopic struct {
@@ -198,6 +272,52 @@ func (c *Client) CreateForumTopic(ctx context.Context, request CreateForumTopicR
 	return response.Result, nil
 }
 
+func (c *Client) CopyMessage(ctx context.Context, request CopyMessageRequest) (Message, error) {
+	payload := map[string]any{
+		"chat_id":      request.ChatID,
+		"from_chat_id": request.FromChatID,
+		"message_id":   request.MessageID,
+	}
+	if request.MessageThreadID != 0 {
+		payload["message_thread_id"] = request.MessageThreadID
+	}
+	var response struct {
+		OK          bool    `json:"ok"`
+		Result      Message `json:"result"`
+		Description string  `json:"description"`
+	}
+	if err := c.call(ctx, "copyMessage", payload, &response); err != nil {
+		return Message{}, err
+	}
+	if !response.OK {
+		return Message{}, fmt.Errorf("Bot API copyMessage failed: %s", response.Description)
+	}
+	return response.Result, nil
+}
+
+func (c *Client) ForwardMessage(ctx context.Context, request ForwardMessageRequest) (Message, error) {
+	payload := map[string]any{
+		"chat_id":      request.ChatID,
+		"from_chat_id": request.FromChatID,
+		"message_id":   request.MessageID,
+	}
+	if request.MessageThreadID != 0 {
+		payload["message_thread_id"] = request.MessageThreadID
+	}
+	var response struct {
+		OK          bool    `json:"ok"`
+		Result      Message `json:"result"`
+		Description string  `json:"description"`
+	}
+	if err := c.call(ctx, "forwardMessage", payload, &response); err != nil {
+		return Message{}, err
+	}
+	if !response.OK {
+		return Message{}, fmt.Errorf("Bot API forwardMessage failed: %s", response.Description)
+	}
+	return response.Result, nil
+}
+
 func (c *Client) EditMessageText(ctx context.Context, request EditMessageTextRequest) error {
 	payload := map[string]any{
 		"chat_id":    request.ChatID,
@@ -223,11 +343,29 @@ func (c *Client) EditMessageText(ctx context.Context, request EditMessageTextReq
 	return nil
 }
 
+func (c *Client) DeleteMessage(ctx context.Context, chatID int64, messageID int) error {
+	payload := map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+	}
+	var response struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := c.call(ctx, "deleteMessage", payload, &response); err != nil {
+		return err
+	}
+	if !response.OK {
+		return fmt.Errorf("Bot API deleteMessage failed: %s", response.Description)
+	}
+	return nil
+}
+
 func (c *Client) GetUpdates(ctx context.Context, offset int, timeoutSeconds int) ([]Update, error) {
 	payload := map[string]any{
 		"offset":          offset,
 		"timeout":         timeoutSeconds,
-		"allowed_updates": []string{"message", "callback_query"},
+		"allowed_updates": []string{"message", "edited_message", "callback_query"},
 	}
 	var response struct {
 		OK          bool     `json:"ok"`

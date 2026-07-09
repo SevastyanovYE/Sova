@@ -362,6 +362,135 @@ CREATE TABLE IF NOT EXISTS workspace_audit_records (
 );
 CREATE INDEX IF NOT EXISTS idx_workspace_audit_records_decision
     ON workspace_audit_records(run_id, model_decision, detected_type);
+CREATE TABLE IF NOT EXISTS workspace_messages (
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    topic_id INTEGER NOT NULL DEFAULT 0,
+    from_user_id INTEGER NOT NULL DEFAULT 0,
+    from_is_bot INTEGER NOT NULL CHECK (from_is_bot IN (0, 1)),
+    date TEXT NOT NULL,
+    edit_date TEXT,
+    text TEXT NOT NULL DEFAULT '',
+    caption TEXT NOT NULL DEFAULT '',
+    media_type TEXT NOT NULL DEFAULT '',
+    forwarded INTEGER NOT NULL CHECK (forwarded IN (0, 1)),
+    forward_chat_id INTEGER NOT NULL DEFAULT 0,
+    forward_message_id INTEGER NOT NULL DEFAULT 0,
+    reply_to_message_id INTEGER NOT NULL DEFAULT 0,
+    source_link TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_messages_topic
+    ON workspace_messages(chat_id, topic_id, message_id);
+CREATE TABLE IF NOT EXISTS workspace_clusters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    topic_id INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'closed', 'needs_review')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_clusters_topic
+    ON workspace_clusters(chat_id, topic_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS workspace_cluster_messages (
+    cluster_id INTEGER NOT NULL REFERENCES workspace_clusters(id) ON DELETE CASCADE,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT 'part' CHECK (role IN ('primary', 'part', 'manual')),
+    attached_at TEXT NOT NULL,
+    PRIMARY KEY(cluster_id, chat_id, message_id),
+    UNIQUE(chat_id, message_id),
+    FOREIGN KEY(chat_id, message_id) REFERENCES workspace_messages(chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_cluster_messages_order
+    ON workspace_cluster_messages(cluster_id, position, message_id);
+CREATE TABLE IF NOT EXISTS workspace_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_chat_id INTEGER NOT NULL,
+    source_message_id INTEGER NOT NULL,
+    source_link TEXT NOT NULL DEFAULT '',
+    source_cluster_id INTEGER NOT NULL DEFAULT 0,
+    card_chat_id INTEGER NOT NULL DEFAULT 0,
+    card_topic_id INTEGER NOT NULL DEFAULT 0,
+    card_message_id INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL,
+    emoji TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN ('open', 'done', 'cancelled', 'deferred')),
+    deferred_until TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    cancelled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_tasks_source
+    ON workspace_tasks(source_chat_id, source_message_id, id);
+CREATE INDEX IF NOT EXISTS idx_workspace_tasks_status
+    ON workspace_tasks(status, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_tasks_card
+    ON workspace_tasks(card_chat_id, card_message_id)
+    WHERE card_chat_id != 0 AND card_message_id != 0;
+CREATE TABLE IF NOT EXISTS workspace_derived_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_chat_id INTEGER NOT NULL,
+    source_message_id INTEGER NOT NULL,
+    source_cluster_id INTEGER NOT NULL DEFAULT 0,
+    derived_type TEXT NOT NULL,
+    derived_chat_id INTEGER NOT NULL,
+    derived_topic_id INTEGER NOT NULL DEFAULT 0,
+    derived_message_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'published', 'needs_review', 'closed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_derived_source
+    ON workspace_derived_messages(source_chat_id, source_message_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_derived_message
+    ON workspace_derived_messages(derived_chat_id, derived_message_id, derived_type);
+CREATE TABLE IF NOT EXISTS workspace_topic_indexes (
+    chat_id INTEGER NOT NULL,
+    topic_id INTEGER NOT NULL,
+    index_key TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(chat_id, topic_id, index_key)
+);
+CREATE TABLE IF NOT EXISTS workspace_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_type TEXT NOT NULL CHECK (doc_type IN ('note', 'template', 'collection')),
+    status TEXT NOT NULL CHECK (status IN ('active', 'published', 'archived', 'needs_review')),
+    title TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    source_chat_id INTEGER NOT NULL DEFAULT 0,
+    source_message_id INTEGER NOT NULL DEFAULT 0,
+    source_cluster_id INTEGER NOT NULL DEFAULT 0,
+    source_link TEXT NOT NULL DEFAULT '',
+    target_chat_id INTEGER NOT NULL DEFAULT 0,
+    target_topic_id INTEGER NOT NULL DEFAULT 0,
+    target_message_id INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    published_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_documents_type
+    ON workspace_documents(doc_type, status, category, updated_at DESC);
+CREATE TABLE IF NOT EXISTS workspace_document_parts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES workspace_documents(id) ON DELETE CASCADE,
+    part_no INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    source_chat_id INTEGER NOT NULL DEFAULT 0,
+    source_message_id INTEGER NOT NULL DEFAULT 0,
+    source_cluster_id INTEGER NOT NULL DEFAULT 0,
+    source_link TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(document_id, part_no)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_document_parts_source
+    ON workspace_document_parts(source_chat_id, source_message_id);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate SQLite: %w", err)

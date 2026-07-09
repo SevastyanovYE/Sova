@@ -262,7 +262,10 @@ func TestTopicPinDraftsMapToConfiguredTopics(t *testing.T) {
 			t.Fatalf("topic %q has no configured id mapping", draft.Topic)
 		}
 		text := TopicPinMessageText(draft)
-		if !strings.Contains(text, "Закреп: "+draft.Topic) {
+		if strings.Contains(text, "Закреп:") {
+			t.Fatalf("pin text for %q still has old prefix: %q", draft.Topic, text)
+		}
+		if !strings.Contains(text, draft.Topic) {
 			t.Fatalf("pin text for %q missing heading: %q", draft.Topic, text)
 		}
 	}

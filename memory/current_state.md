@@ -127,3 +127,71 @@
   Inbox `29`, `Задачи` `30`, `Заметки` `31`, `Опыт` `32`, `Полезное` `33`,
   `Заготовки` `34`, `Коллекции` `35`. The command does not pin messages
   automatically.
+- On 2026-07-07, `workspace cleanup-test-tasks --execute` deleted 14
+  bot-created test task cards (`44`, `46`, `47`, `50`..`60`) and the delayed
+  task backlog message `48`; 10 non-terminal matching tasks were marked
+  `cancelled` in SQLite. User-authored source messages were intentionally not
+  deleted.
+- On 2026-07-07, `workspace seed-topic-pins --target all` sent human-friendly
+  pin draft messages into the real `InSync v1.0` and `Sova.Control` topics.
+  Workspace message IDs: Inbox `115`, `Задачи` `116`, `Заметки` `117`, `Опыт`
+  `118`, `Полезное` `119`, `Заготовки` `120`, `Коллекции` `121`, cluster help
+  in Inbox `122`. Control message IDs: Status `38`, Errors `39`, Runs `40`,
+  Review `41`, Test Lab `42`, Workspace `43`, Nest `44`, Ideas `45`. The
+  command still does not pin messages automatically.
+- Later on 2026-07-07, the pin draft text was restyled to remove the old
+  `Закреп:` prefix and add emoji headings. New Workspace message IDs:
+  Inbox `141`, `Задачи` `142`, `Заметки` `143`, `Опыт` `144`, `Полезное`
+  `145`, `Заготовки` `146`, `Коллекции` `147`, cluster help in Inbox `148`.
+  New Control message IDs: Status `46`, Errors `47`, Runs `48`, Review `49`,
+  Test Lab `50`, Workspace `51`, Nest `52`, Ideas `53`.
+- Stage 6 document index seed exists. `workspace seed-document-indexes` created
+  active index messages: `Заметки` `149`, `Заготовки` `150`, `Коллекции` `151`.
+  These messages are tracked in `workspace_topic_indexes` and are edited by
+  live `/note`, `/template`, and `/collection` commands.
+- Workspace live bot foundation is implemented separately from Nest:
+  `workspace serve` polls only `SOVA_WORKSPACE_BOT_TOKEN`, stores compact
+  live message metadata, supports logical clusters, handles edited messages,
+  and leaves Nest `sova serve` unchanged.
+- Workspace cluster MVP storage exists in SQLite (`workspace_messages`,
+  `workspace_clusters`, `workspace_cluster_messages`) with source IDs/links,
+  ordered parts, reply attachment, narrow immediate forwarded/media attachment,
+  and manual `/cluster show|merge|split|attach|detach|help` commands. Manual
+  `merge` and `attach` accept numeric message IDs and `https://t.me/c/...`
+  links, including reply-plus-link forms.
+- Workspace task MVP foundation exists: `#task` and `#tasks` create separate
+  bot task cards in `Задачи` with Done/Cancel/Defer buttons, random-ish
+  pleasant emoji, no visible source link, same-topic custom defer date input,
+  no-year and explicit-year date parsing, deferred-only backlog index tracking,
+  links from backlog entries back to original task cards, buttons retained after
+  deferring, broader emoji rotation, paced card sends for multi-task input, and
+  edit-sync updates for open/deferred source tasks. `На неделю` and `На месяц`
+  defer presets now use 08:00 in the configured project timezone.
+- Stage 6 manual document foundation exists: `workspace_documents` and
+  `workspace_document_parts` store notes, templates, and collection items with
+  source IDs/links plus optional target message IDs. Live Workspace bot supports
+  `/doc new|append|rename|rename-part|delete-part|delete|publish|show`,
+  reply `/publish`, `/template new|append|rename|type|show`, `/new collection`,
+  and `/collection add|rename|show`. Commands may be sent from the matching
+  topic or Inbox; source messages are read from the matching topic (`Заметки`,
+  `Заготовки`, `Коллекции`) unless a valid reply is provided. Note/template
+  append resolves by ID or exact title and asks for clarification when a title
+  is ambiguous.
+- Note indexes render the first note line as a bold clickable title with a
+  stable pleasant emoji; later note parts render as bracketed links. Collection
+  indexes prefer the bot-created collection-card message link over the first
+  item link.
+- Note publish MVP exists: `/doc publish` or reply `/publish` assembles ordered
+  note parts, uses a provider boundary, falls back to a local meaning-preserving
+  mock formatter when Gemini config is empty, sends preview messages to Inbox,
+  and supports approve/cancel/edit buttons. Approve posts final material to
+  `Полезное`, persists source-to-derived published mappings, updates document
+  target IDs, and updates a Useful index message. Repeat publish warns when a
+  note already has a target unless `force` is passed.
+- Repeated edits of bot-maintained indexes/backlogs treat Telegram
+  `message is not modified` as a no-op success instead of creating duplicate
+  index messages. This was verified for document indexes `149`, `150`, `151`
+  with `workspace seed-document-indexes`, which returned `unchanged`.
+- Workspace derived message mappings exist in SQLite so source edits can update
+  active task cards and mark already published derived messages as
+  `needs_review` instead of silently rewriting final material.
