@@ -40,6 +40,17 @@ type WorkspaceDocumentPart struct {
 	CreatedAt       time.Time
 }
 
+type WorkspaceDocumentType struct {
+	ID        int64
+	DocType   string
+	Name      string
+	Emoji     string
+	Position  int
+	Status    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 func (s *Store) CreateWorkspaceDocument(ctx context.Context, doc WorkspaceDocument, first WorkspaceDocumentPart, now time.Time) (WorkspaceDocument, error) {
 	doc.Type = normalizeWorkspaceDocumentType(doc.Type)
 	doc.Status = normalizeWorkspaceDocumentStatus(doc.Status)
@@ -233,6 +244,12 @@ WHERE id = (SELECT document_id FROM workspace_document_parts WHERE id = ?)`,
 	return err
 }
 
+func (s *Store) WorkspaceDocumentPartByNo(ctx context.Context, documentID int64, partNo int) (WorkspaceDocumentPart, error) {
+	row := s.db.QueryRowContext(ctx, workspaceDocumentPartSelect()+`
+WHERE document_id = ? AND part_no = ?`, documentID, partNo)
+	return scanWorkspaceDocumentPart(row)
+}
+
 func (s *Store) WorkspaceDocumentPartByID(ctx context.Context, id int64) (WorkspaceDocumentPart, error) {
 	row := s.db.QueryRowContext(ctx, workspaceDocumentPartSelect()+`
 WHERE id = ?`, id)
@@ -271,6 +288,11 @@ SET part_no = part_no - 1
 WHERE document_id = ? AND part_no > ?`, documentID, partNo); err != nil {
 		return err
 	}
+	if partNo == 1 {
+		if err := updateWorkspaceDocumentPrimarySource(ctx, tx, documentID); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE workspace_documents
 SET updated_at = ?
@@ -278,6 +300,164 @@ WHERE id = ?`, now.UTC().Format(time.RFC3339Nano), documentID); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) MoveWorkspaceDocumentPart(ctx context.Context, partID int64, targetDocumentID int64, now time.Time) error {
+	if partID <= 0 || targetDocumentID <= 0 {
+		return fmt.Errorf("workspace document part move requires part and target document")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var sourceDocumentID int64
+	var sourcePartNo int
+	if err := tx.QueryRowContext(ctx, `
+SELECT document_id, part_no
+FROM workspace_document_parts
+WHERE id = ?`, partID).Scan(&sourceDocumentID, &sourcePartNo); err != nil {
+		return err
+	}
+	if sourceDocumentID == targetDocumentID {
+		return tx.Commit()
+	}
+	var nextPartNo int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(part_no), 0) + 1
+FROM workspace_document_parts
+WHERE document_id = ?`, targetDocumentID).Scan(&nextPartNo); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_document_parts
+SET part_no = part_no - 1
+WHERE document_id = ? AND part_no > ?`, sourceDocumentID, sourcePartNo); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_document_parts
+SET document_id = ?, part_no = ?
+WHERE id = ?`, targetDocumentID, nextPartNo, partID); err != nil {
+		return err
+	}
+	if sourcePartNo == 1 {
+		if err := updateWorkspaceDocumentPrimarySource(ctx, tx, sourceDocumentID); err != nil {
+			return err
+		}
+	}
+	if err := updateWorkspaceDocumentPrimarySource(ctx, tx, targetDocumentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_documents
+SET updated_at = ?
+WHERE id IN (?, ?)`, now.UTC().Format(time.RFC3339Nano), sourceDocumentID, targetDocumentID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ReorderWorkspaceDocumentPart(ctx context.Context, documentID int64, fromPartNo int, toPartNo int, now time.Time) error {
+	if documentID <= 0 || fromPartNo <= 0 || toPartNo <= 0 {
+		return fmt.Errorf("workspace document part reorder requires document and positive positions")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var partID int64
+	if err := tx.QueryRowContext(ctx, `
+SELECT id
+FROM workspace_document_parts
+WHERE document_id = ? AND part_no = ?`, documentID, fromPartNo).Scan(&partID); err != nil {
+		return err
+	}
+	var maxPartNo int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(part_no), 0)
+FROM workspace_document_parts
+WHERE document_id = ?`, documentID).Scan(&maxPartNo); err != nil {
+		return err
+	}
+	if toPartNo > maxPartNo {
+		toPartNo = maxPartNo
+	}
+	if fromPartNo == toPartNo {
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_document_parts
+SET part_no = -part_no
+WHERE document_id = ?`, documentID); err != nil {
+		return err
+	}
+	if fromPartNo < toPartNo {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_document_parts
+SET part_no = -part_no - 1
+WHERE document_id = ? AND -part_no > ? AND -part_no <= ?`, documentID, fromPartNo, toPartNo); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_document_parts
+SET part_no = -part_no + 1
+WHERE document_id = ? AND -part_no >= ? AND -part_no < ?`, documentID, toPartNo, fromPartNo); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_document_parts
+SET part_no = ?
+WHERE id = ?`, toPartNo, partID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_document_parts
+SET part_no = -part_no
+WHERE document_id = ? AND part_no < 0`, documentID); err != nil {
+		return err
+	}
+	if err := updateWorkspaceDocumentPrimarySource(ctx, tx, documentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_documents
+SET updated_at = ?
+WHERE id = ?`, now.UTC().Format(time.RFC3339Nano), documentID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func updateWorkspaceDocumentPrimarySource(ctx context.Context, tx workspaceDocumentPartTx, documentID int64) error {
+	var first WorkspaceDocumentPart
+	var createdRaw string
+	err := tx.QueryRowContext(ctx, workspaceDocumentPartSelect()+`
+WHERE document_id = ?
+ORDER BY part_no, id
+LIMIT 1`, documentID).Scan(
+		&first.ID, &first.DocumentID, &first.PartNo, &first.Title,
+		&first.SourceChatID, &first.SourceMessageID, &first.SourceClusterID,
+		&first.SourceLink, &first.Text, &createdRaw,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, `
+UPDATE workspace_documents
+SET source_chat_id = 0, source_message_id = 0, source_cluster_id = 0, source_link = ''
+WHERE id = ?`, documentID)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+UPDATE workspace_documents
+SET source_chat_id = ?, source_message_id = ?, source_cluster_id = ?, source_link = ?
+WHERE id = ?`, first.SourceChatID, first.SourceMessageID, first.SourceClusterID, first.SourceLink, documentID)
+	return err
 }
 
 func (s *Store) WorkspaceDocumentByID(ctx context.Context, id int64) (WorkspaceDocument, error) {
@@ -329,6 +509,37 @@ func (s *Store) WorkspaceDocumentsByType(ctx context.Context, docType string, st
 WHERE doc_type = ? AND status IN (`+strings.Join(placeholders, ", ")+`)
 ORDER BY category, updated_at DESC, id
 LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var docs []WorkspaceDocument
+	for rows.Next() {
+		doc, err := scanWorkspaceDocument(rows)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, doc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
+func (s *Store) WorkspaceDocumentsByTypeAndCategory(ctx context.Context, docType string, status string, category string, limit int) ([]WorkspaceDocument, error) {
+	docType = normalizeWorkspaceDocumentType(docType)
+	status = normalizeWorkspaceDocumentStatus(status)
+	if docType == "" || status == "" {
+		return nil, fmt.Errorf("workspace document type and status are required")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, workspaceDocumentSelect()+`
+WHERE doc_type = ? AND status = ? AND category = ?
+ORDER BY updated_at DESC, id
+LIMIT ?`, docType, status, strings.TrimSpace(category), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -399,6 +610,178 @@ ORDER BY part_no, id`, documentID)
 	return parts, nil
 }
 
+func (s *Store) UpsertWorkspaceDocumentType(ctx context.Context, docType string, name string, emoji string, now time.Time) (WorkspaceDocumentType, error) {
+	docType = normalizeWorkspaceDocumentType(docType)
+	name = strings.TrimSpace(name)
+	emoji = strings.TrimSpace(emoji)
+	if docType == "" || name == "" {
+		return WorkspaceDocumentType{}, fmt.Errorf("workspace document type name is required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WorkspaceDocumentType{}, err
+	}
+	defer tx.Rollback()
+	var position int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(position), 0) + 1
+FROM workspace_document_types
+WHERE doc_type = ?`, docType).Scan(&position); err != nil {
+		return WorkspaceDocumentType{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO workspace_document_types(doc_type, name, emoji, position, status, created_at, updated_at)
+VALUES (?, ?, ?, ?, 'active', ?, ?)
+ON CONFLICT(doc_type, name) DO UPDATE SET
+    emoji = CASE WHEN excluded.emoji != '' THEN excluded.emoji ELSE workspace_document_types.emoji END,
+    status = 'active',
+    updated_at = excluded.updated_at`,
+		docType, name, emoji, position, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano)); err != nil {
+		return WorkspaceDocumentType{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return WorkspaceDocumentType{}, err
+	}
+	docTypeRow, ok, err := s.WorkspaceDocumentTypeByName(ctx, docType, name)
+	if err != nil {
+		return WorkspaceDocumentType{}, err
+	}
+	if !ok {
+		return WorkspaceDocumentType{}, fmt.Errorf("workspace document type %q was not stored", name)
+	}
+	return docTypeRow, nil
+}
+
+func (s *Store) WorkspaceDocumentTypes(ctx context.Context, docType string, includeArchived bool) ([]WorkspaceDocumentType, error) {
+	docType = normalizeWorkspaceDocumentType(docType)
+	if docType == "" {
+		return nil, fmt.Errorf("workspace document type is required")
+	}
+	clauses := []string{"doc_type = ?"}
+	args := []any{docType}
+	if !includeArchived {
+		clauses = append(clauses, "status = 'active'")
+	}
+	rows, err := s.db.QueryContext(ctx, workspaceDocumentTypeSelect()+`
+WHERE `+strings.Join(clauses, " AND ")+`
+ORDER BY position, name`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var types []WorkspaceDocumentType
+	for rows.Next() {
+		docTypeRow, err := scanWorkspaceDocumentType(rows)
+		if err != nil {
+			return nil, err
+		}
+		types = append(types, docTypeRow)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return types, nil
+}
+
+func (s *Store) WorkspaceDocumentTypeByName(ctx context.Context, docType string, name string) (WorkspaceDocumentType, bool, error) {
+	docType = normalizeWorkspaceDocumentType(docType)
+	name = strings.TrimSpace(name)
+	if docType == "" || name == "" {
+		return WorkspaceDocumentType{}, false, fmt.Errorf("workspace document type name is required")
+	}
+	row := s.db.QueryRowContext(ctx, workspaceDocumentTypeSelect()+`
+WHERE doc_type = ? AND name = ?`, docType, name)
+	docTypeRow, err := scanWorkspaceDocumentType(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkspaceDocumentType{}, false, nil
+	}
+	if err != nil {
+		return WorkspaceDocumentType{}, false, err
+	}
+	return docTypeRow, true, nil
+}
+
+func (s *Store) RenameWorkspaceDocumentType(ctx context.Context, docType string, oldName string, newName string, now time.Time) error {
+	docType = normalizeWorkspaceDocumentType(docType)
+	oldName = strings.TrimSpace(oldName)
+	newName = strings.TrimSpace(newName)
+	if docType == "" || oldName == "" || newName == "" {
+		return fmt.Errorf("workspace document type rename requires names")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var existing int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM workspace_document_types
+WHERE doc_type = ? AND name = ? AND name != ?`, docType, newName, oldName).Scan(&existing); err != nil {
+		return err
+	}
+	if existing > 0 {
+		return fmt.Errorf("type %q already exists", newName)
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE workspace_document_types
+SET name = ?, updated_at = ?
+WHERE doc_type = ? AND name = ?`,
+		newName, now.UTC().Format(time.RFC3339Nano), docType, oldName)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(result, "workspace document type %q not found", oldName); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_documents
+SET category = ?, updated_at = ?
+WHERE doc_type = ? AND category = ?`,
+		newName, now.UTC().Format(time.RFC3339Nano), docType, oldName); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ArchiveWorkspaceDocumentType(ctx context.Context, docType string, name string, fallbackCategory string, now time.Time) error {
+	docType = normalizeWorkspaceDocumentType(docType)
+	name = strings.TrimSpace(name)
+	fallbackCategory = strings.TrimSpace(fallbackCategory)
+	if docType == "" || name == "" {
+		return fmt.Errorf("workspace document type archive requires name")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+UPDATE workspace_document_types
+SET status = 'archived', updated_at = ?
+WHERE doc_type = ? AND name = ?`,
+		now.UTC().Format(time.RFC3339Nano), docType, name)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(result, "workspace document type %q not found", name); err != nil {
+		return err
+	}
+	if fallbackCategory != "" {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_documents
+SET category = ?, updated_at = ?
+WHERE doc_type = ? AND category = ?`,
+			fallbackCategory, now.UTC().Format(time.RFC3339Nano), docType, name); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) WorkspaceDocumentPartsBySource(ctx context.Context, chatID int64, messageID int) ([]WorkspaceDocumentPart, error) {
 	rows, err := s.db.QueryContext(ctx, workspaceDocumentPartSelect()+`
 WHERE source_chat_id = ? AND source_message_id = ?
@@ -423,6 +806,11 @@ ORDER BY document_id, part_no`, chatID, messageID)
 
 type workspaceDocumentPartInserter interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+type workspaceDocumentPartTx interface {
+	workspaceDocumentPartInserter
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func insertWorkspaceDocumentPart(ctx context.Context, tx workspaceDocumentPartInserter, part WorkspaceDocumentPart, now time.Time) (WorkspaceDocumentPart, error) {
@@ -496,6 +884,11 @@ func workspaceDocumentPartSelect() string {
 FROM workspace_document_parts`
 }
 
+func workspaceDocumentTypeSelect() string {
+	return `SELECT id, doc_type, name, emoji, position, status, created_at, updated_at
+FROM workspace_document_types`
+}
+
 func scanWorkspaceDocument(scanner interface{ Scan(dest ...any) error }) (WorkspaceDocument, error) {
 	var doc WorkspaceDocument
 	var createdRaw, updatedRaw string
@@ -546,4 +939,25 @@ func scanWorkspaceDocumentPart(scanner interface{ Scan(dest ...any) error }) (Wo
 		return WorkspaceDocumentPart{}, fmt.Errorf("parse workspace document part created_at: %w", err)
 	}
 	return part, nil
+}
+
+func scanWorkspaceDocumentType(scanner interface{ Scan(dest ...any) error }) (WorkspaceDocumentType, error) {
+	var docType WorkspaceDocumentType
+	var createdRaw, updatedRaw string
+	if err := scanner.Scan(
+		&docType.ID, &docType.DocType, &docType.Name, &docType.Emoji,
+		&docType.Position, &docType.Status, &createdRaw, &updatedRaw,
+	); err != nil {
+		return WorkspaceDocumentType{}, err
+	}
+	var err error
+	docType.CreatedAt, err = time.Parse(time.RFC3339Nano, createdRaw)
+	if err != nil {
+		return WorkspaceDocumentType{}, fmt.Errorf("parse workspace document type created_at: %w", err)
+	}
+	docType.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedRaw)
+	if err != nil {
+		return WorkspaceDocumentType{}, fmt.Errorf("parse workspace document type updated_at: %w", err)
+	}
+	return docType, nil
 }

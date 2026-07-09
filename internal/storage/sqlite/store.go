@@ -476,6 +476,19 @@ CREATE TABLE IF NOT EXISTS workspace_documents (
 );
 CREATE INDEX IF NOT EXISTS idx_workspace_documents_type
     ON workspace_documents(doc_type, status, category, updated_at DESC);
+CREATE TABLE IF NOT EXISTS workspace_document_types (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_type TEXT NOT NULL CHECK (doc_type IN ('note', 'template', 'collection')),
+    name TEXT NOT NULL,
+    emoji TEXT NOT NULL DEFAULT '',
+    position INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL CHECK (status IN ('active', 'archived')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(doc_type, name)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_document_types_doc
+    ON workspace_document_types(doc_type, status, position, name);
 CREATE TABLE IF NOT EXISTS workspace_document_parts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     document_id INTEGER NOT NULL REFERENCES workspace_documents(id) ON DELETE CASCADE,

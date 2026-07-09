@@ -195,3 +195,22 @@
 - Workspace derived message mappings exist in SQLite so source edits can update
   active task cards and mark already published derived messages as
   `needs_review` instead of silently rewriting final material.
+- Stage 6 template types are now first-class rows in
+  `workspace_document_types`. `/template type <name>` creates an empty active
+  type, `/template new <title>` asks for the type, `/template move` changes the
+  type by buttons/text, and the `Заготовки` index renders type headings plus
+  bold prompt links. `Остальные` is normalized to `Остальное`.
+- Stage 6 document commands have reverse `/new` aliases for notes, templates,
+  and collections (`/new doc`, `/new template`, `/new collection`) while the
+  direct forms still work. `workspace seed-command-help` sends current command
+  reference messages into each Workspace topic.
+- Stage 6 collection indexes now render as one flat list of collection-card
+  links. Each collection remains its own bot message with description, ordered
+  item links, and edit/delete/reorder/move commands for items.
+- Published notes leave the active Notes index after approve. Later edits to a
+  published note source mark the Workspace document and derived published rows
+  `needs_review`; the Useful index shows that review marker.
+- On 2026-07-09, `workspace seed-command-help` sent current command reference
+  messages into real `InSync v1.0` topics. Message IDs: Inbox `356`,
+  `Задачи` `357`, `Заметки` `358`, `Опыт` `359`, `Полезное` `360`,
+  `Заготовки` `361`, `Коллекции` `362`.

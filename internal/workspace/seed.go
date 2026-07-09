@@ -125,6 +125,50 @@ func SeedControlTopicPins(ctx context.Context, cfg config.Config, opts SeedTopic
 	return result, nil
 }
 
+func SeedWorkspaceCommandHelp(ctx context.Context, cfg config.Config, opts SeedTopicPinsOptions) (SeedTopicPinsResult, error) {
+	if !cfg.WorkspaceConfigured() {
+		return SeedTopicPinsResult{}, fmt.Errorf("workspace group is not fully configured")
+	}
+	result := SeedTopicPinsResult{DryRun: opts.DryRun}
+	client := nest.New(cfg.Workspace.BotToken)
+	for _, draft := range WorkspaceCommandHelpDrafts(cfg) {
+		item := SeedTopicPinItem{
+			Group:   "workspace_help",
+			Topic:   draft.Topic,
+			TopicID: draft.TopicID,
+			Text:    draft.Text,
+			Status:  "dry_run",
+		}
+		if !opts.DryRun {
+			message, err := client.SendMessageResult(ctx, nest.SendMessageRequest{
+				ChatID:          cfg.Workspace.ChatID,
+				MessageThreadID: draft.TopicID,
+				Text:            draft.Text,
+				ParseMode:       "HTML",
+			})
+			if err != nil {
+				return SeedTopicPinsResult{}, fmt.Errorf("send command help to %s: %w", draft.Topic, err)
+			}
+			item.MessageID = message.MessageID
+			item.Status = "sent"
+		}
+		result.Items = append(result.Items, item)
+	}
+	return result, nil
+}
+
+func WorkspaceCommandHelpDrafts(cfg config.Config) []SeedTopicPinItem {
+	return []SeedTopicPinItem{
+		{Topic: "Inbox", TopicID: cfg.Workspace.Topics.Inbox, Text: InboxHelpMessageText() + "\n\n" + ClusterHelpMessageText()},
+		{Topic: "Задачи", TopicID: cfg.Workspace.Topics.Tasks, Text: TaskHelpMessageText()},
+		{Topic: "Заметки", TopicID: cfg.Workspace.Topics.Notes, Text: WorkspaceDocumentHelpText("doc")},
+		{Topic: "Опыт", TopicID: cfg.Workspace.Topics.Experience, Text: ExperienceHelpMessageText()},
+		{Topic: "Полезное", TopicID: cfg.Workspace.Topics.Useful, Text: UsefulHelpMessageText()},
+		{Topic: "Заготовки", TopicID: cfg.Workspace.Topics.Templates, Text: WorkspaceDocumentHelpText("template")},
+		{Topic: "Коллекции", TopicID: cfg.Workspace.Topics.Collections, Text: WorkspaceDocumentHelpText("collection")},
+	}
+}
+
 func TopicPinMessageText(draft TopicPinDraft) string {
 	topic := strings.TrimSpace(draft.Topic)
 	text := strings.TrimSpace(draft.Text)

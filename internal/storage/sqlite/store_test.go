@@ -847,3 +847,115 @@ func TestWorkspaceDocumentsLifecycle(t *testing.T) {
 		t.Fatalf("parts after delete = %+v", parts)
 	}
 }
+
+func TestWorkspaceDocumentTypesAndPartReordering(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+	if _, err := store.UpsertWorkspaceDocumentType(ctx, "template", "Codex", "🧩", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertWorkspaceDocumentType(ctx, "template", "Остальное", "✨", now); err != nil {
+		t.Fatal(err)
+	}
+	types, err := store.WorkspaceDocumentTypes(ctx, "template", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 2 || types[0].Name != "Codex" || types[1].Name != "Остальное" {
+		t.Fatalf("types = %+v", types)
+	}
+	if err := store.RenameWorkspaceDocumentType(ctx, "template", "Codex", "Работа", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.WorkspaceDocumentTypeByName(ctx, "template", "Работа"); err != nil || !ok {
+		t.Fatalf("renamed type ok=%t err=%v", ok, err)
+	}
+
+	doc, err := store.CreateWorkspaceDocument(ctx, WorkspaceDocument{
+		Type:     "note",
+		Status:   "active",
+		Title:    "Заметка",
+		Category: "",
+	}, WorkspaceDocumentPart{
+		SourceChatID:    -100200,
+		SourceMessageID: 10,
+		SourceLink:      "https://t.me/c/200/12/10",
+		Text:            "первая",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.AddWorkspaceDocumentPart(ctx, WorkspaceDocumentPart{
+		DocumentID:      doc.ID,
+		SourceChatID:    -100200,
+		SourceMessageID: 11,
+		SourceLink:      "https://t.me/c/200/12/11",
+		Text:            "вторая",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := store.AddWorkspaceDocumentPart(ctx, WorkspaceDocumentPart{
+		DocumentID:      doc.ID,
+		SourceChatID:    -100200,
+		SourceMessageID: 12,
+		SourceLink:      "https://t.me/c/200/12/12",
+		Text:            "третья",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.WorkspaceDocumentPartByNo(ctx, doc.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteWorkspaceDocumentPart(ctx, first.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.WorkspaceDocumentByID(ctx, doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.SourceMessageID != second.SourceMessageID || updated.SourceLink != second.SourceLink {
+		t.Fatalf("primary source after delete = %+v", updated)
+	}
+	if err := store.ReorderWorkspaceDocumentPart(ctx, doc.ID, 2, 1, now); err != nil {
+		t.Fatal(err)
+	}
+	parts, err := store.WorkspaceDocumentParts(ctx, doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 2 || parts[0].SourceMessageID != third.SourceMessageID || parts[1].SourceMessageID != second.SourceMessageID {
+		t.Fatalf("reordered parts = %+v", parts)
+	}
+
+	target, err := store.CreateWorkspaceDocument(ctx, WorkspaceDocument{
+		Type:   "collection",
+		Status: "active",
+		Title:  "Цели",
+	}, WorkspaceDocumentPart{}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MoveWorkspaceDocumentPart(ctx, parts[1].ID, target.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	sourceParts, err := store.WorkspaceDocumentParts(ctx, doc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetParts, err := store.WorkspaceDocumentParts(ctx, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sourceParts) != 1 || len(targetParts) != 1 || targetParts[0].PartNo != 1 {
+		t.Fatalf("move source=%+v target=%+v", sourceParts, targetParts)
+	}
+}

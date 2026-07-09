@@ -20,6 +20,7 @@ const (
 	taskCardSendDelay           = 250 * time.Millisecond
 	taskCallbackPrefix          = "ws:task:"
 	publishCallbackPrefix       = "ws:publish:"
+	documentInputCallbackPrefix = "ws:input:"
 	taskBacklogIndexKey         = "tasks_backlog"
 	noteIndexKey                = "notes_active"
 	templateIndexKey            = "templates_index"
@@ -34,10 +35,14 @@ type pendingTaskDateKey struct {
 }
 
 type pendingWorkspaceInput struct {
-	Kind       string
-	DocumentID int64
-	PartID     int64
-	Title      string
+	Kind        string
+	DocumentID  int64
+	PartID      int64
+	Title       string
+	PartTitle   string
+	Part        sqlitestore.WorkspaceDocumentPart
+	TypeOptions []string
+	Target      string
 }
 
 type publishPreviewDraft struct {
@@ -319,6 +324,10 @@ func sendAndStoreWorkspaceTaskCard(ctx context.Context, cfg config.Config, store
 }
 
 func handleWorkspaceCallback(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingTaskDates map[pendingTaskDateKey]int64, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, publishDrafts map[int64]publishPreviewDraft, callback nest.CallbackQuery) {
+	if action, index, ok := ParseDocumentInputCallback(callback.Data); ok {
+		handleDocumentInputCallback(ctx, cfg, store, client, pendingInputs, callback, action, index)
+		return
+	}
 	if action, docID, ok := ParsePublishCallback(callback.Data); ok {
 		handlePublishCallback(ctx, cfg, store, client, pendingInputs, publishDrafts, callback, action, docID)
 		return
@@ -677,14 +686,20 @@ func handleNoteCommand(ctx context.Context, cfg config.Config, store *sqlitestor
 		if err != nil {
 			return err
 		}
+		if err := requireWorkspaceDocumentActive(doc); err != nil {
+			return err
+		}
 		title := strings.TrimSpace(body)
 		if title == "" {
 			return setPendingWorkspaceInput(ctx, client, pendingInputs, message, threadID, pendingWorkspaceInput{Kind: "note_rename", DocumentID: doc.ID}, "Напиши новый заголовок заметки или <code>Отмена</code>.")
 		}
 		return renameWorkspaceDocument(ctx, cfg, store, client, threadID, doc.ID, title, now)
 	case "rename-part":
-		_, part, err := workspaceDocumentFromReply(ctx, store, message, "note")
+		doc, part, err := workspaceDocumentFromReply(ctx, store, message, "note")
 		if err != nil {
+			return err
+		}
+		if err := requireWorkspaceDocumentActive(doc); err != nil {
 			return err
 		}
 		title := strings.TrimSpace(body)
@@ -695,6 +710,9 @@ func handleNoteCommand(ctx context.Context, cfg config.Config, store *sqlitestor
 	case "delete-part":
 		doc, part, err := workspaceDocumentFromReply(ctx, store, message, "note")
 		if err != nil {
+			return err
+		}
+		if err := requireWorkspaceDocumentActive(doc); err != nil {
 			return err
 		}
 		parts, err := store.WorkspaceDocumentParts(ctx, doc.ID)
@@ -719,6 +737,9 @@ func handleNoteCommand(ctx context.Context, cfg config.Config, store *sqlitestor
 		if err != nil {
 			return err
 		}
+		if err := requireWorkspaceDocumentActive(doc); err != nil {
+			return err
+		}
 		return setPendingWorkspaceInput(ctx, client, pendingInputs, message, threadID, pendingWorkspaceInput{Kind: "note_delete", DocumentID: doc.ID, Title: doc.Title}, "Убрать заметку <b>"+html.EscapeString(doc.Title)+"</b> из индекса? Напиши <code>Удалить</code> или <code>Отмена</code>.")
 	case "publish":
 		return handleNotePublishCommand(ctx, cfg, store, client, publishDrafts, message, threadID, body, now)
@@ -737,10 +758,18 @@ func handleTemplateCommand(ctx context.Context, cfg config.Config, store *sqlite
 	case "new":
 		category, title, partTitle := parseTemplateNewBody(body)
 		if title == "" {
-			return fmt.Errorf("format: reply + /template new <категория> | <название> [| название части]")
+			return fmt.Errorf("format: reply + /template new <название>")
 		}
 		part, err := workspaceDocumentPartFromCommandSource(ctx, cfg, store, message, "template", partTitle, now)
 		if err != nil {
+			return err
+		}
+		if !templateNewBodyHasExplicitType(body) {
+			part.Title = partTitle
+			return askTemplateTypeForNewDocument(ctx, cfg, store, client, pendingInputs, message, threadID, title, part, now)
+		}
+		category = normalizeTemplateTypeName(category)
+		if _, err := ensureWorkspaceDocumentType(ctx, store, "template", category, now); err != nil {
 			return err
 		}
 		doc, err := store.CreateWorkspaceDocument(ctx, sqlitestore.WorkspaceDocument{
@@ -789,21 +818,60 @@ func handleTemplateCommand(ctx context.Context, cfg config.Config, store *sqlite
 		if err != nil {
 			return err
 		}
+		if err := requireWorkspaceDocumentActive(doc); err != nil {
+			return err
+		}
 		title := strings.TrimSpace(body)
 		if title == "" {
 			return setPendingWorkspaceInput(ctx, client, pendingInputs, message, threadID, pendingWorkspaceInput{Kind: "template_rename", DocumentID: doc.ID}, "Напиши новое название заготовки или <code>Отмена</code>.")
 		}
 		return renameWorkspaceDocument(ctx, cfg, store, client, threadID, doc.ID, title, now)
 	case "type":
+		return createTemplateTypeCommand(ctx, cfg, store, client, threadID, body, now)
+	case "move":
 		doc, _, err := workspaceDocumentFromReply(ctx, store, message, "template")
 		if err != nil {
 			return err
 		}
-		category := strings.TrimSpace(body)
-		if category == "" {
-			return setPendingWorkspaceInput(ctx, client, pendingInputs, message, threadID, pendingWorkspaceInput{Kind: "template_type", DocumentID: doc.ID}, "Напиши тип заготовки или <code>Отмена</code>. Для общего слоя подойдёт <code>Остальные</code>.")
+		if err := requireWorkspaceDocumentActive(doc); err != nil {
+			return err
 		}
-		return updateWorkspaceDocumentCategory(ctx, cfg, store, client, threadID, doc.ID, category, now)
+		category := strings.TrimSpace(body)
+		if category != "" {
+			return moveWorkspaceDocumentToCategory(ctx, cfg, store, client, threadID, doc.ID, "template", category, now)
+		}
+		return askTemplateTypeForMove(ctx, cfg, store, client, pendingInputs, message, threadID, doc.ID, now)
+	case "rename-type":
+		oldName, newName := parseTwoPartCommand(body)
+		if oldName == "" || newName == "" {
+			return fmt.Errorf("format: /template rename-type <старое> | <новое>")
+		}
+		if err := store.RenameWorkspaceDocumentType(ctx, "template", normalizeTemplateTypeName(oldName), normalizeTemplateTypeName(newName), now); err != nil {
+			return err
+		}
+		if err := updateWorkspaceDocumentIndex(ctx, cfg, store, client, "template", now); err != nil {
+			return err
+		}
+		return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Переименовала тип <b>"+html.EscapeString(normalizeTemplateTypeName(newName))+"</b>.")
+	case "delete-type":
+		name := normalizeTemplateTypeName(body)
+		if name == "" {
+			return fmt.Errorf("format: /template delete-type <название типа>")
+		}
+		docs, err := store.WorkspaceDocumentsByTypeAndCategory(ctx, "template", "active", name, 1)
+		if err != nil {
+			return err
+		}
+		if len(docs) > 0 {
+			return setPendingWorkspaceInput(ctx, client, pendingInputs, message, threadID, pendingWorkspaceInput{Kind: "template_delete_type", Target: name}, "В типе <b>"+html.EscapeString(name)+"</b> есть заготовки. Напиши <code>Удалить</code>, и я перенесу их в <b>Остальное</b>, а тип уберу. Или <code>Отмена</code>.")
+		}
+		if err := store.ArchiveWorkspaceDocumentType(ctx, "template", name, "", now); err != nil {
+			return err
+		}
+		if err := updateWorkspaceDocumentIndex(ctx, cfg, store, client, "template", now); err != nil {
+			return err
+		}
+		return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Убрала пустой тип <b>"+html.EscapeString(name)+"</b>.")
 	case "show":
 		return sendWorkspaceDocumentShow(ctx, cfg, store, client, threadID, "template", strings.TrimSpace(body), now)
 	default:
@@ -867,6 +935,9 @@ func handleCollectionCommand(ctx context.Context, cfg config.Config, store *sqli
 		if err != nil {
 			return err
 		}
+		if err := requireWorkspaceDocumentActive(doc); err != nil {
+			return err
+		}
 		title := strings.TrimSpace(body)
 		if title == "" {
 			return setPendingWorkspaceInput(ctx, client, pendingInputs, message, threadID, pendingWorkspaceInput{Kind: "collection_rename", DocumentID: doc.ID}, "Напиши новое название коллекции или <code>Отмена</code>.")
@@ -875,6 +946,36 @@ func handleCollectionCommand(ctx context.Context, cfg config.Config, store *sqli
 			return err
 		}
 		return syncCollectionMessage(ctx, cfg, store, client, doc.ID, now)
+	case "description", "desc":
+		doc, _, err := workspaceDocumentFromReply(ctx, store, message, "collection")
+		if err != nil {
+			return err
+		}
+		if err := requireWorkspaceDocumentActive(doc); err != nil {
+			return err
+		}
+		description := strings.TrimSpace(body)
+		if description == "" {
+			return setPendingWorkspaceInput(ctx, client, pendingInputs, message, threadID, pendingWorkspaceInput{Kind: "collection_description_update", DocumentID: doc.ID}, "Напиши новое описание коллекции или <code>Без описания</code>. Отменить можно словом <code>Отмена</code>.")
+		}
+		return updateCollectionDescription(ctx, cfg, store, client, threadID, doc.ID, description, now)
+	case "delete":
+		doc, _, err := workspaceDocumentFromReply(ctx, store, message, "collection")
+		if err != nil {
+			return err
+		}
+		if err := requireWorkspaceDocumentActive(doc); err != nil {
+			return err
+		}
+		return setPendingWorkspaceInput(ctx, client, pendingInputs, message, threadID, pendingWorkspaceInput{Kind: "collection_delete", DocumentID: doc.ID, Title: doc.Title}, "Удалить коллекцию <b>"+html.EscapeString(doc.Title)+"</b> из индекса и убрать её bot-сообщение? Исходные пользовательские сообщения не трогаю. Напиши <code>Удалить</code> или <code>Отмена</code>.")
+	case "rename-item":
+		return handleCollectionRenameItem(ctx, cfg, store, client, message, threadID, body, now)
+	case "delete-item":
+		return handleCollectionDeleteItem(ctx, cfg, store, client, message, threadID, body, now)
+	case "move-item":
+		return handleCollectionMoveItem(ctx, cfg, store, client, message, threadID, body, now)
+	case "order-item", "reorder-item":
+		return handleCollectionOrderItem(ctx, cfg, store, client, message, threadID, body, now)
 	case "show":
 		return sendWorkspaceDocumentShow(ctx, cfg, store, client, threadID, "collection", strings.TrimSpace(body), now)
 	default:
@@ -885,18 +986,31 @@ func handleCollectionCommand(ctx context.Context, cfg config.Config, store *sqli
 
 func handleWorkspaceNewCommand(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, message nest.Message, threadID int, rest string) {
 	fields := strings.Fields(rest)
-	if len(fields) == 0 || !strings.EqualFold(fields[0], "collection") {
+	if len(fields) == 0 {
 		_ = client.SendMessage(ctx, nest.SendMessageRequest{
 			ChatID:          cfg.Workspace.ChatID,
 			MessageThreadID: threadID,
-			Text:            "Пока здесь живёт <code>/new collection Название</code>.",
+			Text:            "Форматы: <code>/new doc Название</code>, <code>/new template Название</code>, <code>/new collection Название</code>.",
 			ParseMode:       "HTML",
 		})
 		return
 	}
+	target := strings.ToLower(fields[0])
 	body := strings.TrimSpace(strings.TrimPrefix(rest, fields[0]))
-	if err := startCollectionCreate(ctx, cfg, store, client, pendingInputs, message, threadID, body, time.Now().UTC()); err != nil {
-		sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось создать коллекцию", err)
+	now := time.Now().UTC()
+	var err error
+	switch target {
+	case "doc", "note":
+		err = handleNoteCommand(ctx, cfg, store, client, pendingInputs, nil, message, threadID, "new", body, now)
+	case "template":
+		err = handleTemplateCommand(ctx, cfg, store, client, pendingInputs, message, threadID, "new", body, now)
+	case "collection":
+		err = startCollectionCreate(ctx, cfg, store, client, pendingInputs, message, threadID, body, now)
+	default:
+		err = fmt.Errorf("unknown /new target %q", fields[0])
+	}
+	if err != nil {
+		sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось выполнить /new", err)
 	}
 }
 
@@ -981,8 +1095,32 @@ func handlePendingWorkspaceInputMessage(ctx context.Context, cfg config.Config, 
 		if err == nil {
 			err = sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Убрала заметку из индекса. Исходные сообщения не трогала.")
 		}
-	case "template_type":
-		err = updateWorkspaceDocumentCategory(ctx, cfg, store, client, threadID, pending.DocumentID, value, now)
+	case "template_new_type":
+		err = createTemplateFromPendingType(ctx, cfg, store, client, threadID, pending, value, now)
+	case "template_move":
+		err = moveWorkspaceDocumentToCategory(ctx, cfg, store, client, threadID, pending.DocumentID, "template", value, now)
+	case "template_delete_type":
+		if !isDeleteConfirmText(value) {
+			_ = client.SendMessage(ctx, nest.SendMessageRequest{
+				ChatID:          message.Chat.ID,
+				MessageThreadID: threadID,
+				Text:            "Не удаляю. Напиши <code>Удалить</code> или <code>Отмена</code>.",
+				ParseMode:       "HTML",
+			})
+			return true
+		}
+		_, ensureErr := ensureWorkspaceDocumentType(ctx, store, "template", "Остальное", now)
+		if ensureErr != nil {
+			err = ensureErr
+			break
+		}
+		err = store.ArchiveWorkspaceDocumentType(ctx, "template", normalizeTemplateTypeName(pending.Target), "Остальное", now)
+		if err == nil {
+			err = updateWorkspaceDocumentIndex(ctx, cfg, store, client, "template", now)
+		}
+		if err == nil {
+			err = sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Убрала тип и перенесла заготовки в <b>Остальное</b>.")
+		}
 	case "collection_description":
 		description := value
 		if strings.EqualFold(description, "без описания") {
@@ -992,6 +1130,19 @@ func handlePendingWorkspaceInputMessage(ctx context.Context, cfg config.Config, 
 		if err == nil {
 			err = sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Создала коллекцию <b>"+html.EscapeString(pending.Title)+"</b>.")
 		}
+	case "collection_description_update":
+		err = updateCollectionDescription(ctx, cfg, store, client, threadID, pending.DocumentID, value, now)
+	case "collection_delete":
+		if !isDeleteConfirmText(value) {
+			_ = client.SendMessage(ctx, nest.SendMessageRequest{
+				ChatID:          message.Chat.ID,
+				MessageThreadID: threadID,
+				Text:            "Не удаляю. Напиши <code>Удалить</code> или <code>Отмена</code>.",
+				ParseMode:       "HTML",
+			})
+			return true
+		}
+		err = deleteCollectionDocument(ctx, cfg, store, client, threadID, pending.DocumentID, now)
 	case "publish_revision":
 		err = rerunPublishPreview(ctx, cfg, store, client, publishDrafts, pending.DocumentID, value, now)
 	default:
@@ -1017,6 +1168,225 @@ func setPendingWorkspaceInput(ctx context.Context, client *nest.Client, pendingI
 		Text:            prompt,
 		ParseMode:       "HTML",
 	})
+}
+
+func askTemplateTypeForNewDocument(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, message nest.Message, threadID int, title string, part sqlitestore.WorkspaceDocumentPart, now time.Time) error {
+	if _, err := ensureWorkspaceDocumentType(ctx, store, "template", "Остальное", now); err != nil {
+		return err
+	}
+	options, err := workspaceDocumentTypeNames(ctx, store, "template")
+	if err != nil {
+		return err
+	}
+	pending := pendingWorkspaceInput{
+		Kind:        "template_new_type",
+		Title:       strings.TrimSpace(title),
+		PartTitle:   strings.TrimSpace(part.Title),
+		Part:        part,
+		TypeOptions: options,
+	}
+	if message.From == nil {
+		return fmt.Errorf("user identity is required")
+	}
+	key := pendingTaskDateKey{chatID: message.Chat.ID, threadID: threadID, userID: message.From.ID}
+	pendingInputs[key] = pending
+	return sendTypeSelectionPrompt(ctx, client, message.Chat.ID, threadID, "К какому типу отнести заготовку <b>"+html.EscapeString(title)+"</b>?", "template_new_type", options)
+}
+
+func askTemplateTypeForMove(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, message nest.Message, threadID int, documentID int64, now time.Time) error {
+	if _, err := ensureWorkspaceDocumentType(ctx, store, "template", "Остальное", now); err != nil {
+		return err
+	}
+	options, err := workspaceDocumentTypeNames(ctx, store, "template")
+	if err != nil {
+		return err
+	}
+	if message.From == nil {
+		return fmt.Errorf("user identity is required")
+	}
+	key := pendingTaskDateKey{chatID: message.Chat.ID, threadID: threadID, userID: message.From.ID}
+	pendingInputs[key] = pendingWorkspaceInput{Kind: "template_move", DocumentID: documentID, TypeOptions: options}
+	return sendTypeSelectionPrompt(ctx, client, message.Chat.ID, threadID, "Куда перенести заготовку?", "template_move", options)
+}
+
+func sendTypeSelectionPrompt(ctx context.Context, client *nest.Client, chatID int64, threadID int, prompt string, action string, options []string) error {
+	request := nest.SendMessageRequest{
+		ChatID:          chatID,
+		MessageThreadID: threadID,
+		Text:            prompt + "\n\n" + formatTypeOptions(options),
+		ParseMode:       "HTML",
+	}
+	if len(options) > 0 && len(options) <= 10 {
+		request.ReplyMarkup = typeSelectionMarkup(action, options)
+	}
+	return client.SendMessage(ctx, request)
+}
+
+func typeSelectionMarkup(action string, options []string) *nest.InlineKeyboardMarkup {
+	var rows [][]nest.InlineKeyboardButton
+	for i, option := range options {
+		rows = append(rows, []nest.InlineKeyboardButton{{
+			Text:         option,
+			CallbackData: DocumentInputCallbackData(action, i),
+		}})
+	}
+	return &nest.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+func formatTypeOptions(options []string) string {
+	if len(options) == 0 {
+		return "<i>Типов пока нет.</i>"
+	}
+	var b strings.Builder
+	b.WriteString("<i>Можно нажать кнопку или отправить название текстом:</i>\n")
+	for _, option := range options {
+		b.WriteString("• ")
+		b.WriteString(html.EscapeString(option))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func handleDocumentInputCallback(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, callback nest.CallbackQuery, action string, index int) {
+	if callback.Message == nil || callback.Message.Chat.ID != cfg.Workspace.ChatID {
+		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Эта кнопка не из Workspace.")
+		return
+	}
+	key := pendingTaskDateKey{chatID: callback.Message.Chat.ID, threadID: callback.Message.MessageThreadID, userID: callback.From.ID}
+	pending, ok := pendingInputs[key]
+	if !ok || pending.Kind != action {
+		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Этот выбор уже не ожидается.")
+		return
+	}
+	if index < 0 || index >= len(pending.TypeOptions) {
+		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Не нашла такой тип.")
+		return
+	}
+	now := time.Now().UTC()
+	selected := pending.TypeOptions[index]
+	var err error
+	switch action {
+	case "template_new_type":
+		err = createTemplateFromPendingType(ctx, cfg, store, client, callback.Message.MessageThreadID, pending, selected, now)
+	case "template_move":
+		err = moveWorkspaceDocumentToCategory(ctx, cfg, store, client, callback.Message.MessageThreadID, pending.DocumentID, "template", selected, now)
+	default:
+		err = fmt.Errorf("unknown input callback action %q", action)
+	}
+	if err != nil {
+		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Не получилось применить выбор.")
+		sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, callback.Message.MessageThreadID, "Не удалось применить выбор", err)
+		return
+	}
+	delete(pendingInputs, key)
+	_ = client.EditMessageText(ctx, nest.EditMessageTextRequest{
+		ChatID:      callback.Message.Chat.ID,
+		MessageID:   callback.Message.MessageID,
+		Text:        "Выбрала тип: <b>" + html.EscapeString(selected) + "</b>.",
+		ParseMode:   "HTML",
+		ReplyMarkup: emptyMarkup(),
+	})
+	_ = client.AnswerCallbackQuery(ctx, callback.ID, "Готово.")
+}
+
+func createTemplateFromPendingType(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, threadID int, pending pendingWorkspaceInput, category string, now time.Time) error {
+	category = normalizeTemplateTypeName(category)
+	if category == "" {
+		return fmt.Errorf("template type is required")
+	}
+	if docTypeRow, ok, err := store.WorkspaceDocumentTypeByName(ctx, "template", category); err != nil {
+		return err
+	} else if !ok {
+		return fmt.Errorf("тип %q не найден. Создай его через /template type %s", category, category)
+	} else if docTypeRow.Status != "active" {
+		return fmt.Errorf("тип %q архивирован. Создай его заново через /template type %s", category, category)
+	}
+	part := pending.Part
+	part.Title = pending.PartTitle
+	doc, err := store.CreateWorkspaceDocument(ctx, sqlitestore.WorkspaceDocument{
+		Type:            "template",
+		Status:          "active",
+		Title:           pending.Title,
+		Category:        category,
+		SourceChatID:    part.SourceChatID,
+		SourceMessageID: part.SourceMessageID,
+		SourceClusterID: part.SourceClusterID,
+		SourceLink:      part.SourceLink,
+	}, part, now)
+	if err != nil {
+		return err
+	}
+	if err := updateWorkspaceDocumentIndex(ctx, cfg, store, client, "template", now); err != nil {
+		return err
+	}
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, fmt.Sprintf("Создала заготовку <b>#%d</b> в типе <b>%s</b>.", doc.ID, html.EscapeString(category)))
+}
+
+func createTemplateTypeCommand(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, threadID int, body string, now time.Time) error {
+	name := normalizeTemplateTypeName(body)
+	if name == "" {
+		return fmt.Errorf("format: /template type <название типа>")
+	}
+	docType, err := ensureWorkspaceDocumentType(ctx, store, "template", name, now)
+	if err != nil {
+		return err
+	}
+	if err := updateWorkspaceDocumentIndex(ctx, cfg, store, client, "template", now); err != nil {
+		return err
+	}
+	text := "Добавила тип <b>" + html.EscapeString(docType.Name) + "</b> " + html.EscapeString(documentTypeEmoji(docType)) + ".\n\nЧтобы сразу положить туда заготовку, ответь на текст промпта командой:\n<code>/template new " + html.EscapeString(docType.Name) + " | Название промпта</code>"
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, text)
+}
+
+func moveWorkspaceDocumentToCategory(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, threadID int, documentID int64, docType string, category string, now time.Time) error {
+	category = normalizeWorkspaceDocumentCategory(docType, category)
+	if _, err := ensureWorkspaceDocumentType(ctx, store, docType, category, now); err != nil {
+		return err
+	}
+	if err := store.UpdateWorkspaceDocumentCategory(ctx, documentID, category, now); err != nil {
+		return err
+	}
+	if err := updateWorkspaceDocumentIndex(ctx, cfg, store, client, docType, now); err != nil {
+		return err
+	}
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Перенесла в тип <b>"+html.EscapeString(category)+"</b>.")
+}
+
+func ensureWorkspaceDocumentType(ctx context.Context, store *sqlitestore.Store, docType, name string, now time.Time) (sqlitestore.WorkspaceDocumentType, error) {
+	name = normalizeWorkspaceDocumentCategory(docType, name)
+	return store.UpsertWorkspaceDocumentType(ctx, docType, name, pleasantDocumentTypeEmoji(name), now)
+}
+
+func workspaceDocumentTypeNames(ctx context.Context, store *sqlitestore.Store, docType string) ([]string, error) {
+	types, err := store.WorkspaceDocumentTypes(ctx, docType, false)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, docTypeRow := range types {
+		names = append(names, docTypeRow.Name)
+	}
+	return names, nil
+}
+
+func DocumentInputCallbackData(action string, index int) string {
+	return documentInputCallbackPrefix + action + ":" + strconv.Itoa(index)
+}
+
+func ParseDocumentInputCallback(data string) (string, int, bool) {
+	if !strings.HasPrefix(data, documentInputCallbackPrefix) {
+		return "", 0, false
+	}
+	rest := strings.TrimPrefix(data, documentInputCallbackPrefix)
+	action, indexRaw, ok := strings.Cut(rest, ":")
+	if !ok {
+		return "", 0, false
+	}
+	index, err := strconv.Atoi(indexRaw)
+	if err != nil || index < 0 {
+		return "", 0, false
+	}
+	return action, index, true
 }
 
 func renameWorkspaceDocument(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, threadID int, documentID int64, title string, now time.Time) error {
@@ -1083,7 +1453,7 @@ func workspaceDocumentFromReply(ctx context.Context, store *sqlitestore.Store, m
 	}
 	if doc, ok, err := store.WorkspaceDocumentByTargetMessage(ctx, message.Chat.ID, message.ReplyToMessage.MessageID); err != nil {
 		return sqlitestore.WorkspaceDocument{}, sqlitestore.WorkspaceDocumentPart{}, err
-	} else if ok && doc.Type == docType && doc.Status == "active" {
+	} else if ok && doc.Type == docType && doc.Status != "archived" {
 		parts, err := store.WorkspaceDocumentParts(ctx, doc.ID)
 		if err != nil {
 			return sqlitestore.WorkspaceDocument{}, sqlitestore.WorkspaceDocumentPart{}, err
@@ -1107,7 +1477,7 @@ func workspaceDocumentFromReply(ctx context.Context, store *sqlitestore.Store, m
 		if err != nil {
 			return sqlitestore.WorkspaceDocument{}, sqlitestore.WorkspaceDocumentPart{}, err
 		}
-		if doc.Type == docType && doc.Status == "active" {
+		if doc.Type == docType && doc.Status != "archived" {
 			matches = append(matches, struct {
 				doc  sqlitestore.WorkspaceDocument
 				part sqlitestore.WorkspaceDocumentPart
@@ -1115,7 +1485,7 @@ func workspaceDocumentFromReply(ctx context.Context, store *sqlitestore.Store, m
 		}
 	}
 	if len(matches) == 0 {
-		return sqlitestore.WorkspaceDocument{}, sqlitestore.WorkspaceDocumentPart{}, fmt.Errorf("reply message is not attached to an active %s", workspaceDocumentIndexTopicName(docType))
+		return sqlitestore.WorkspaceDocument{}, sqlitestore.WorkspaceDocumentPart{}, fmt.Errorf("reply message is not attached to a %s item", workspaceDocumentIndexTopicName(docType))
 	}
 	if len(matches) > 1 {
 		return sqlitestore.WorkspaceDocument{}, sqlitestore.WorkspaceDocumentPart{}, fmt.Errorf("reply message is attached to several %s items; use an explicit id", workspaceDocumentIndexTopicName(docType))
@@ -1143,6 +1513,10 @@ func (e documentAmbiguousError) Error() string {
 }
 
 func resolveWorkspaceDocumentRef(ctx context.Context, store *sqlitestore.Store, docType, ref string) (sqlitestore.WorkspaceDocument, error) {
+	return resolveWorkspaceDocumentRefWithStatuses(ctx, store, docType, ref, []string{"active"})
+}
+
+func resolveWorkspaceDocumentRefWithStatuses(ctx context.Context, store *sqlitestore.Store, docType, ref string, statuses []string) (sqlitestore.WorkspaceDocument, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return sqlitestore.WorkspaceDocument{}, documentNotFoundError{DocType: docType, Ref: ref}
@@ -1157,7 +1531,7 @@ func resolveWorkspaceDocumentRef(ctx context.Context, store *sqlitestore.Store, 
 		}
 		return doc, nil
 	}
-	docs, err := store.WorkspaceDocumentsByType(ctx, docType, []string{"active"}, 1000)
+	docs, err := store.WorkspaceDocumentsByType(ctx, docType, statuses, 1000)
 	if err != nil {
 		return sqlitestore.WorkspaceDocument{}, err
 	}
@@ -1263,15 +1637,182 @@ func renderCollectionDocumentMessage(doc sqlitestore.WorkspaceDocument, parts []
 		b.WriteString("<i>Пока пусто.</i>")
 	} else {
 		for _, part := range parts {
-			b.WriteString("• ")
+			b.WriteString(strconv.Itoa(part.PartNo))
+			b.WriteString(". ")
 			writeHTMLLinkOrText(&b, part.SourceLink, documentPartTitle(part, compactWorkspaceLine(part.Text, 80)))
 			b.WriteString("\n")
 		}
 	}
-	b.WriteString("\n<blockquote>Можно пополнять по reply через <code>/collection add ")
+	b.WriteString("\n<blockquote>")
+	b.WriteString(html.EscapeString(collectionQuote(doc.ID)))
+	b.WriteString("</blockquote>\n\n")
+	b.WriteString("<blockquote>Можно пополнять по reply через <code>/collection add ")
 	b.WriteString(html.EscapeString(doc.Title))
 	b.WriteString("</code>.</blockquote>")
 	return strings.TrimSpace(b.String())
+}
+
+func collectionQuote(id int64) string {
+	quotes := []string{
+		"Собранное в одном месте легче снова оживить.",
+		"Хорошая коллекция экономит будущему тебе пару лишних кругов.",
+		"Пусть нужное находится быстро, а лишнее не шумит.",
+		"Маленькие находки становятся системой, когда у них есть дом.",
+		"Здесь можно хранить то, к чему хочется вернуться.",
+	}
+	if id <= 0 {
+		return quotes[0]
+	}
+	return quotes[int(id-1)%len(quotes)]
+}
+
+func updateCollectionDescription(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, threadID int, documentID int64, description string, now time.Time) error {
+	if strings.EqualFold(strings.TrimSpace(description), "без описания") {
+		description = ""
+	}
+	if err := store.UpdateWorkspaceDocumentCategory(ctx, documentID, strings.TrimSpace(description), now); err != nil {
+		return err
+	}
+	if err := syncCollectionMessage(ctx, cfg, store, client, documentID, now); err != nil {
+		return err
+	}
+	if err := updateWorkspaceDocumentIndex(ctx, cfg, store, client, "collection", now); err != nil {
+		return err
+	}
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Обновила описание коллекции.")
+}
+
+func deleteCollectionDocument(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, threadID int, documentID int64, now time.Time) error {
+	doc, err := store.WorkspaceDocumentByID(ctx, documentID)
+	if err != nil {
+		return err
+	}
+	if err := store.UpdateWorkspaceDocumentStatus(ctx, documentID, "archived", now); err != nil {
+		return err
+	}
+	if doc.TargetChatID != 0 && doc.TargetMessageID != 0 {
+		_ = client.DeleteMessage(ctx, doc.TargetChatID, doc.TargetMessageID)
+	}
+	if err := updateWorkspaceDocumentIndex(ctx, cfg, store, client, "collection", now); err != nil {
+		return err
+	}
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Убрала коллекцию из индекса. Исходные сообщения не трогала.")
+}
+
+func handleCollectionRenameItem(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, message nest.Message, threadID int, body string, now time.Time) error {
+	doc, _, err := workspaceDocumentFromReply(ctx, store, message, "collection")
+	if err != nil {
+		return err
+	}
+	if err := requireWorkspaceDocumentActive(doc); err != nil {
+		return err
+	}
+	noRaw, title := parseTwoPartCommand(body)
+	partNo, err := strconv.Atoi(strings.TrimSpace(noRaw))
+	if err != nil || partNo <= 0 || strings.TrimSpace(title) == "" {
+		return fmt.Errorf("format: /collection rename-item <номер> | <новое название>")
+	}
+	part, err := store.WorkspaceDocumentPartByNo(ctx, doc.ID, partNo)
+	if err != nil {
+		return err
+	}
+	if err := store.UpdateWorkspaceDocumentPartTitle(ctx, part.ID, title, now); err != nil {
+		return err
+	}
+	if err := syncCollectionMessage(ctx, cfg, store, client, doc.ID, now); err != nil {
+		return err
+	}
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Переименовала элемент коллекции.")
+}
+
+func handleCollectionDeleteItem(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, message nest.Message, threadID int, body string, now time.Time) error {
+	doc, _, err := workspaceDocumentFromReply(ctx, store, message, "collection")
+	if err != nil {
+		return err
+	}
+	if err := requireWorkspaceDocumentActive(doc); err != nil {
+		return err
+	}
+	partNo, err := strconv.Atoi(strings.TrimSpace(body))
+	if err != nil || partNo <= 0 {
+		return fmt.Errorf("format: /collection delete-item <номер>")
+	}
+	part, err := store.WorkspaceDocumentPartByNo(ctx, doc.ID, partNo)
+	if err != nil {
+		return err
+	}
+	if err := store.DeleteWorkspaceDocumentPart(ctx, part.ID, now); err != nil {
+		return err
+	}
+	if err := syncCollectionMessage(ctx, cfg, store, client, doc.ID, now); err != nil {
+		return err
+	}
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Убрала элемент из коллекции.")
+}
+
+func handleCollectionMoveItem(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, message nest.Message, threadID int, body string, now time.Time) error {
+	doc, _, err := workspaceDocumentFromReply(ctx, store, message, "collection")
+	if err != nil {
+		return err
+	}
+	if err := requireWorkspaceDocumentActive(doc); err != nil {
+		return err
+	}
+	noRaw, targetRef := parseTwoPartCommand(body)
+	partNo, err := strconv.Atoi(strings.TrimSpace(noRaw))
+	if err != nil || partNo <= 0 || strings.TrimSpace(targetRef) == "" {
+		return fmt.Errorf("format: /collection move-item <номер> | <название другой коллекции>")
+	}
+	part, err := store.WorkspaceDocumentPartByNo(ctx, doc.ID, partNo)
+	if err != nil {
+		return err
+	}
+	target, err := resolveWorkspaceDocumentRef(ctx, store, "collection", targetRef)
+	if err != nil {
+		return err
+	}
+	if err := requireWorkspaceDocumentActive(target); err != nil {
+		return err
+	}
+	if err := store.MoveWorkspaceDocumentPart(ctx, part.ID, target.ID, now); err != nil {
+		return err
+	}
+	if err := syncCollectionMessage(ctx, cfg, store, client, doc.ID, now); err != nil {
+		return err
+	}
+	if err := syncCollectionMessage(ctx, cfg, store, client, target.ID, now); err != nil {
+		return err
+	}
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Перенесла элемент в другую коллекцию.")
+}
+
+func handleCollectionOrderItem(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, message nest.Message, threadID int, body string, now time.Time) error {
+	doc, _, err := workspaceDocumentFromReply(ctx, store, message, "collection")
+	if err != nil {
+		return err
+	}
+	if err := requireWorkspaceDocumentActive(doc); err != nil {
+		return err
+	}
+	fields := strings.Fields(body)
+	if len(fields) != 2 {
+		return fmt.Errorf("format: /collection order-item <откуда> <куда>")
+	}
+	fromPartNo, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return err
+	}
+	toPartNo, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return err
+	}
+	if err := store.ReorderWorkspaceDocumentPart(ctx, doc.ID, fromPartNo, toPartNo, now); err != nil {
+		return err
+	}
+	if err := syncCollectionMessage(ctx, cfg, store, client, doc.ID, now); err != nil {
+		return err
+	}
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Поменяла порядок в коллекции.")
 }
 
 func isCancelText(value string) bool {
@@ -1294,14 +1835,11 @@ func handleNotePublishCommand(ctx context.Context, cfg config.Config, store *sql
 	var doc sqlitestore.WorkspaceDocument
 	var err error
 	if body != "" {
-		doc, err = resolveWorkspaceDocumentRef(ctx, store, "note", body)
+		doc, err = resolveWorkspaceDocumentRefWithStatuses(ctx, store, "note", body, []string{"active", "published", "needs_review"})
 	} else {
 		doc, _, err = workspaceDocumentFromReply(ctx, store, message, "note")
 	}
 	if err != nil {
-		return err
-	}
-	if err := requireWorkspaceDocumentActive(doc); err != nil {
 		return err
 	}
 	if doc.TargetChatID != 0 && doc.TargetMessageID != 0 && !force {
@@ -1310,6 +1848,9 @@ func handleNotePublishCommand(ctx context.Context, cfg config.Config, store *sql
 		writeHTMLLinkOrText(&writeBuilder, workspaceMessageLink(doc.TargetChatID, doc.TargetTopicID, doc.TargetMessageID), doc.Title)
 		text += writeBuilder.String() + "\n\nЕсли точно нужен новый дубль, отправь <code>/doc publish force</code> в reply к части заметки."
 		return client.SendMessage(ctx, nest.SendMessageRequest{ChatID: cfg.Workspace.ChatID, MessageThreadID: threadID, Text: text, ParseMode: "HTML"})
+	}
+	if doc.Status != "active" && !force {
+		return fmt.Errorf("document #%d is %s; use force only if you intentionally want a duplicate preview", doc.ID, doc.Status)
 	}
 	return createPublishPreview(ctx, cfg, store, client, publishDrafts, doc.ID, "", now)
 }
@@ -1440,6 +1981,9 @@ func approvePublishPreview(ctx context.Context, cfg config.Config, store *sqlite
 	if err := store.UpdateWorkspaceDocumentTarget(ctx, documentID, cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, published[0].MessageID, &publishedAt, now); err != nil {
 		return err
 	}
+	if err := store.UpdateWorkspaceDocumentStatus(ctx, documentID, "published", now); err != nil {
+		return err
+	}
 	for _, part := range parts {
 		if part.SourceChatID == 0 || part.SourceMessageID == 0 {
 			continue
@@ -1461,6 +2005,9 @@ func approvePublishPreview(ctx context.Context, cfg config.Config, store *sqlite
 		}
 	}
 	if err := updateUsefulIndex(ctx, cfg, store, client, now); err != nil {
+		return err
+	}
+	if err := updateWorkspaceDocumentIndex(ctx, cfg, store, client, "note", now); err != nil {
 		return err
 	}
 	if callbackMessage != nil {
@@ -1515,6 +2062,9 @@ func renderUsefulIndex(ctx context.Context, cfg config.Config, store *sqlitestor
 		writeHTMLLinkOrText(&b, workspaceMessageLink(cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, doc.TargetMessageID), doc.Title)
 		b.WriteString(" ")
 		b.WriteString(pleasantDocumentEmoji(doc.ID))
+		if doc.Status == "needs_review" {
+			b.WriteString(" <i>нужен review</i>")
+		}
 		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
@@ -1679,6 +2229,26 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 		}
 		result.Items = append(result.Items, item)
 	}
+	usefulText, err := renderUsefulIndex(ctx, cfg, store)
+	if err != nil {
+		return SeedDocumentIndexesResult{}, err
+	}
+	usefulItem := SeedDocumentIndexItem{
+		Type:    "useful",
+		Topic:   "Полезное",
+		TopicID: cfg.Workspace.Topics.Useful,
+		Status:  "dry_run",
+		Text:    usefulText,
+	}
+	if !opts.DryRun {
+		messageID, status, err := upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Useful, usefulIndexKey, usefulText, now)
+		if err != nil {
+			return SeedDocumentIndexesResult{}, err
+		}
+		usefulItem.MessageID = messageID
+		usefulItem.Status = status
+	}
+	result.Items = append(result.Items, usefulItem)
 	return result, nil
 }
 
@@ -1731,7 +2301,11 @@ func renderWorkspaceDocumentIndex(ctx context.Context, store *sqlitestore.Store,
 	case "note":
 		return renderNotesIndex(docs, partsByDoc), nil
 	case "template":
-		return renderTemplatesIndex(docs, partsByDoc), nil
+		types, err := workspaceDocumentTypesForRender(ctx, store, "template", docs)
+		if err != nil {
+			return "", err
+		}
+		return renderTemplatesIndex(types, docs, partsByDoc), nil
 	case "collection":
 		return renderCollectionsIndex(docs, partsByDoc), nil
 	default:
@@ -1745,10 +2319,18 @@ func syncWorkspaceDocumentIndexesForSourceEdit(ctx context.Context, cfg config.C
 		return err
 	}
 	seen := map[string]struct{}{}
+	usefulDirty := false
 	for _, part := range parts {
 		doc, err := store.WorkspaceDocumentByID(ctx, part.DocumentID)
 		if err != nil {
 			return err
+		}
+		if doc.Status == "published" {
+			if err := store.UpdateWorkspaceDocumentStatus(ctx, doc.ID, "needs_review", now); err != nil {
+				return err
+			}
+			usefulDirty = true
+			continue
 		}
 		if doc.Status != "active" {
 			continue
@@ -1758,6 +2340,11 @@ func syncWorkspaceDocumentIndexesForSourceEdit(ctx context.Context, cfg config.C
 		}
 		seen[doc.Type] = struct{}{}
 		if err := updateWorkspaceDocumentIndex(ctx, cfg, store, client, doc.Type, now); err != nil {
+			return err
+		}
+	}
+	if usefulDirty {
+		if err := updateUsefulIndex(ctx, cfg, store, client, now); err != nil {
 			return err
 		}
 	}
@@ -1791,25 +2378,84 @@ func renderNotesIndex(docs []sqlitestore.WorkspaceDocument, partsByDoc map[int64
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func renderTemplatesIndex(docs []sqlitestore.WorkspaceDocument, partsByDoc map[int64][]sqlitestore.WorkspaceDocumentPart) string {
+func workspaceDocumentTypesForRender(ctx context.Context, store *sqlitestore.Store, docType string, docs []sqlitestore.WorkspaceDocument) ([]sqlitestore.WorkspaceDocumentType, error) {
+	types, err := store.WorkspaceDocumentTypes(ctx, docType, false)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	var out []sqlitestore.WorkspaceDocumentType
+	for _, docTypeRow := range types {
+		name := normalizeWorkspaceDocumentCategory(docType, docTypeRow.Name)
+		if name == "" {
+			continue
+		}
+		docTypeRow.Name = name
+		if docTypeRow.Emoji == "" {
+			docTypeRow.Emoji = pleasantDocumentTypeEmoji(name)
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, docTypeRow)
+	}
+	for _, doc := range docs {
+		name := normalizeWorkspaceDocumentCategory(docType, doc.Category)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, sqlitestore.WorkspaceDocumentType{DocType: docType, Name: name, Emoji: pleasantDocumentTypeEmoji(name), Status: "active"})
+	}
+	if docType == "template" {
+		if _, ok := seen["Остальное"]; !ok {
+			out = append(out, sqlitestore.WorkspaceDocumentType{DocType: docType, Name: "Остальное", Emoji: pleasantDocumentTypeEmoji("Остальное"), Status: "active"})
+		}
+	}
+	return out, nil
+}
+
+func renderTemplatesIndex(types []sqlitestore.WorkspaceDocumentType, docs []sqlitestore.WorkspaceDocument, partsByDoc map[int64][]sqlitestore.WorkspaceDocumentPart) string {
 	var b strings.Builder
 	b.WriteString("🧰 <b>Промпты и шаблоны</b>\n\n")
-	if len(docs) == 0 {
+	if len(docs) == 0 && len(types) == 0 {
 		b.WriteString("<i>Пока пусто.</i>")
 		return b.String()
 	}
+	if len(types) == 0 {
+		types = []sqlitestore.WorkspaceDocumentType{{DocType: "template", Name: "Остальное", Emoji: pleasantDocumentTypeEmoji("Остальное"), Status: "active"}}
+	}
+	byType := map[string][]sqlitestore.WorkspaceDocument{}
 	for _, doc := range docs {
-		label := doc.Title
-		if strings.TrimSpace(doc.Category) != "" {
-			label = doc.Category + " / " + doc.Title
+		category := normalizeTemplateTypeName(doc.Category)
+		byType[category] = append(byType[category], doc)
+	}
+	for _, docTypeRow := range types {
+		name := normalizeTemplateTypeName(docTypeRow.Name)
+		if name == "" {
+			continue
 		}
 		b.WriteString("• <b>")
-		b.WriteString(html.EscapeString(label))
-		b.WriteString("</b>\n")
-		for _, part := range partsByDoc[doc.ID] {
+		b.WriteString(html.EscapeString(name))
+		b.WriteString("</b> ")
+		b.WriteString(html.EscapeString(documentTypeEmoji(docTypeRow)))
+		b.WriteString("\n")
+		for _, doc := range byType[name] {
 			b.WriteString("  ")
-			writeHTMLLinkOrText(&b, part.SourceLink, documentPartTitle(part, doc.Title))
+			writeBoldHTMLLinkOrText(&b, firstPartLink(partsByDoc[doc.ID]), doc.Title)
 			b.WriteString("\n")
+			for _, part := range partsByDoc[doc.ID] {
+				if part.PartNo <= 1 {
+					continue
+				}
+				b.WriteString("    [")
+				writeHTMLLinkOrText(&b, part.SourceLink, documentPartTitle(part, "Часть "+strconv.Itoa(part.PartNo)))
+				b.WriteString("]\n")
+			}
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -1822,25 +2468,14 @@ func renderCollectionsIndex(docs []sqlitestore.WorkspaceDocument, partsByDoc map
 		b.WriteString("<i>Пока пусто.</i>")
 		return b.String()
 	}
-	byCategory := map[string][]sqlitestore.WorkspaceDocument{}
 	for _, doc := range docs {
-		category := normalizeCollectionCategory(doc.Category)
-		byCategory[category] = append(byCategory[category], doc)
-	}
-	for _, category := range collectionCategories() {
-		items := byCategory[category]
-		if len(items) == 0 {
-			continue
-		}
-		b.WriteString("<b>")
-		b.WriteString(html.EscapeString(category))
-		b.WriteString("</b>\n")
-		for _, doc := range items {
-			b.WriteString("• ")
-			writeHTMLLinkOrText(&b, documentTargetOrFirstPartLink(doc, partsByDoc[doc.ID]), doc.Title)
-			b.WriteString(" ")
-			b.WriteString(pleasantDocumentEmoji(doc.ID))
-			b.WriteString("\n")
+		b.WriteString("• ")
+		writeHTMLLinkOrText(&b, documentTargetOrFirstPartLink(doc, partsByDoc[doc.ID]), doc.Title)
+		b.WriteString(" ")
+		b.WriteString(pleasantDocumentEmoji(doc.ID))
+		if strings.TrimSpace(doc.Category) != "" {
+			b.WriteString("\n  ")
+			b.WriteString(html.EscapeString(compactWorkspaceLine(doc.Category, 120)))
 		}
 		b.WriteString("\n")
 	}
@@ -1943,18 +2578,37 @@ func formatWorkspaceDocumentSummary(doc sqlitestore.WorkspaceDocument, parts []s
 }
 
 func sendWorkspaceDocumentHelp(ctx context.Context, client *nest.Client, chatID int64, threadID int, command string) {
-	var text string
+	text := WorkspaceDocumentHelpText(command)
+	_ = client.SendMessage(ctx, nest.SendMessageRequest{ChatID: chatID, MessageThreadID: threadID, Text: text, ParseMode: "HTML"})
+}
+
+func WorkspaceDocumentHelpText(command string) string {
 	switch command {
 	case "note", "doc":
-		text = "📝 <b>Заметки</b>\n\nИсточник берётся из <b>Заметки</b>: ответь на сообщение или отправь команду после него из Заметки/Inbox.\n\n<code>/doc new Название</code>\n<code>/doc append 3</code>\n<code>/doc append Название заметки | Часть 2</code>\n<code>/doc rename</code> в reply\n<code>/doc rename-part</code> в reply\n<code>/doc delete-part</code> в reply\n<code>/doc delete</code> в reply\n<code>/doc publish</code> или <code>/publish</code> в reply\n<code>/doc show</code> или <code>/doc show Название</code>"
+		return "📝 <b>Заметки</b>\n\nИсточник берётся из <b>Заметки</b>: ответь на сообщение или отправь команду после него из Заметки/Inbox.\n\n<code>/doc new Название</code>\n<code>/new doc Название</code>\n<code>/doc append 3</code>\n<code>/doc append Название заметки | Часть 2</code>\n<code>/doc rename</code> в reply\n<code>/doc rename-part</code> в reply\n<code>/doc delete-part</code> в reply\n<code>/doc delete</code> в reply\n<code>/doc publish</code> или <code>/publish</code> в reply\n<code>/doc show</code> или <code>/doc show Название</code>\n\n<blockquote>После публикации заметка уходит из активного индекса, а исходные сообщения остаются на месте.</blockquote>"
 	case "template":
-		text = "🧰 <b>Заготовки</b>\n\nИсточник берётся из <b>Заготовки</b>: ответь на сообщение или отправь команду после него из Заготовки/Inbox.\n\n<code>/template new Тип | Заготовка | Часть</code>\n<code>/template append Заготовка | Новая часть</code>\n<code>/template rename</code> в reply\n<code>/template type</code> в reply\n<code>/template show</code> или <code>/template show Заготовка</code>"
+		return "🧰 <b>Заготовки</b>\n\nИсточник берётся из <b>Заготовки</b>: ответь на сообщение или отправь команду после него из Заготовки/Inbox.\n\n<code>/template type Название типа</code>\n<code>/template rename-type Старое | Новое</code>\n<code>/template delete-type Название</code>\n<code>/template new Название</code> — спросит тип\n<code>/new template Название</code> — то же самое\n<code>/template new Тип | Название | Часть</code>\n<code>/template append Название | Новая часть</code>\n<code>/template rename</code> в reply\n<code>/template move</code> в reply — выбрать тип кнопкой\n<code>/template show</code> или <code>/template show Название</code>"
 	case "collection":
-		text = "🗂 <b>Коллекции</b>\n\nКоллекция — отдельное сообщение со списком ссылок. Источник элемента берётся из <b>Коллекции</b>: reply или последнее твоё сообщение в этом topic.\n\n<code>/new collection Название</code>\n<code>/collection add Название коллекции | Название элемента</code>\n<code>/collection rename</code> в reply к карточке коллекции\n<code>/collection show</code> или <code>/collection show Название</code>"
+		return "🗂 <b>Коллекции</b>\n\nКоллекция — отдельное bot-сообщение со ссылками на элементы. Источник элемента берётся из <b>Коллекции</b>: reply или последнее твоё сообщение в этом topic.\n\n<code>/collection new Название</code>\n<code>/new collection Название</code>\n<code>/collection add Название коллекции | Название элемента</code>\n<code>/collection rename</code> в reply к карточке\n<code>/collection description</code> в reply\n<code>/collection delete</code> в reply\n<code>/collection rename-item 2 | Новое название</code>\n<code>/collection delete-item 2</code>\n<code>/collection move-item 2 | Другая коллекция</code>\n<code>/collection order-item 3 1</code>\n<code>/collection show</code> или <code>/collection show Название</code>"
 	default:
-		text = "Команды: <code>/doc</code>, <code>/template</code>, <code>/collection</code>."
+		return "Команды: <code>/doc</code>, <code>/template</code>, <code>/collection</code>."
 	}
-	_ = client.SendMessage(ctx, nest.SendMessageRequest{ChatID: chatID, MessageThreadID: threadID, Text: text, ParseMode: "HTML"})
+}
+
+func TaskHelpMessageText() string {
+	return "✅ <b>Задачи</b>\n\nКарточки появляются здесь после <code>#task</code> или списка под <code>#tasks</code>. У каждой карточки есть кнопки <b>Готово</b>, <b>Отменить</b> и <b>Отложить</b>.\n\nОтложенные задачи остаются карточками с кнопками, а индекс в этом topic даёт ссылки обратно на них. Для ручной даты подходят <code>DD.MM</code>, <code>DD.MM HH:MM</code>, <code>DD.MM.YYYY</code>, <code>DD.MM.YYYY HH:MM</code>."
+}
+
+func UsefulHelpMessageText() string {
+	return "💎 <b>Полезное</b>\n\nСюда попадают материалы после preview и кнопки <b>Опубликовать</b> из Заметок. Исходники остаются в <b>Заметки</b>, а опубликованный материал получает связь с source IDs.\n\nЕсли исходная заметка потом меняется, опубликованная версия не переписывается молча: она помечается как needing review."
+}
+
+func InboxHelpMessageText() string {
+	return "📥 <b>Inbox</b>\n\nЭто default topic для команд и preview. Команды документов можно отправлять отсюда, но source всё равно берётся из профильного topic: <b>Заметки</b>, <b>Заготовки</b> или <b>Коллекции</b>, если ты не отвечаешь командой прямо на сообщение.\n\nДля cluster-команд ниже работает reply или ссылка на сообщение."
+}
+
+func ExperienceHelpMessageText() string {
+	return "🌱 <b>Опыт</b>\n\nСюда можно складывать личные наблюдения и практические выводы. В текущем MVP специальных команд для этого topic нет: бот сохраняет компактные source IDs/links и не тащит raw данные в prompt context."
 }
 
 func sendWorkspaceDocumentDone(ctx context.Context, client *nest.Client, chatID int64, threadID int, text string) error {
@@ -2015,10 +2669,14 @@ func parseTemplateNewBody(body string) (string, string, string) {
 	case 1:
 		return "Остальное", parts[0], parts[0]
 	case 2:
-		return parts[0], parts[1], parts[1]
+		return normalizeTemplateTypeName(parts[0]), parts[1], parts[1]
 	default:
-		return parts[0], parts[1], parts[2]
+		return normalizeTemplateTypeName(parts[0]), parts[1], parts[2]
 	}
+}
+
+func templateNewBodyHasExplicitType(body string) bool {
+	return len(splitPipeFields(body)) >= 2
 }
 
 func parseCollectionAddBody(body string) (string, string, string) {
@@ -2047,6 +2705,18 @@ func splitPipeFields(value string) []string {
 		}
 	}
 	return out
+}
+
+func parseTwoPartCommand(body string) (string, string) {
+	parts := splitPipeFields(body)
+	if len(parts) >= 2 {
+		return parts[0], parts[1]
+	}
+	fields := strings.Fields(strings.TrimSpace(body))
+	if len(fields) < 2 {
+		return strings.TrimSpace(body), ""
+	}
+	return fields[0], strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(body), fields[0]))
 }
 
 func firstPartLink(parts []sqlitestore.WorkspaceDocumentPart) string {
@@ -2100,6 +2770,45 @@ func normalizeCollectionCategory(category string) string {
 		}
 	}
 	return "Остальное"
+}
+
+func normalizeTemplateTypeName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.EqualFold(name, "Остальные") || strings.EqualFold(name, "Остальное") {
+		return "Остальное"
+	}
+	return name
+}
+
+func normalizeWorkspaceDocumentCategory(docType string, category string) string {
+	switch docType {
+	case "template":
+		return normalizeTemplateTypeName(category)
+	case "collection":
+		return strings.TrimSpace(category)
+	default:
+		return strings.TrimSpace(category)
+	}
+}
+
+func documentTypeEmoji(docTypeRow sqlitestore.WorkspaceDocumentType) string {
+	if strings.TrimSpace(docTypeRow.Emoji) != "" {
+		return strings.TrimSpace(docTypeRow.Emoji)
+	}
+	return pleasantDocumentTypeEmoji(docTypeRow.Name)
+}
+
+func pleasantDocumentTypeEmoji(name string) string {
+	emojis := []string{"✨", "🌿", "💫", "🧩", "🌸", "🪄", "🫶", "☀️", "🍀", "💎", "🧡", "🌙", "🔮", "🧭", "🪷", "⚡"}
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" {
+		return emojis[0]
+	}
+	sum := 0
+	for _, r := range name {
+		sum += int(r)
+	}
+	return emojis[sum%len(emojis)]
 }
 
 func collectionCategories() []string {

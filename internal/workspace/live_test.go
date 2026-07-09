@@ -165,6 +165,17 @@ func TestPublishCallbacksAndMockPreview(t *testing.T) {
 	}
 }
 
+func TestDocumentInputCallbacks(t *testing.T) {
+	data := DocumentInputCallbackData("template_new_type", 2)
+	action, index, ok := ParseDocumentInputCallback(data)
+	if !ok || action != "template_new_type" || index != 2 {
+		t.Fatalf("input callback = %q %d ok=%t", action, index, ok)
+	}
+	if _, _, ok := ParseDocumentInputCallback("bad"); ok {
+		t.Fatal("invalid document input callback parsed")
+	}
+}
+
 func TestWorkspaceDocumentIndexesRenderLinks(t *testing.T) {
 	noteDoc := sqlitestore.WorkspaceDocument{ID: 1, Type: "note", Status: "active", Title: "Связки"}
 	noteParts := map[int64][]sqlitestore.WorkspaceDocumentPart{1: {
@@ -179,18 +190,20 @@ func TestWorkspaceDocumentIndexesRenderLinks(t *testing.T) {
 	}
 
 	templateDoc := sqlitestore.WorkspaceDocument{ID: 2, Type: "template", Status: "active", Title: "Implementation prompt", Category: "Codex"}
-	templates := renderTemplatesIndex([]sqlitestore.WorkspaceDocument{templateDoc}, map[int64][]sqlitestore.WorkspaceDocumentPart{2: {
+	templates := renderTemplatesIndex([]sqlitestore.WorkspaceDocumentType{{DocType: "template", Name: "Codex", Emoji: "🧩"}}, []sqlitestore.WorkspaceDocument{templateDoc}, map[int64][]sqlitestore.WorkspaceDocumentPart{2: {
 		{PartNo: 1, Title: "Project context", SourceLink: "https://t.me/c/4301779750/14/20"},
 	}})
-	if !strings.Contains(templates, "Codex / Implementation prompt") || !strings.Contains(templates, "Project context") {
+	if !strings.Contains(templates, "• <b>Codex</b> 🧩") ||
+		!strings.Contains(templates, `<b><a href="https://t.me/c/4301779750/14/20">Implementation prompt</a></b>`) {
 		t.Fatalf("templates index = %s", templates)
 	}
 
-	collectionDoc := sqlitestore.WorkspaceDocument{ID: 3, Type: "collection", Status: "active", Title: "Мюсли", Category: "Рецепты", TargetChatID: -1004301779750, TargetTopicID: 20, TargetMessageID: 40}
+	collectionDoc := sqlitestore.WorkspaceDocument{ID: 3, Type: "collection", Status: "active", Title: "Мюсли", Category: "Домашние рецепты", TargetChatID: -1004301779750, TargetTopicID: 20, TargetMessageID: 40}
 	collections := renderCollectionsIndex([]sqlitestore.WorkspaceDocument{collectionDoc}, map[int64][]sqlitestore.WorkspaceDocumentPart{3: {
 		{PartNo: 1, SourceLink: "https://t.me/c/4301779750/20/30"},
 	}})
-	if !strings.Contains(collections, "<b>Рецепты</b>") || !strings.Contains(collections, "Мюсли") ||
+	if strings.Contains(collections, "<b>Рецепты</b>") || !strings.Contains(collections, "Мюсли") ||
+		!strings.Contains(collections, "Домашние рецепты") ||
 		!strings.Contains(collections, `href="https://t.me/c/4301779750/20/40"`) {
 		t.Fatalf("collections index = %s", collections)
 	}
@@ -208,6 +221,12 @@ func TestDocumentCommandParsers(t *testing.T) {
 	ref, title = parseTemplateAppendBody("Карточка личности | Инструкция")
 	if ref != "Карточка личности" || title != "Инструкция" {
 		t.Fatalf("template ref=%q title=%q", ref, title)
+	}
+	if category, title, partTitle := parseTemplateNewBody("Codex | Системный промпт | Тело"); category != "Codex" || title != "Системный промпт" || partTitle != "Тело" {
+		t.Fatalf("template new category=%q title=%q part=%q", category, title, partTitle)
+	}
+	if category, _, _ := parseTemplateNewBody("Остальные | Черновик"); category != "Остальное" {
+		t.Fatalf("template default category = %q", category)
 	}
 	ref, title, category := parseCollectionAddBody("Рецепты | Мюсли")
 	if ref != "Мюсли" || title != "Мюсли" || category != "Рецепты" {

@@ -19,6 +19,7 @@ Read this file before opening runtime data.
 | Workspace data contracts | `docs/workspace/data_contracts.md` | SQLite `workspace_*` tables |
 | Workspace migration preview | `docs/workspace/audit.md` | `.state/artifacts/workspace/migration_preview/` |
 | Workspace/Control topic IDs | `docs/workspace/data_contracts.md` | `.state/artifacts/workspace/bootstrap/` |
+| Workspace live commands/indexes | `docs/workspace/overview.md` and `memory/current_state.md` | SQLite `workspace_messages`, `workspace_tasks`, `workspace_documents`, `workspace_topic_indexes` |
 | A particular file | artifact index entry | `.state/media/` or `.state/artifacts/` |
 
 Generated indexes are compact navigation surfaces. They may be rebuilt from

@@ -129,13 +129,15 @@ the delayed-task backlog in `Задачи`. The task backlog intentionally lists
 `deferred` tasks and links each item back to its original task card; open tasks
 stay visible as individual cards.
 
-`workspace_documents` and `workspace_document_parts` store Stage 6
-note/template/collection metadata:
+`workspace_documents`, `workspace_document_parts`, and
+`workspace_document_types` store Stage 6 note/template/collection metadata:
 
 - `doc_type`: `note`, `template`, or `collection`
 - `status`: `active`, `published`, `archived`, or `needs_review`
 - document title/category and optional target message IDs. Target IDs are used
   for collection-card messages and published Useful material.
+- template type rows: stable type name, emoji, position, and active/archived
+  status. Empty active template types still render in the template index.
 - per-part source mapping: `source_chat_id`, `source_message_id`,
   `source_cluster_id`, `source_link`
 - compact part text only; raw Telegram JSON remains outside prompt context
@@ -143,8 +145,11 @@ note/template/collection metadata:
 The live bot maintains index messages for active notes in `Заметки`, templates
 in `Заготовки`, collection-card links in `Коллекции`, and published Useful
 links in `Полезное`. Notes render as a bold first-part link plus bracketed
-part links. Published material is not silently rewritten on source edit:
-published derived rows are marked `needs_review`.
+part links. Template indexes render active type headings and bold prompt links.
+Collection indexes are one flat list of collection-card links; each collection
+card stores its own description and item links. Published material is not
+silently rewritten on source edit: published documents and derived rows are
+marked `needs_review`.
 
 ## Audit Artifacts
 

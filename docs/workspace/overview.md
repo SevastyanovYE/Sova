@@ -109,9 +109,12 @@ matching bot-created task cards, removes the delayed-task backlog message when
 `--delete-backlog` is true, and marks matching Workspace tasks cancelled in
 SQLite. It does not delete user-authored source messages.
 
+`seed-command-help` sends the current command reference into each Workspace
+topic. It is not a pin operation; the user can pin useful messages manually.
+
 `seed-document-indexes` creates or updates the active Stage 6 index messages in
-`Заметки`, `Заготовки`, and `Коллекции`. The live bot edits these same messages
-after `/note`, `/template`, and `/collection` commands.
+`Заметки`, `Заготовки`, `Коллекции`, and `Полезное`. The live bot edits these
+same messages after `/note`, `/template`, `/collection`, and publish commands.
 
 `serve` runs the live Workspace bot for `InSync v1.0`. It is separate from
 Nest `serve`: it polls `SOVA_WORKSPACE_BOT_TOKEN`, writes live Workspace
@@ -137,10 +140,20 @@ callbacks in `Задачи`, and accepts manual cluster/document commands:
 /template append
 /template rename
 /template type
+/template move
+/template rename-type
+/template delete-type
 /template show
+/collection new
 /new collection
 /collection add
 /collection rename
+/collection description
+/collection delete
+/collection rename-item
+/collection delete-item
+/collection move-item
+/collection order-item
 /collection show
 ```
 
@@ -166,8 +179,12 @@ IDs/links.
 /doc delete-part
 /doc delete
 /doc publish
-/template new Категория | Документ | Часть
+/template type Тип
+/template new Документ
+/new template Документ
+/template new Тип | Документ | Часть
 /template append Название шаблона | Название части
+/collection new Название
 /new collection Название
 /collection add Название коллекции | Название элемента
 ```
@@ -177,8 +194,15 @@ index message and also send the human-readable index into the interaction
 topic when no ID/title is passed. `/collection show` links to collection
 messages when they exist, not only to individual items.
 
+`/template type Тип` is standalone and creates an empty template type in the
+index. `/template new Название` asks which existing type should receive the
+template; `/template move` in reply changes an existing template's type through
+buttons or text.
+
 `/doc publish` and reply `/publish` assemble the ordered note parts, send a
 preview to `Inbox`, and expose approve/cancel/edit buttons. With empty Gemini
 config the publish provider uses a local meaning-preserving mock formatter; the
 final approved material is posted to `Полезное`, source-to-derived mappings are
-persisted, and a Useful index message is updated.
+persisted, the note leaves the active Notes index, and a Useful index message is
+updated. Later source edits mark the published document/derived rows
+`needs_review` instead of silently rewriting final material.

@@ -123,10 +123,11 @@ go run ./cmd/sova nest-seed-topics
 | `go run ./cmd/sova serve` | Запускает локальный Nest controller для команд в `Status`, кнопки в `Chat` и daily scheduler. |
 | `go run ./cmd/sova workspace serve` | Запускает отдельный Workspace bot для `InSync v1.0`: clusters, edit-sync, task cards и Stage 6 document commands. |
 | `/doc new`, `/doc append`, `/doc publish` | Команды заметок: source берётся из `Заметки` или reply, preview публикации уходит в `Inbox`, approve публикует в `Полезное`. |
-| `/template new`, `/template append`, `/template type` | Команды заготовок: части можно добавлять по ID или названию шаблона. |
-| `/new collection`, `/collection add`, `/collection show` | Команды коллекций: создают отдельную карточку коллекции и индексируют ссылки на элементы. |
+| `/template new`, `/new template`, `/template append`, `/template type` | Команды заготовок: новый шаблон спрашивает тип, типы хранятся в индексе и могут быть переименованы/архивированы. |
+| `/collection new`, `/new collection`, `/collection add`, `/collection show` | Команды коллекций: создают отдельную карточку коллекции и один общий индекс ссылок на коллекции. |
 | `go run ./cmd/sova workspace seed-topic-pins --target all` | Отправляет human-friendly сообщения для закрепления в топики `InSync v1.0` и `Sova.Control`. |
-| `go run ./cmd/sova workspace seed-document-indexes` | Создаёт или обновляет active indexes для `Заметки`, `Заготовки`, `Коллекции`. |
+| `go run ./cmd/sova workspace seed-command-help` | Отправляет сообщения со справкой по командам в каждый Workspace topic. |
+| `go run ./cmd/sova workspace seed-document-indexes` | Создаёт или обновляет active indexes для `Заметки`, `Заготовки`, `Коллекции` и `Полезное`. |
 | `go run ./cmd/sova workspace cleanup-test-tasks --execute` | Удаляет bot-created тестовые task cards/backlog и помечает найденные проверочные задачи отменёнными. |
 | `go run ./cmd/sova nest-seed-topics` | Отправляет стартовые сообщения в `Chat`, `Digest`, `Calendar`, `Status` для ручного закрепления. |
 | `go run ./cmd/sova retry-run --id RUN_ID` | Безопасно восстанавливает run, который прервался на этапе Codex или Qwen. |

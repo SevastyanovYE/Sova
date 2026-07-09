@@ -289,6 +289,8 @@ func workspaceCommand(ctx context.Context, cfg config.Config, args []string) err
 		return workspaceBootstrapTopics(ctx, cfg, args[1:])
 	case "seed-topic-pins":
 		return workspaceSeedTopicPins(ctx, cfg, args[1:])
+	case "seed-command-help":
+		return workspaceSeedCommandHelp(ctx, cfg, args[1:])
 	case "seed-document-indexes":
 		return workspaceSeedDocumentIndexes(ctx, cfg, store, args[1:])
 	case "cleanup-test-tasks":
@@ -552,6 +554,44 @@ func workspaceSeedTopicPins(ctx context.Context, cfg config.Config, args []strin
 				fmt.Println(item.Text)
 				fmt.Println()
 			}
+		}
+	}
+	return nil
+}
+
+func workspaceSeedCommandHelp(ctx context.Context, cfg config.Config, args []string) error {
+	flags := flag.NewFlagSet("workspace seed-command-help", flag.ContinueOnError)
+	dryRun := flags.Bool("dry-run", false, "print planned command help messages without sending them")
+	timeout := flags.Duration("timeout", 2*time.Minute, "maximum time for Bot API send calls; 0 disables the deadline")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	seedCtx := ctx
+	cancel := func() {}
+	if *timeout > 0 {
+		seedCtx, cancel = context.WithTimeout(ctx, *timeout)
+	}
+	defer cancel()
+	result, err := workspace.SeedWorkspaceCommandHelp(seedCtx, cfg, workspace.SeedTopicPinsOptions{
+		DryRun: *dryRun,
+		Now:    time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	mode := "workspace seed-command-help"
+	if result.DryRun {
+		mode += " dry-run"
+	}
+	for _, item := range result.Items {
+		fmt.Printf("%s: %-14s topic_id=%d status=%s", mode, item.Topic, item.TopicID, item.Status)
+		if item.MessageID > 0 {
+			fmt.Printf(" message_id=%d", item.MessageID)
+		}
+		fmt.Println()
+		if result.DryRun {
+			fmt.Println(item.Text)
+			fmt.Println()
 		}
 	}
 	return nil
@@ -1432,6 +1472,7 @@ Usage:
   sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
   sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
+  sova workspace seed-command-help [--dry-run] [--timeout 2m]
   sova workspace seed-document-indexes [--dry-run] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
   sova workspace serve
@@ -1461,6 +1502,7 @@ Usage:
   sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
   sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
+  sova workspace seed-command-help [--dry-run] [--timeout 2m]
   sova workspace seed-document-indexes [--dry-run] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
   sova workspace serve
@@ -1472,6 +1514,7 @@ Notes:
   review-preview merges user-filled review decisions into a migration preview and stops for approval.
   bootstrap-topics creates only missing target forum topics and writes an env-style ID file.
   seed-topic-pins sends human-friendly pin draft messages into Workspace and/or Control topics.
+  seed-command-help sends command reference messages into Workspace topics.
   seed-document-indexes creates or updates active note/template/collection index messages.
   cleanup-test-tasks deletes bot-created test task cards/backlog and marks matching tasks cancelled.
   serve runs the live Workspace bot for clusters, edit-sync, task cards, and task callbacks.`)
