@@ -833,8 +833,28 @@ func TestWorkspaceDocumentsLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(published) != 0 {
+		t.Fatalf("active target docs must not be published docs: %+v", published)
+	}
+	if err := store.UpdateWorkspaceDocumentStatus(ctx, doc.ID, "published", now); err != nil {
+		t.Fatal(err)
+	}
+	published, err = store.PublishedWorkspaceDocuments(ctx, "note", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(published) != 1 || published[0].TargetMessageID != 50 {
 		t.Fatalf("published docs = %+v", published)
+	}
+	if err := store.UpdateWorkspaceDocumentStatus(ctx, doc.ID, "needs_review", now); err != nil {
+		t.Fatal(err)
+	}
+	published, err = store.PublishedWorkspaceDocuments(ctx, "note", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(published) != 1 || published[0].Status != "needs_review" {
+		t.Fatalf("needs-review docs = %+v", published)
 	}
 	if err := store.DeleteWorkspaceDocumentPart(ctx, part.ID, now); err != nil {
 		t.Fatal(err)

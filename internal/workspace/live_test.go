@@ -388,6 +388,100 @@ func TestWorkspaceDocumentCommandSourceFallsBackToEmbeddedReply(t *testing.T) {
 	}
 }
 
+func TestWorkspaceDocumentCommandSourceAllowsBotReply(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 10, 18, 0, 0, 0, time.UTC)
+	cfg := testWorkspaceLiveConfig()
+	command := nest.Message{
+		MessageID:       31,
+		MessageThreadID: cfg.Workspace.Topics.Collections,
+		Chat:            nest.Chat{ID: cfg.Workspace.ChatID},
+		From:            &nest.User{ID: 7},
+		Text:            "/collection add Рецепты | Шоколадный торт",
+		ReplyToMessage: &nest.Message{
+			MessageID: 30,
+			From:      &nest.User{ID: 100, IsBot: true},
+			Date:      now.Unix(),
+			Text:      "🍫 Шоколадный торт\n1. Смешать.",
+		},
+	}
+	part, err := workspaceDocumentPartFromCommandSource(ctx, cfg, store, command, "collection", "Шоколадный торт", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if part.SourceMessageID != 30 || part.SourceClusterID != 0 || part.SourceLink != "https://t.me/c/4301779750/20/30" {
+		t.Fatalf("part = %+v", part)
+	}
+	stored, ok, err := store.WorkspaceMessageByID(ctx, cfg.Workspace.ChatID, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !stored.FromIsBot || stored.TopicID != cfg.Workspace.Topics.Collections {
+		t.Fatalf("stored = %+v ok=%t", stored, ok)
+	}
+}
+
+func TestWorkspaceDocumentCommandSourceRejectsEmptyBotReply(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 10, 18, 0, 0, 0, time.UTC)
+	cfg := testWorkspaceLiveConfig()
+	command := nest.Message{
+		MessageID:       41,
+		MessageThreadID: cfg.Workspace.Topics.Collections,
+		Chat:            nest.Chat{ID: cfg.Workspace.ChatID},
+		From:            &nest.User{ID: 7},
+		Text:            "/collection add Рецепты | Пусто",
+		ReplyToMessage: &nest.Message{
+			MessageID: 40,
+			From:      &nest.User{ID: 100, IsBot: true},
+			Date:      now.Unix(),
+		},
+	}
+	if _, err := workspaceDocumentPartFromCommandSource(ctx, cfg, store, command, "collection", "Пусто", now); err == nil ||
+		!strings.Contains(err.Error(), "bot source message is empty") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestWorkspaceDocumentCommandSourceDoesNotUseBotLatestWithoutReply(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 10, 18, 0, 0, 0, time.UTC)
+	cfg := testWorkspaceLiveConfig()
+	if err := store.UpsertWorkspaceMessage(ctx, sqlitestore.WorkspaceMessage{
+		ChatID: cfg.Workspace.ChatID, MessageID: 50, TopicID: cfg.Workspace.Topics.Collections,
+		FromUserID: 100, FromIsBot: true, Date: now, Text: "bot card",
+		SourceLink: "https://t.me/c/4301779750/20/50",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	command := nest.Message{
+		MessageID:       51,
+		MessageThreadID: cfg.Workspace.Topics.Inbox,
+		Chat:            nest.Chat{ID: cfg.Workspace.ChatID},
+		From:            &nest.User{ID: 7},
+		Text:            "/collection add Рецепты | Карточка",
+	}
+	if _, err := workspaceDocumentPartFromCommandSource(ctx, cfg, store, command, "collection", "Карточка", now); err == nil ||
+		!strings.Contains(err.Error(), "no source message found") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestTelegramMessageNotModifiedIsNoop(t *testing.T) {
 	if !isTelegramMessageNotModified(errors.New("Bot API editMessageText failed: Bad Request: message is not modified")) {
 		t.Fatal("expected message-not-modified to be detected")

@@ -53,6 +53,7 @@ type ControlTopicIDs struct {
 	Workspace int
 	Nest      int
 	Ideas     int
+	Archive   int
 }
 
 type WorkspaceConfig struct {
@@ -199,6 +200,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	controlArchiveID, err := intEnv("SOVA_CONTROL_TOPIC_ARCHIVE_ID")
+	if err != nil {
+		return Config{}, err
+	}
 
 	stateDir := valueOrDefault("SOVA_STATE_DIR", defaultStateDir)
 	return Config{
@@ -233,7 +238,7 @@ func Load() (Config, error) {
 			Topics: ControlTopicIDs{
 				Status: controlStatusID, Errors: controlErrorsID, Runs: controlRunsID,
 				Review: controlReviewID, TestLab: controlTestLabID, Workspace: controlWorkspaceID,
-				Nest: controlNestID, Ideas: controlIdeasID,
+				Nest: controlNestID, Ideas: controlIdeasID, Archive: controlArchiveID,
 			},
 		},
 		OllamaURL:   valueOrDefault("SOVA_OLLAMA_URL", defaultOllamaURL),

@@ -30,6 +30,7 @@ Control config keys:
 - `SOVA_CONTROL_TOPIC_WORKSPACE_ID`
 - `SOVA_CONTROL_TOPIC_NEST_ID`
 - `SOVA_CONTROL_TOPIC_IDEAS_ID`
+- `SOVA_CONTROL_TOPIC_ARCHIVE_ID` (optional; bootstrap can create it)
 
 No secret values are committed. `.env.example` only documents the keys.
 Workspace sources are configured through `SOVA_WORKSPACE_*` keys and must stay

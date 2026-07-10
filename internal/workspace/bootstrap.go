@@ -76,6 +76,7 @@ func ControlTopicSpecs() []TopicSpec {
 		{EnvKey: "SOVA_CONTROL_TOPIC_WORKSPACE_ID", Name: "Workspace"},
 		{EnvKey: "SOVA_CONTROL_TOPIC_NEST_ID", Name: "Nest"},
 		{EnvKey: "SOVA_CONTROL_TOPIC_IDEAS_ID", Name: "Ideas"},
+		{EnvKey: "SOVA_CONTROL_TOPIC_ARCHIVE_ID", Name: "Archive"},
 	}
 }
 

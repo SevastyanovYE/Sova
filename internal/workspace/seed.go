@@ -388,6 +388,8 @@ func controlTopicID(cfg config.Config, topic string) int {
 		return cfg.Control.Topics.Nest
 	case "Ideas":
 		return cfg.Control.Topics.Ideas
+	case "Archive":
+		return cfg.Control.Topics.Archive
 	default:
 		return 0
 	}

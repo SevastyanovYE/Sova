@@ -567,7 +567,7 @@ func (s *Store) PublishedWorkspaceDocuments(ctx context.Context, docType string,
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, workspaceDocumentSelect()+`
-WHERE doc_type = ? AND target_chat_id != 0 AND target_message_id != 0
+WHERE doc_type = ? AND status IN ('published', 'needs_review') AND target_chat_id != 0 AND target_message_id != 0
 ORDER BY published_at DESC, updated_at DESC, id DESC
 LIMIT ?`, docType, limit)
 	if err != nil {

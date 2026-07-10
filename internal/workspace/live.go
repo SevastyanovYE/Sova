@@ -2296,7 +2296,8 @@ func workspaceDocumentPartFromCommandSource(ctx context.Context, cfg config.Conf
 		return sqlitestore.WorkspaceDocumentPart{}, err
 	}
 	var source sqlitestore.WorkspaceMessage
-	if message.ReplyToMessage != nil && message.ReplyToMessage.MessageID != 0 {
+	explicitReply := message.ReplyToMessage != nil && message.ReplyToMessage.MessageID != 0
+	if explicitReply {
 		source, err = workspaceDocumentSourceFromReply(ctx, cfg, store, message, expectedTopic, now)
 	} else {
 		source, err = workspaceDocumentSourceFromLatestTopic(ctx, store, message, expectedTopic)
@@ -2307,19 +2308,24 @@ func workspaceDocumentPartFromCommandSource(ctx context.Context, cfg config.Conf
 	if source.TopicID != expectedTopic {
 		return sqlitestore.WorkspaceDocumentPart{}, fmt.Errorf("source message must be in %s", workspaceDocumentIndexTopicName(docType))
 	}
-	if source.FromIsBot {
-		return sqlitestore.WorkspaceDocumentPart{}, fmt.Errorf("bot messages cannot be used as %s source", workspaceDocumentIndexTopicName(docType))
+	if source.FromIsBot && !explicitReply {
+		return sqlitestore.WorkspaceDocumentPart{}, fmt.Errorf("bot messages can be used as %s source only by explicit reply", workspaceDocumentIndexTopicName(docType))
+	}
+	if source.FromIsBot && sourceText(source) == "" && strings.TrimSpace(source.MediaType) == "" {
+		return sqlitestore.WorkspaceDocumentPart{}, fmt.Errorf("bot source message is empty; reply to a content message")
 	}
 	if source.MessageID == source.TopicID && sourceText(source) == "" && strings.TrimSpace(source.MediaType) == "" {
 		return sqlitestore.WorkspaceDocumentPart{}, fmt.Errorf("source looks like the topic root; reply to the actual content message")
 	}
 	clusterID := int64(0)
-	if cluster, ok, err := store.WorkspaceClusterByMessage(ctx, source.ChatID, source.MessageID); err != nil {
-		return sqlitestore.WorkspaceDocumentPart{}, err
-	} else if ok {
-		clusterID = cluster.ID
-	} else if cluster, err := ensureMessageCluster(ctx, store, source, false, now); err == nil {
-		clusterID = cluster.ID
+	if !source.FromIsBot {
+		if cluster, ok, err := store.WorkspaceClusterByMessage(ctx, source.ChatID, source.MessageID); err != nil {
+			return sqlitestore.WorkspaceDocumentPart{}, err
+		} else if ok {
+			clusterID = cluster.ID
+		} else if cluster, err := ensureMessageCluster(ctx, store, source, false, now); err == nil {
+			clusterID = cluster.ID
+		}
 	}
 	return sqlitestore.WorkspaceDocumentPart{
 		Title:           strings.TrimSpace(title),
@@ -2343,9 +2349,15 @@ func workspaceDocumentSourceFromReply(ctx context.Context, cfg config.Config, st
 		return source, nil
 	}
 	source = workspaceMessageFromBotAPI(cfg, *message.ReplyToMessage, now)
+	if source.ChatID == 0 {
+		source.ChatID = message.Chat.ID
+	}
 	if source.TopicID == cfg.Workspace.Topics.Inbox && expectedTopic != cfg.Workspace.Topics.Inbox {
 		source.TopicID = expectedTopic
 		source.SourceLink = workspaceMessageLink(source.ChatID, expectedTopic, source.MessageID)
+	}
+	if strings.TrimSpace(source.SourceLink) == "" && source.ChatID != 0 && source.TopicID != 0 && source.MessageID != 0 {
+		source.SourceLink = workspaceMessageLink(source.ChatID, source.TopicID, source.MessageID)
 	}
 	if err := store.UpsertWorkspaceMessage(ctx, source, now); err != nil {
 		return sqlitestore.WorkspaceMessage{}, err
