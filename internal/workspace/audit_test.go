@@ -388,6 +388,41 @@ func TestPreparePinnedMigrationReviewBuildsFocusedArtifacts(t *testing.T) {
 	}
 }
 
+func TestApplyPinnedMigrationReviewDryRunUsesUserComments(t *testing.T) {
+	cfg, store, _ := workspaceAuditFixture(t)
+	path := filepath.Join(t.TempDir(), "review.csv")
+	data := strings.Join([]string{
+		"legacy_topic,source_message_link,source_message_ids,cluster_id,short_title,short_summary,detected_type,suggested_target_topic,confidence,reason,needs_user_review,review_status,user_comment",
+		"Заметки,https://t.me/c/100/11,11,legacy-note,Raw note,summary,draft_note,Заметки,medium,reason,true,pending_review,archive",
+		"Полезное,https://t.me/c/100/21,21,legacy-useful,Useful,summary,useful_material,Полезное,high,reason,true,pending_review,publish",
+		"Заметки,https://t.me/c/100/31,31,legacy-target,Taskish,summary,draft_note,Заметки,medium,reason,true,pending_review,Заметки",
+		"Заметки,https://t.me/c/100/40,40,legacy-pending,Pending,summary,draft_note,Заметки,medium,reason,true,pending_review,",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyPinnedMigrationReview(context.Background(), cfg, store, PinnedMigrationApplyOptions{
+		ReviewCSVPath: path,
+		Now:           time.Date(2026, 7, 10, 8, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.DryRun || result.Rows != 4 || result.Archived != 1 || result.Planned != 2 || result.Pending != 1 || result.Errors != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	plan, err := os.ReadFile(result.PlanCSV)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(plan)
+	for _, want := range []string{"archive,Legacy archive,archived", "publish,Полезное,planned", "migrate,Заметки,planned", "pending,Заметки,pending"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("plan missing %q:\n%s", want, content)
+		}
+	}
+}
+
 func workspaceAuditFixture(t *testing.T) (config.Config, *sqlitestore.Store, string) {
 	t.Helper()
 	stateDir := t.TempDir()
