@@ -54,6 +54,7 @@ type publishPreviewDraft struct {
 
 type SeedDocumentIndexesOptions struct {
 	DryRun bool
+	Reset  bool
 	Now    time.Time
 }
 
@@ -2232,7 +2233,7 @@ func updateUsefulIndex(ctx context.Context, cfg config.Config, store *sqlitestor
 	if err != nil {
 		return err
 	}
-	_, _, err = upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Useful, usefulIndexKey, text, now)
+	_, _, err = upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Useful, usefulIndexKey, text, now, false)
 	return err
 }
 
@@ -2383,7 +2384,7 @@ func updateWorkspaceDocumentIndex(ctx context.Context, cfg config.Config, store 
 	if err != nil {
 		return err
 	}
-	_, _, err = upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, topicID, key, text, now)
+	_, _, err = upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, topicID, key, text, now, false)
 	return err
 }
 
@@ -2416,8 +2417,11 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 			Status:  "dry_run",
 			Text:    text,
 		}
+		if opts.Reset {
+			item.Status = "reset_dry_run"
+		}
 		if !opts.DryRun {
-			messageID, status, err := upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, topicID, key, text, now)
+			messageID, status, err := upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, topicID, key, text, now, opts.Reset)
 			if err != nil {
 				return SeedDocumentIndexesResult{}, err
 			}
@@ -2437,8 +2441,11 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 		Status:  "dry_run",
 		Text:    usefulText,
 	}
+	if opts.Reset {
+		usefulItem.Status = "reset_dry_run"
+	}
 	if !opts.DryRun {
-		messageID, status, err := upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Useful, usefulIndexKey, usefulText, now)
+		messageID, status, err := upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Useful, usefulIndexKey, usefulText, now, opts.Reset)
 		if err != nil {
 			return SeedDocumentIndexesResult{}, err
 		}
@@ -2449,7 +2456,10 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 	return result, nil
 }
 
-func upsertWorkspaceDocumentIndexMessage(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, topicID int, key, text string, now time.Time) (int, string, error) {
+func upsertWorkspaceDocumentIndexMessage(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, topicID int, key, text string, now time.Time, reset bool) (int, string, error) {
+	if reset {
+		return sendWorkspaceDocumentIndexMessage(ctx, cfg, store, client, topicID, key, text, now, true)
+	}
 	messageID, ok, err := store.WorkspaceTopicIndexMessage(ctx, cfg.Workspace.ChatID, topicID, key)
 	if err != nil {
 		return 0, "", err
@@ -2466,6 +2476,15 @@ func upsertWorkspaceDocumentIndexMessage(ctx context.Context, cfg config.Config,
 			return messageID, "unchanged", nil
 		}
 	}
+	return sendWorkspaceDocumentIndexMessage(ctx, cfg, store, client, topicID, key, text, now, false)
+}
+
+func sendWorkspaceDocumentIndexMessage(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, topicID int, key, text string, now time.Time, pin bool) (int, string, error) {
+	if pin {
+		if err := client.UnpinAllForumTopicMessages(ctx, cfg.Workspace.ChatID, topicID); err != nil {
+			return 0, "", err
+		}
+	}
 	message, err := client.SendMessageResult(ctx, nest.SendMessageRequest{
 		ChatID:          cfg.Workspace.ChatID,
 		MessageThreadID: topicID,
@@ -2477,6 +2496,16 @@ func upsertWorkspaceDocumentIndexMessage(ctx context.Context, cfg config.Config,
 	}
 	if err := store.UpsertWorkspaceTopicIndex(ctx, cfg.Workspace.ChatID, topicID, key, message.MessageID, now); err != nil {
 		return 0, "", err
+	}
+	if pin {
+		if err := client.PinChatMessage(ctx, nest.PinChatMessageRequest{
+			ChatID:              cfg.Workspace.ChatID,
+			MessageID:           message.MessageID,
+			DisableNotification: true,
+		}); err != nil {
+			return 0, "", err
+		}
+		return message.MessageID, "reset_sent_pinned", nil
 	}
 	return message.MessageID, "sent", nil
 }
@@ -2671,7 +2700,7 @@ func renderCollectionsIndex(docs []sqlitestore.WorkspaceDocument, partsByDoc map
 		b.WriteString(" ")
 		b.WriteString(pleasantDocumentEmoji(doc.ID))
 		if strings.TrimSpace(doc.Category) != "" {
-			b.WriteString("\n  <blockquote>")
+			b.WriteString("\n<blockquote>")
 			b.WriteString(html.EscapeString(compactWorkspaceLine(doc.Category, 120)))
 			b.WriteString("</blockquote>")
 		}

@@ -731,6 +731,7 @@ func workspaceSeedCommandHelp(ctx context.Context, cfg config.Config, args []str
 func workspaceSeedDocumentIndexes(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
 	flags := flag.NewFlagSet("workspace seed-document-indexes", flag.ContinueOnError)
 	dryRun := flags.Bool("dry-run", false, "print planned document indexes without sending them")
+	reset := flags.Bool("reset", false, "send fresh pinned index messages and make future updates use them")
 	timeout := flags.Duration("timeout", 2*time.Minute, "maximum time for Bot API send/edit calls; 0 disables the deadline")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -743,6 +744,7 @@ func workspaceSeedDocumentIndexes(ctx context.Context, cfg config.Config, store 
 	defer cancel()
 	result, err := workspace.SeedWorkspaceDocumentIndexes(seedCtx, cfg, store, workspace.SeedDocumentIndexesOptions{
 		DryRun: *dryRun,
+		Reset:  *reset,
 		Now:    time.Now().UTC(),
 	})
 	if err != nil {
@@ -1607,7 +1609,7 @@ Usage:
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
   sova workspace reset-topic-pins [--target workspace|control|all] [--execute] [--timeout 3m]
   sova workspace seed-command-help [--dry-run] [--timeout 2m]
-  sova workspace seed-document-indexes [--dry-run] [--timeout 2m]
+  sova workspace seed-document-indexes [--dry-run] [--reset] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
   sova workspace serve
   sova nest-check [--send-status]
@@ -1640,7 +1642,7 @@ Usage:
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
   sova workspace reset-topic-pins [--target workspace|control|all] [--execute] [--timeout 3m]
   sova workspace seed-command-help [--dry-run] [--timeout 2m]
-  sova workspace seed-document-indexes [--dry-run] [--timeout 2m]
+  sova workspace seed-document-indexes [--dry-run] [--reset] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
   sova workspace serve
 
@@ -1655,7 +1657,7 @@ Notes:
   seed-topic-pins sends human-friendly pin draft messages into Workspace and/or Control topics.
   reset-topic-pins unpins each configured forum topic, sends and pins the clean main message, then sends command help only in command topics.
   seed-command-help sends command reference messages into Workspace topics.
-  seed-document-indexes creates or updates active note/template/collection index messages.
+  seed-document-indexes creates or updates active note/template/collection/useful index messages; --reset sends fresh pinned indexes and repoints future updates.
   cleanup-test-tasks deletes bot-created test task cards/backlog and marks matching tasks cancelled.
   serve runs the live Workspace bot for clusters, edit-sync, task cards, and task callbacks.`)
 }

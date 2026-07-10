@@ -1,0 +1,19 @@
+[Unit]
+Description=Sova Workspace Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sova
+Group=sova
+WorkingDirectory=/opt/sova
+EnvironmentFile=/etc/sova/sova.env
+ExecStart=/opt/sova/sova workspace serve
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

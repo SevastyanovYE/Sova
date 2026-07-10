@@ -408,7 +408,7 @@ func TestApplyPinnedMigrationReviewDryRunUsesUserComments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.DryRun || result.Rows != 4 || result.Archived != 1 || result.Planned != 2 || result.Pending != 1 || result.Errors != 0 {
+	if !result.DryRun || result.Rows != 4 || result.Archived != 1 || result.Planned != 3 || result.Pending != 0 || result.Errors != 0 {
 		t.Fatalf("result = %+v", result)
 	}
 	plan, err := os.ReadFile(result.PlanCSV)
@@ -416,7 +416,7 @@ func TestApplyPinnedMigrationReviewDryRunUsesUserComments(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(plan)
-	for _, want := range []string{"archive,Legacy archive,archived", "publish,Полезное,planned", "migrate,Заметки,planned", "pending,Заметки,pending"} {
+	for _, want := range []string{"archive,Legacy archive,archived", "publish,Полезное,planned", "migrate,Заметки,planned", "Pending,,migrate,Заметки,planned"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("plan missing %q:\n%s", want, content)
 		}

@@ -39,6 +39,7 @@ type PinnedMigrationApplyResult struct {
 }
 
 type pinnedMigrationReviewRow struct {
+	PinnedReview         bool
 	LegacyTopic          string
 	SourceMessageLink    string
 	SourceMessageIDsRaw  string
@@ -281,6 +282,7 @@ func readPinnedMigrationApplyRows(path string, rawRows [][]string, header map[st
 	rows := make([]pinnedMigrationReviewRow, 0, len(rawRows))
 	for i, raw := range rawRows {
 		row := pinnedMigrationReviewRow{
+			PinnedReview:         true,
 			LegacyTopic:          csvRowValue(raw, header, "legacy_topic"),
 			SourceMessageLink:    csvRowValue(raw, header, "source_message_link"),
 			SourceMessageIDsRaw:  csvRowValue(raw, header, "source_message_ids"),
@@ -469,6 +471,9 @@ func parsePinnedMigrationDecision(row pinnedMigrationReviewRow) pinnedMigrationD
 	if comment != "" {
 		return pinnedMigrationDecision{Action: "migrate", Target: strings.TrimSpace(row.SuggestedTargetTopic), TextPrefix: migrationTextPrefixFromComment(comment), Note: comment}
 	}
+	if row.PinnedReview && strings.TrimSpace(row.SuggestedTargetTopic) != "" {
+		return pinnedMigrationDecision{Action: "migrate", Target: strings.TrimSpace(row.SuggestedTargetTopic)}
+	}
 	return pinnedMigrationDecision{Action: "pending", Target: strings.TrimSpace(row.SuggestedTargetTopic)}
 }
 
@@ -619,7 +624,7 @@ func executePinnedMigrationItem(ctx context.Context, cfg config.Config, store *s
 	var derivedLinks []string
 	var firstTargetMessageID int
 	for i, message := range messages {
-		existing, err := existingPinnedMigrationDerivedLinks(ctx, store, message, decision, row, i+1)
+		existing, err := existingPinnedMigrationDerivedLinks(ctx, store, message, decision, row, dest, i+1)
 		if err != nil {
 			return derivedLinks, err
 		}
@@ -689,25 +694,37 @@ type pinnedMigrationDerivedLink struct {
 	MessageID int
 }
 
-func existingPinnedMigrationDerivedLinks(ctx context.Context, store *sqlitestore.Store, source sqlitestore.WorkspaceSourceMessage, decision pinnedMigrationDecision, row pinnedMigrationReviewRow, sourcePart int) ([]pinnedMigrationDerivedLink, error) {
+func existingPinnedMigrationDerivedLinks(ctx context.Context, store *sqlitestore.Store, source sqlitestore.WorkspaceSourceMessage, decision pinnedMigrationDecision, row pinnedMigrationReviewRow, dest pinnedMigrationDestination, sourcePart int) ([]pinnedMigrationDerivedLink, error) {
 	prefix := fmt.Sprintf("legacy_migration_%s_row_%s_part_%d_", decision.Action, row.ClusterID, sourcePart)
 	statuses := []string{"active", "published"}
 	records, err := store.WorkspaceDerivedMessagesBySource(ctx, source.ChatID, source.MessageID, prefix, statuses, 50)
 	if err != nil {
 		return nil, err
 	}
+	if out := matchingPinnedMigrationDerivedLinks(records, dest); len(out) > 0 {
+		return out, nil
+	}
+	records, err = store.WorkspaceDerivedMessagesBySource(ctx, source.ChatID, source.MessageID, "legacy_migration_", statuses, 50)
+	if err != nil {
+		return nil, err
+	}
+	return matchingPinnedMigrationDerivedLinks(records, dest), nil
+}
+
+func matchingPinnedMigrationDerivedLinks(records []sqlitestore.WorkspaceDerivedMessage, dest pinnedMigrationDestination) []pinnedMigrationDerivedLink {
 	out := make([]pinnedMigrationDerivedLink, 0, len(records))
+	seen := map[int]struct{}{}
 	for _, record := range records {
-		if record.DerivedMessageID == 0 || record.DerivedChatID == 0 {
+		if record.DerivedMessageID == 0 || record.DerivedChatID != dest.ChatID || record.DerivedTopicID != dest.TopicID {
 			continue
 		}
-		out = append(out, pinnedMigrationDerivedLink{
-			ChatID:    record.DerivedChatID,
-			TopicID:   record.DerivedTopicID,
-			MessageID: record.DerivedMessageID,
-		})
+		if _, ok := seen[record.DerivedMessageID]; ok {
+			continue
+		}
+		seen[record.DerivedMessageID] = struct{}{}
+		out = append(out, pinnedMigrationDerivedLink{ChatID: record.DerivedChatID, TopicID: record.DerivedTopicID, MessageID: record.DerivedMessageID})
 	}
-	return out, nil
+	return out
 }
 
 func copyPinnedMigrationMessage(ctx context.Context, client *nest.Client, request nest.CopyMessageRequest) (nest.Message, error) {
@@ -794,13 +811,13 @@ func pinnedMigrationDestinationFor(cfg config.Config, decision pinnedMigrationDe
 			TopicID: cfg.Control.Topics.Workspace,
 		}, nil
 	case "study branch", "study":
-		if !cfg.ControlConfigured() {
-			return pinnedMigrationDestination{}, fmt.Errorf("Sova.Control is not fully configured for study branch fallback")
+		if !cfg.NestReady() {
+			return pinnedMigrationDestination{}, fmt.Errorf("Sova.Nest is not fully configured for study branch")
 		}
 		return pinnedMigrationDestination{
-			Client:  nest.New(cfg.Control.BotToken),
-			ChatID:  cfg.Control.ChatID,
-			TopicID: cfg.Control.Topics.Review,
+			Client:  nest.New(cfg.NestBotToken),
+			ChatID:  cfg.NestChatID,
+			TopicID: cfg.NestTopics.Chat,
 		}, nil
 	default:
 		topicID, err := pinnedMigrationTargetTopicID(cfg, decision.Target)
