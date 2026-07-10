@@ -481,7 +481,7 @@ func workspacePreparePinnedMigration(ctx context.Context, cfg config.Config, sto
 
 func workspaceApplyPinnedMigration(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
 	flags := flag.NewFlagSet("workspace apply-pinned-migration", flag.ContinueOnError)
-	reviewCSV := flags.String("review-csv", "", "user-filled pinned_migration_review.csv")
+	reviewCSV := flags.String("review-csv", "", "user-filled pinned/audit migration CSV path; repeat by comma for one deduped run")
 	outputDir := flags.String("out-dir", "", "output directory; default is .state/artifacts/workspace/migration_apply/<run-id>")
 	execute := flags.Bool("execute", false, "send/copy planned items into Workspace; default is dry-run")
 	timeout := flags.Duration("timeout", 5*time.Minute, "maximum time for Bot API sends; 0 disables the deadline")
@@ -1602,7 +1602,7 @@ Usage:
   sova workspace audit [--dry-run] [--limit 0]
   sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
   sova workspace prepare-pinned-migration [--limit 0] [--out-dir PATH]
-  sova workspace apply-pinned-migration --review-csv PATH [--execute] [--out-dir PATH] [--timeout 5m]
+  sova workspace apply-pinned-migration --review-csv PATH[,PATH...] [--execute] [--out-dir PATH] [--timeout 5m]
   sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
   sova workspace reset-topic-pins [--target workspace|control|all] [--execute] [--timeout 3m]
@@ -1635,7 +1635,7 @@ Usage:
   sova workspace audit [--dry-run] [--limit 0]
   sova workspace review-preview [--audit-run RUN_ID] [--review-csv PATH]
   sova workspace prepare-pinned-migration [--limit 0] [--out-dir PATH]
-  sova workspace apply-pinned-migration --review-csv PATH [--execute] [--out-dir PATH] [--timeout 5m]
+  sova workspace apply-pinned-migration --review-csv PATH[,PATH...] [--execute] [--out-dir PATH] [--timeout 5m]
   sova workspace bootstrap-topics [--dry-run] [--timeout 2m] [--workspace-title "InSync v1.0"] [--control-title "Sova.Control"]
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
   sova workspace reset-topic-pins [--target workspace|control|all] [--execute] [--timeout 3m]
@@ -1650,7 +1650,7 @@ Notes:
   audit uses already indexed Telegram messages and writes review artifacts unless --dry-run is set.
   review-preview merges user-filled review decisions into a migration preview and stops for approval.
   prepare-pinned-migration builds a focused review table for old pinned Заметки/Заготовки/Полезное material and performs no transfer.
-  apply-pinned-migration reads user_comment decisions from that table: archive skips, publish posts edited Useful material, target topic names migrate there.
+  apply-pinned-migration reads user decisions/comments from pinned or audit CSVs: archive skips, publish posts edited Useful material, target topic names migrate there; multiple CSVs are deduped in one run.
   bootstrap-topics creates only missing target forum topics and writes an env-style ID file.
   seed-topic-pins sends human-friendly pin draft messages into Workspace and/or Control topics.
   reset-topic-pins unpins each configured forum topic, sends and pins the clean main message, then sends command help only in command topics.

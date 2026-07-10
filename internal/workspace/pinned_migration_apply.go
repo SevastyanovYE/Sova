@@ -7,6 +7,7 @@ import (
 	"html"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -51,12 +52,24 @@ type pinnedMigrationReviewRow struct {
 	Reason               string
 	NeedsUserReview      string
 	ReviewStatus         string
+	UserDecision         string
 	UserComment          string
 }
 
 type pinnedMigrationDecision struct {
-	Action string
-	Target string
+	Action       string
+	Target       string
+	SourceIDs    []int
+	AppendTags   []string
+	TextPrefix   string
+	Note         string
+	UseLinkedIDs bool
+}
+
+type pinnedMigrationDestination struct {
+	Client  *nest.Client
+	ChatID  int64
+	TopicID int
 }
 
 type pinnedMigrationApplyItem struct {
@@ -95,7 +108,8 @@ func ApplyPinnedMigrationReview(ctx context.Context, cfg config.Config, store *s
 	for _, message := range sourceMessages {
 		byID[message.MessageID] = message
 	}
-	rows, err := readPinnedMigrationReviewRows(reviewCSV)
+	reviewCSVPaths := splitReviewCSVPaths(reviewCSV)
+	rows, err := readMigrationApplyRows(reviewCSVPaths)
 	if err != nil {
 		return PinnedMigrationApplyResult{}, err
 	}
@@ -107,7 +121,6 @@ func ApplyPinnedMigrationReview(ctx context.Context, cfg config.Config, store *s
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return PinnedMigrationApplyResult{}, err
 	}
-	client := nest.New(cfg.Workspace.BotToken)
 	var items []pinnedMigrationApplyItem
 	result := PinnedMigrationApplyResult{
 		RunID:       runID,
@@ -117,6 +130,7 @@ func ApplyPinnedMigrationReview(ctx context.Context, cfg config.Config, store *s
 		Rows:        len(rows),
 		DryRun:      !opts.Execute,
 	}
+	seenTransfers := map[string]struct{}{}
 	for i, row := range rows {
 		item := pinnedMigrationApplyItem{
 			RowIndex:    i + 2,
@@ -124,7 +138,11 @@ func ApplyPinnedMigrationReview(ctx context.Context, cfg config.Config, store *s
 			ShortTitle:  row.ShortTitle,
 			UserComment: row.UserComment,
 		}
-		decision := parsePinnedMigrationDecision(row.UserComment, row.SuggestedTargetTopic)
+		decision := parsePinnedMigrationDecision(row)
+		if len(decision.SourceIDs) > 0 {
+			row.SourceMessageIDs = decision.SourceIDs
+			item.SourceIDs = decision.SourceIDs
+		}
 		item.Action = decision.Action
 		item.Target = decision.Target
 		switch decision.Action {
@@ -135,6 +153,31 @@ func ApplyPinnedMigrationReview(ctx context.Context, cfg config.Config, store *s
 			item.Status = "archived"
 			result.Archived++
 		case "migrate", "publish":
+			if decision.UseLinkedIDs {
+				containerMessages, missing := migrationSourceMessages(row.SourceMessageIDs, byID)
+				if len(missing) > 0 {
+					item.Status = "error"
+					item.Error = "missing source messages for linked ids: " + joinInts(missing, "+")
+					result.Errors++
+					break
+				}
+				linkedIDs := migrationLinkedMessageIDs(containerMessages, byID)
+				if len(linkedIDs) == 0 {
+					item.Status = "error"
+					item.Error = "no linked source messages found"
+					result.Errors++
+					break
+				}
+				row.SourceMessageIDs = linkedIDs
+				item.SourceIDs = linkedIDs
+			}
+			dedupeKey := migrationApplyDedupeKey(decision.Action, decision.Target, row.SourceMessageIDs)
+			if _, ok := seenTransfers[dedupeKey]; ok {
+				item.Status = "duplicate_skipped"
+				result.Archived++
+				break
+			}
+			seenTransfers[dedupeKey] = struct{}{}
 			messages, missing := migrationSourceMessages(row.SourceMessageIDs, byID)
 			if len(missing) > 0 {
 				item.Status = "error"
@@ -147,7 +190,7 @@ func ApplyPinnedMigrationReview(ctx context.Context, cfg config.Config, store *s
 				result.Planned++
 				break
 			}
-			links, err := executePinnedMigrationItem(ctx, cfg, store, client, row, decision, messages, now)
+			links, err := executePinnedMigrationItem(ctx, cfg, store, row, decision, messages, now)
 			if err != nil {
 				item.Status = "error"
 				item.Error = err.Error()
@@ -173,13 +216,42 @@ func ApplyPinnedMigrationReview(ctx context.Context, cfg config.Config, store *s
 	return result, nil
 }
 
-func readPinnedMigrationReviewRows(path string) ([]pinnedMigrationReviewRow, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open review csv %s: %w", path, err)
+func splitReviewCSVPaths(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\t'
+	})
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			out = append(out, field)
+		}
 	}
-	defer file.Close()
-	reader := csv.NewReader(file)
+	return out
+}
+
+func readMigrationApplyRows(paths []string) ([]pinnedMigrationReviewRow, error) {
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("--review-csv is required")
+	}
+	var out []pinnedMigrationReviewRow
+	for _, path := range paths {
+		rows, err := readMigrationApplyRowsFromCSV(path)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
+func readMigrationApplyRowsFromCSV(path string) ([]pinnedMigrationReviewRow, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read review csv %s: %w", path, err)
+	}
+	reader := csv.NewReader(strings.NewReader(string(data)))
+	reader.Comma = detectReviewCSVDelimiter(string(data))
 	reader.FieldsPerRecord = -1
 	rawRows, err := reader.ReadAll()
 	if err != nil {
@@ -192,14 +264,22 @@ func readPinnedMigrationReviewRows(path string) ([]pinnedMigrationReviewRow, err
 	for i, name := range rawRows[0] {
 		header[strings.TrimSpace(name)] = i
 	}
-	required := []string{"legacy_topic", "source_message_link", "source_message_ids", "cluster_id", "short_title", "short_summary", "detected_type", "suggested_target_topic", "confidence", "reason", "needs_user_review", "review_status", "user_comment"}
-	for _, name := range required {
-		if _, ok := header[name]; !ok {
-			return nil, fmt.Errorf("review csv %s is missing column %q", path, name)
-		}
+	if _, ok := header["source_message_ids"]; ok {
+		return readPinnedMigrationApplyRows(path, rawRows[1:], header)
 	}
-	rows := make([]pinnedMigrationReviewRow, 0, len(rawRows)-1)
-	for i, raw := range rawRows[1:] {
+	if _, ok := header["message_link"]; ok {
+		return readAuditMigrationApplyRows(path, rawRows[1:], header)
+	}
+	return nil, fmt.Errorf("review csv %s has unsupported schema", path)
+}
+
+func readPinnedMigrationApplyRows(path string, rawRows [][]string, header map[string]int) ([]pinnedMigrationReviewRow, error) {
+	required := []string{"legacy_topic", "source_message_link", "source_message_ids", "cluster_id", "short_title", "short_summary", "detected_type", "suggested_target_topic", "confidence", "reason", "needs_user_review", "review_status", "user_comment"}
+	if err := requireCSVColumns(path, header, required); err != nil {
+		return nil, err
+	}
+	rows := make([]pinnedMigrationReviewRow, 0, len(rawRows))
+	for i, raw := range rawRows {
 		row := pinnedMigrationReviewRow{
 			LegacyTopic:          csvRowValue(raw, header, "legacy_topic"),
 			SourceMessageLink:    csvRowValue(raw, header, "source_message_link"),
@@ -223,6 +303,51 @@ func readPinnedMigrationReviewRows(path string) ([]pinnedMigrationReviewRow, err
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+func readAuditMigrationApplyRows(path string, rawRows [][]string, header map[string]int) ([]pinnedMigrationReviewRow, error) {
+	required := []string{"source_topic", "message_link", "short_summary", "detected_type", "confidence", "reason", "user_decision", "user_comment"}
+	if err := requireCSVColumns(path, header, required); err != nil {
+		return nil, err
+	}
+	rows := make([]pinnedMigrationReviewRow, 0, len(rawRows))
+	for i, raw := range rawRows {
+		link := csvRowValue(raw, header, "message_link")
+		messageID, ok := telegramLinkLastMessageID(link)
+		if !ok {
+			return nil, fmt.Errorf("review csv row %d has invalid message_link %q", i+2, link)
+		}
+		userDecision := strings.ToLower(csvRowValue(raw, header, "user_decision"))
+		row := pinnedMigrationReviewRow{
+			LegacyTopic:          csvRowValue(raw, header, "source_topic"),
+			SourceMessageLink:    link,
+			SourceMessageIDsRaw:  strconv.Itoa(messageID),
+			SourceMessageIDs:     []int{messageID},
+			ClusterID:            "audit-" + strconv.Itoa(messageID),
+			ShortTitle:           cleanMigrationTitle(csvRowValue(raw, header, "short_summary")),
+			ShortSummary:         csvRowValue(raw, header, "short_summary"),
+			DetectedType:         csvRowValue(raw, header, "detected_type"),
+			SuggestedTargetTopic: auditApplySuggestedTarget(raw, header),
+			Confidence:           csvRowValue(raw, header, "confidence"),
+			Reason:               csvRowValue(raw, header, "reason"),
+			UserDecision:         userDecision,
+			UserComment:          csvRowValue(raw, header, "user_comment"),
+		}
+		if row.UserDecision == "" && row.UserComment == "" {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+func requireCSVColumns(path string, header map[string]int, required []string) error {
+	for _, name := range required {
+		if _, ok := header[name]; !ok {
+			return fmt.Errorf("review csv %s is missing column %q", path, name)
+		}
+	}
+	return nil
 }
 
 func csvRowValue(row []string, header map[string]int, name string) string {
@@ -264,27 +389,87 @@ func parseMigrationSourceIDs(raw string) ([]int, error) {
 	return out, nil
 }
 
-func parsePinnedMigrationDecision(comment, suggested string) pinnedMigrationDecision {
-	comment = strings.TrimSpace(comment)
-	if comment == "" {
-		return pinnedMigrationDecision{Action: "pending", Target: strings.TrimSpace(suggested)}
+func auditApplySuggestedTarget(raw []string, header map[string]int) string {
+	target := csvRowValue(raw, header, "target")
+	if target == "" {
+		target = csvRowValue(raw, header, "suggested_target")
 	}
+	if target == "" || target == "Review" {
+		target = targetFromDetectedType(csvRowValue(raw, header, "detected_type"))
+	}
+	return target
+}
+
+func targetFromDetectedType(detectedType string) string {
+	switch detectedType {
+	case TypeTask, TypeDeferredTask:
+		return "Задачи"
+	case TypeTemplateDocument:
+		return "Заготовки"
+	case TypeCollectionItem:
+		return "Коллекции"
+	case TypeUsefulMaterial:
+		return "Полезное"
+	case TypeExperience:
+		return "Опыт"
+	default:
+		return "Заметки"
+	}
+}
+
+func parsePinnedMigrationDecision(row pinnedMigrationReviewRow) pinnedMigrationDecision {
+	userDecision := strings.ToLower(strings.TrimSpace(row.UserDecision))
+	comment := strings.TrimSpace(row.UserComment)
 	normalized := strings.ToLower(comment)
 	normalized = strings.TrimSpace(strings.TrimPrefix(normalized, "decision:"))
 	normalized = strings.TrimSpace(strings.TrimPrefix(normalized, "target:"))
 	normalized = strings.TrimSpace(strings.TrimPrefix(normalized, "topic:"))
-	if strings.Contains(normalized, "archive") || strings.Contains(normalized, "архив") || strings.Contains(normalized, "skip") {
+
+	if migrationCommentNeedsLinkedIDs(normalized) {
+		target := strings.TrimSpace(row.SuggestedTargetTopic)
+		if strings.Contains(normalized, "промпт") || strings.Contains(normalized, "заготов") {
+			target = "Заготовки"
+		}
+		if target == "" || target == "Review" {
+			target = "Заметки"
+		}
+		return pinnedMigrationDecision{Action: "migrate", Target: target, UseLinkedIDs: true, Note: comment}
+	}
+	if userDecision == "archive" || userDecision == "trash" || userDecision == "later" ||
+		strings.Contains(normalized, "archive") || strings.Contains(normalized, "архив") || strings.Contains(normalized, "skip") {
 		return pinnedMigrationDecision{Action: "archive", Target: "Legacy archive"}
 	}
-	if strings.Contains(normalized, "publish") || strings.Contains(normalized, "опубликов") {
-		return pinnedMigrationDecision{Action: "publish", Target: "Полезное"}
+	if userDecision == "study" || normalized == "study" {
+		return pinnedMigrationDecision{Action: "migrate", Target: "Study branch"}
+	}
+	if userDecision == "control" || normalized == "control" {
+		return pinnedMigrationDecision{Action: "migrate", Target: "Sova.Control"}
+	}
+	if userDecision == "collection" {
+		return pinnedMigrationDecision{Action: "migrate", Target: "Коллекции"}
+	}
+	if userDecision == "take" && strings.Contains(normalized, "полезн") {
+		return pinnedMigrationDecision{Action: "publish", Target: "Полезное", AppendTags: migrationTagsFromComment(comment)}
+	}
+	if strings.Contains(normalized, "publish") || strings.Contains(normalized, "опубликов") ||
+		normalized == "полезное" || strings.HasPrefix(normalized, "в полезн") {
+		return pinnedMigrationDecision{Action: "publish", Target: "Полезное", SourceIDs: migrationBundleIDs(comment)}
 	}
 	for _, target := range []string{"Inbox", "Задачи", "Заметки", "Опыт", "Полезное", "Заготовки", "Коллекции"} {
 		if commentMatchesTopic(normalized, target) {
-			return pinnedMigrationDecision{Action: "migrate", Target: target}
+			return pinnedMigrationDecision{Action: "migrate", Target: target, SourceIDs: migrationBundleIDs(comment), AppendTags: migrationTagsFromComment(comment)}
 		}
 	}
-	return pinnedMigrationDecision{Action: "unknown", Target: strings.TrimSpace(suggested)}
+	if bundle := migrationBundleIDs(comment); len(bundle) > 0 {
+		return pinnedMigrationDecision{Action: "migrate", Target: strings.TrimSpace(row.SuggestedTargetTopic), SourceIDs: bundle}
+	}
+	if userDecision == "take" {
+		return pinnedMigrationDecision{Action: "migrate", Target: strings.TrimSpace(row.SuggestedTargetTopic), AppendTags: migrationTagsFromComment(comment)}
+	}
+	if comment != "" {
+		return pinnedMigrationDecision{Action: "migrate", Target: strings.TrimSpace(row.SuggestedTargetTopic), TextPrefix: migrationTextPrefixFromComment(comment), Note: comment}
+	}
+	return pinnedMigrationDecision{Action: "pending", Target: strings.TrimSpace(row.SuggestedTargetTopic)}
 }
 
 func commentMatchesTopic(normalized, topic string) bool {
@@ -306,6 +491,112 @@ func commentMatchesTopic(normalized, topic string) bool {
 	return false
 }
 
+func migrationCommentNeedsLinkedIDs(normalized string) bool {
+	if normalized == "" {
+		return false
+	}
+	return strings.Contains(normalized, "ссыл") &&
+		(strings.Contains(normalized, "само сообщение") || strings.Contains(normalized, "ссылает") || strings.Contains(normalized, "ссылается"))
+}
+
+func migrationBundleIDs(comment string) []int {
+	comment = strings.TrimSpace(comment)
+	if comment == "" {
+		return nil
+	}
+	for _, r := range comment {
+		if !(r >= '0' && r <= '9') && r != '+' && r != ' ' {
+			return nil
+		}
+	}
+	ids, err := parseMigrationSourceIDs(comment)
+	if err != nil || len(ids) <= 1 {
+		return nil
+	}
+	return ids
+}
+
+func migrationTagsFromComment(comment string) []string {
+	lower := strings.ToLower(comment)
+	var tags []string
+	for _, tag := range []string{"#мюсли", "#идеи", "#опыт"} {
+		if strings.Contains(lower, tag) {
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
+func migrationTextPrefixFromComment(comment string) string {
+	lower := strings.ToLower(comment)
+	if !strings.Contains(lower, "начинай со слов") {
+		return ""
+	}
+	for _, pair := range [][2]string{{"“", "”"}, {"\"", "\""}, {"«", "»"}} {
+		start := strings.Index(comment, pair[0])
+		if start < 0 {
+			continue
+		}
+		rest := comment[start+len(pair[0]):]
+		end := strings.Index(rest, pair[1])
+		if end >= 0 {
+			return strings.TrimSpace(rest[:end])
+		}
+	}
+	return ""
+}
+
+func telegramLinkLastMessageID(link string) (int, bool) {
+	link = cleanTelegramArg(link)
+	parts := strings.Split(link, "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		id, err := strconv.Atoi(parts[i])
+		if err == nil && id > 0 {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
+func migrationApplyDedupeKey(action, target string, ids []int) string {
+	return action + "|" + target + "|" + joinInts(ids, "+")
+}
+
+var telegramLinkPattern = regexp.MustCompile(`https?://t\.me/[^\s"')<>]+`)
+var telegramRetryAfterPattern = regexp.MustCompile(`retry after (\d+)`)
+
+func migrationLinkedMessageIDs(messages []sqlitestore.WorkspaceSourceMessage, byID map[int]sqlitestore.WorkspaceSourceMessage) []int {
+	self := map[int]struct{}{}
+	var corpus strings.Builder
+	for _, message := range messages {
+		self[message.MessageID] = struct{}{}
+		corpus.WriteString(message.Text)
+		corpus.WriteString("\n")
+		corpus.WriteString(message.RawJSON)
+		corpus.WriteString("\n")
+	}
+	seen := map[int]struct{}{}
+	var out []int
+	for _, link := range telegramLinkPattern.FindAllString(corpus.String(), -1) {
+		id, ok := telegramLinkLastMessageID(link)
+		if !ok {
+			continue
+		}
+		if _, ok := self[id]; ok {
+			continue
+		}
+		if _, ok := byID[id]; !ok {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
 func migrationSourceMessages(ids []int, byID map[int]sqlitestore.WorkspaceSourceMessage) ([]sqlitestore.WorkspaceSourceMessage, []int) {
 	messages := make([]sqlitestore.WorkspaceSourceMessage, 0, len(ids))
 	var missing []int
@@ -320,19 +611,51 @@ func migrationSourceMessages(ids []int, byID map[int]sqlitestore.WorkspaceSource
 	return messages, missing
 }
 
-func executePinnedMigrationItem(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, row pinnedMigrationReviewRow, decision pinnedMigrationDecision, messages []sqlitestore.WorkspaceSourceMessage, now time.Time) ([]string, error) {
-	topicID, err := pinnedMigrationTargetTopicID(cfg, decision.Target)
+func executePinnedMigrationItem(ctx context.Context, cfg config.Config, store *sqlitestore.Store, row pinnedMigrationReviewRow, decision pinnedMigrationDecision, messages []sqlitestore.WorkspaceSourceMessage, now time.Time) ([]string, error) {
+	dest, err := pinnedMigrationDestinationFor(cfg, decision)
 	if err != nil {
 		return nil, err
 	}
 	var derivedLinks []string
 	var firstTargetMessageID int
 	for i, message := range messages {
+		existing, err := existingPinnedMigrationDerivedLinks(ctx, store, message, decision, row, i+1)
+		if err != nil {
+			return derivedLinks, err
+		}
+		if len(existing) > 0 {
+			if firstTargetMessageID == 0 {
+				firstTargetMessageID = existing[0].MessageID
+			}
+			for _, link := range existing {
+				derivedLinks = append(derivedLinks, workspaceMessageLink(link.ChatID, link.TopicID, link.MessageID))
+			}
+			continue
+		}
+		if shouldCopyPinnedMigrationMessage(decision) {
+			sent, err := copyPinnedMigrationMessage(ctx, dest.Client, nest.CopyMessageRequest{
+				ChatID:          dest.ChatID,
+				MessageThreadID: dest.TopicID,
+				FromChatID:      botAPISupergroupChatID(message.ChatID),
+				MessageID:       message.MessageID,
+			})
+			if err == nil && sent.MessageID > 0 {
+				if firstTargetMessageID == 0 {
+					firstTargetMessageID = sent.MessageID
+				}
+				link := workspaceMessageLink(dest.ChatID, dest.TopicID, sent.MessageID)
+				derivedLinks = append(derivedLinks, link)
+				if err := upsertPinnedMigrationDerivedMessage(ctx, store, message, decision, row, dest, sent.MessageID, now, i+1, 1); err != nil {
+					return derivedLinks, err
+				}
+				continue
+			}
+		}
 		texts := renderPinnedMigrationTelegramMessages(row, decision, message, i+1, len(messages))
 		for j, text := range texts {
-			sent, err := client.SendMessageResult(ctx, nest.SendMessageRequest{
-				ChatID:          cfg.Workspace.ChatID,
-				MessageThreadID: topicID,
+			sent, err := sendPinnedMigrationMessage(ctx, dest.Client, nest.SendMessageRequest{
+				ChatID:          dest.ChatID,
+				MessageThreadID: dest.TopicID,
 				Text:            text,
 				ParseMode:       "HTML",
 			})
@@ -342,34 +665,185 @@ func executePinnedMigrationItem(ctx context.Context, cfg config.Config, store *s
 			if firstTargetMessageID == 0 {
 				firstTargetMessageID = sent.MessageID
 			}
-			link := workspaceMessageLink(cfg.Workspace.ChatID, topicID, sent.MessageID)
+			link := workspaceMessageLink(dest.ChatID, dest.TopicID, sent.MessageID)
 			derivedLinks = append(derivedLinks, link)
-			status := "active"
-			if decision.Action == "publish" || decision.Target == "Полезное" {
-				status = "published"
-			}
-			if err := store.UpsertWorkspaceDerivedMessage(ctx, sqlitestore.WorkspaceDerivedMessage{
-				SourceChatID:     message.ChatID,
-				SourceMessageID:  message.MessageID,
-				DerivedType:      fmt.Sprintf("legacy_migration_%s_row_%s_part_%d_msg_%d", decision.Action, row.ClusterID, i+1, j+1),
-				DerivedChatID:    cfg.Workspace.ChatID,
-				DerivedTopicID:   topicID,
-				DerivedMessageID: sent.MessageID,
-				Status:           status,
-			}, now); err != nil {
+			if err := upsertPinnedMigrationDerivedMessage(ctx, store, message, decision, row, dest, sent.MessageID, now, i+1, j+1); err != nil {
 				return derivedLinks, err
 			}
 		}
 	}
-	if decision.Action == "publish" && firstTargetMessageID > 0 && len(messages) > 0 {
+	if (decision.Action == "publish" || decision.Target == "Полезное") && firstTargetMessageID > 0 && len(messages) > 0 {
 		if err := createPublishedLegacyDocument(ctx, cfg, store, row, messages, firstTargetMessageID, now); err != nil {
 			return derivedLinks, err
 		}
-		if err := updateUsefulIndex(ctx, cfg, store, client, now); err != nil {
+		if err := updateUsefulIndex(ctx, cfg, store, dest.Client, now); err != nil {
 			return derivedLinks, err
 		}
 	}
 	return derivedLinks, nil
+}
+
+type pinnedMigrationDerivedLink struct {
+	ChatID    int64
+	TopicID   int
+	MessageID int
+}
+
+func existingPinnedMigrationDerivedLinks(ctx context.Context, store *sqlitestore.Store, source sqlitestore.WorkspaceSourceMessage, decision pinnedMigrationDecision, row pinnedMigrationReviewRow, sourcePart int) ([]pinnedMigrationDerivedLink, error) {
+	prefix := fmt.Sprintf("legacy_migration_%s_row_%s_part_%d_", decision.Action, row.ClusterID, sourcePart)
+	statuses := []string{"active", "published"}
+	records, err := store.WorkspaceDerivedMessagesBySource(ctx, source.ChatID, source.MessageID, prefix, statuses, 50)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]pinnedMigrationDerivedLink, 0, len(records))
+	for _, record := range records {
+		if record.DerivedMessageID == 0 || record.DerivedChatID == 0 {
+			continue
+		}
+		out = append(out, pinnedMigrationDerivedLink{
+			ChatID:    record.DerivedChatID,
+			TopicID:   record.DerivedTopicID,
+			MessageID: record.DerivedMessageID,
+		})
+	}
+	return out, nil
+}
+
+func copyPinnedMigrationMessage(ctx context.Context, client *nest.Client, request nest.CopyMessageRequest) (nest.Message, error) {
+	var lastErr error
+	for attempt := 0; attempt < 6; attempt++ {
+		sent, err := client.CopyMessage(ctx, request)
+		if err == nil {
+			return sent, nil
+		}
+		lastErr = err
+		delay, ok := telegramMigrationRetryDelay(err)
+		if !ok {
+			return nest.Message{}, err
+		}
+		if err := sleepContext(ctx, delay); err != nil {
+			return nest.Message{}, err
+		}
+	}
+	return nest.Message{}, lastErr
+}
+
+func sendPinnedMigrationMessage(ctx context.Context, client *nest.Client, request nest.SendMessageRequest) (nest.Message, error) {
+	var lastErr error
+	for attempt := 0; attempt < 6; attempt++ {
+		sent, err := client.SendMessageResult(ctx, request)
+		if err == nil {
+			return sent, nil
+		}
+		lastErr = err
+		delay, ok := telegramMigrationRetryDelay(err)
+		if !ok {
+			return nest.Message{}, err
+		}
+		if err := sleepContext(ctx, delay); err != nil {
+			return nest.Message{}, err
+		}
+	}
+	return nest.Message{}, lastErr
+}
+
+func telegramMigrationRetryDelay(err error) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	text := err.Error()
+	if match := telegramRetryAfterPattern.FindStringSubmatch(text); len(match) == 2 {
+		seconds, parseErr := strconv.Atoi(match[1])
+		if parseErr == nil && seconds > 0 {
+			return time.Duration(seconds+1) * time.Second, true
+		}
+	}
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "tls handshake timeout") || strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "connection reset") || strings.Contains(lower, "temporary") {
+		return 3 * time.Second, true
+	}
+	return 0, false
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func pinnedMigrationDestinationFor(cfg config.Config, decision pinnedMigrationDecision) (pinnedMigrationDestination, error) {
+	target := strings.ToLower(strings.TrimSpace(decision.Target))
+	switch target {
+	case "sova.control", "control":
+		if !cfg.ControlConfigured() {
+			return pinnedMigrationDestination{}, fmt.Errorf("Sova.Control is not fully configured")
+		}
+		return pinnedMigrationDestination{
+			Client:  nest.New(cfg.Control.BotToken),
+			ChatID:  cfg.Control.ChatID,
+			TopicID: cfg.Control.Topics.Workspace,
+		}, nil
+	case "study branch", "study":
+		if !cfg.ControlConfigured() {
+			return pinnedMigrationDestination{}, fmt.Errorf("Sova.Control is not fully configured for study branch fallback")
+		}
+		return pinnedMigrationDestination{
+			Client:  nest.New(cfg.Control.BotToken),
+			ChatID:  cfg.Control.ChatID,
+			TopicID: cfg.Control.Topics.Review,
+		}, nil
+	default:
+		topicID, err := pinnedMigrationTargetTopicID(cfg, decision.Target)
+		if err != nil {
+			return pinnedMigrationDestination{}, err
+		}
+		return pinnedMigrationDestination{
+			Client:  nest.New(cfg.Workspace.BotToken),
+			ChatID:  cfg.Workspace.ChatID,
+			TopicID: topicID,
+		}, nil
+	}
+}
+
+func shouldCopyPinnedMigrationMessage(decision pinnedMigrationDecision) bool {
+	return decision.Action == "migrate" && strings.TrimSpace(decision.TextPrefix) == "" && len(decision.AppendTags) == 0
+}
+
+func upsertPinnedMigrationDerivedMessage(ctx context.Context, store *sqlitestore.Store, source sqlitestore.WorkspaceSourceMessage, decision pinnedMigrationDecision, row pinnedMigrationReviewRow, dest pinnedMigrationDestination, targetMessageID int, now time.Time, sourcePart, chunkPart int) error {
+	status := "active"
+	if decision.Action == "publish" || decision.Target == "Полезное" {
+		status = "published"
+	}
+	return store.UpsertWorkspaceDerivedMessage(ctx, sqlitestore.WorkspaceDerivedMessage{
+		SourceChatID:     source.ChatID,
+		SourceMessageID:  source.MessageID,
+		DerivedType:      fmt.Sprintf("legacy_migration_%s_row_%s_part_%d_msg_%d", decision.Action, row.ClusterID, sourcePart, chunkPart),
+		DerivedChatID:    dest.ChatID,
+		DerivedTopicID:   dest.TopicID,
+		DerivedMessageID: targetMessageID,
+		Status:           status,
+	}, now)
+}
+
+func botAPISupergroupChatID(chatID int64) int64 {
+	if chatID < 0 || chatID == 0 {
+		return chatID
+	}
+	converted, err := strconv.ParseInt("-100"+strconv.FormatInt(chatID, 10), 10, 64)
+	if err != nil {
+		return -1000000000000 - chatID
+	}
+	return converted
 }
 
 func pinnedMigrationTargetTopicID(cfg config.Config, target string) (int, error) {
@@ -404,6 +878,12 @@ func renderPinnedMigrationTelegramMessages(row pinnedMigrationReviewRow, decisio
 	body := strings.TrimSpace(message.Text)
 	if body == "" && strings.TrimSpace(message.MediaType) != "" {
 		body = "[" + strings.TrimSpace(message.MediaType) + "]"
+	}
+	if prefix := strings.TrimSpace(decision.TextPrefix); prefix != "" && !strings.HasPrefix(strings.TrimSpace(body), prefix) {
+		body = strings.TrimSpace(prefix + "\n\n" + body)
+	}
+	if len(decision.AppendTags) > 0 {
+		body = appendMigrationTags(body, decision.AppendTags)
 	}
 	if decision.Action == "publish" {
 		body = formatLegacyPublishBody(title, body)
@@ -440,6 +920,26 @@ func renderPinnedMigrationTelegramMessages(row pinnedMigrationReviewRow, decisio
 		out = append(out, "<b>"+html.EscapeString(title)+"</b>\n\n<blockquote>Источник: "+html.EscapeString(sourceLink)+"</blockquote>")
 	}
 	return out
+}
+
+func appendMigrationTags(body string, tags []string) string {
+	body = strings.TrimSpace(body)
+	var missing []string
+	lower := strings.ToLower(body)
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || strings.Contains(lower, strings.ToLower(tag)) {
+			continue
+		}
+		missing = append(missing, tag)
+	}
+	if len(missing) == 0 {
+		return body
+	}
+	if body == "" {
+		return strings.Join(missing, " ")
+	}
+	return body + "\n\n" + strings.Join(missing, " ")
 }
 
 func formatLegacyPublishBody(title, body string) string {
@@ -484,6 +984,11 @@ func nonEmptyStrings(values []string) []string {
 
 func createPublishedLegacyDocument(ctx context.Context, cfg config.Config, store *sqlitestore.Store, row pinnedMigrationReviewRow, messages []sqlitestore.WorkspaceSourceMessage, targetMessageID int, now time.Time) error {
 	first := messages[0]
+	if ok, err := publishedLegacyDocumentExists(ctx, cfg, store, first); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
 	title := cleanMigrationTitle(row.ShortTitle)
 	if title == "" {
 		title = cleanMigrationTitle(firstNonEmptyLine(first.Text))
@@ -527,6 +1032,24 @@ func createPublishedLegacyDocument(ctx context.Context, cfg config.Config, store
 		}
 	}
 	return nil
+}
+
+func publishedLegacyDocumentExists(ctx context.Context, cfg config.Config, store *sqlitestore.Store, first sqlitestore.WorkspaceSourceMessage) (bool, error) {
+	parts, err := store.WorkspaceDocumentPartsBySource(ctx, first.ChatID, first.MessageID)
+	if err != nil {
+		return false, err
+	}
+	for _, part := range parts {
+		doc, err := store.WorkspaceDocumentByID(ctx, part.DocumentID)
+		if err != nil {
+			return false, err
+		}
+		if doc.Type == "note" && doc.Status == "published" &&
+			doc.TargetChatID == cfg.Workspace.ChatID && doc.TargetTopicID == cfg.Workspace.Topics.Useful {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func writePinnedMigrationApplyCSV(path string, items []pinnedMigrationApplyItem) error {
