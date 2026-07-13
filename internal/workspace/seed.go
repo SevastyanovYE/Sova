@@ -159,7 +159,7 @@ func SeedWorkspaceCommandHelp(ctx context.Context, cfg config.Config, opts SeedT
 
 func WorkspaceCommandHelpDrafts(cfg config.Config) []SeedTopicPinItem {
 	return []SeedTopicPinItem{
-		{Topic: "Inbox", TopicID: cfg.Workspace.Topics.Inbox, Text: InboxHelpMessageText() + "\n\n" + ClusterHelpMessageText()},
+		{Topic: "Inbox", TopicID: cfg.Workspace.Topics.Inbox, Text: InboxHelpMessageText() + "\n\n" + UsefulHelpMessageText() + "\n\n" + ClusterHelpMessageText()},
 		{Topic: "Задачи", TopicID: cfg.Workspace.Topics.Tasks, Text: TaskHelpMessageText()},
 		{Topic: "Заметки", TopicID: cfg.Workspace.Topics.Notes, Text: WorkspaceDocumentHelpText("doc")},
 		{Topic: "Заготовки", TopicID: cfg.Workspace.Topics.Templates, Text: WorkspaceDocumentHelpText("template")},

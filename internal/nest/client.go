@@ -233,6 +233,7 @@ func (c *Client) SendMessageResult(ctx context.Context, request SendMessageReque
 		"message_thread_id": request.MessageThreadID,
 		"text":              request.Text,
 	}
+	applyMessagePreviewPolicy(payload)
 	if strings.TrimSpace(request.ParseMode) != "" {
 		payload["parse_mode"] = request.ParseMode
 	}
@@ -330,6 +331,7 @@ func (c *Client) EditMessageText(ctx context.Context, request EditMessageTextReq
 		"message_id": request.MessageID,
 		"text":       request.Text,
 	}
+	applyMessagePreviewPolicy(payload)
 	if strings.TrimSpace(request.ParseMode) != "" {
 		payload["parse_mode"] = request.ParseMode
 	}
@@ -347,6 +349,13 @@ func (c *Client) EditMessageText(ctx context.Context, request EditMessageTextReq
 		return fmt.Errorf("Bot API editMessageText failed: %s", response.Description)
 	}
 	return nil
+}
+
+func applyMessagePreviewPolicy(payload map[string]any) {
+	if payload == nil {
+		return
+	}
+	payload["disable_web_page_preview"] = true
 }
 
 func (c *Client) PinChatMessage(ctx context.Context, request PinChatMessageRequest) error {

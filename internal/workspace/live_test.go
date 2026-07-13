@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -163,6 +164,9 @@ func TestPublishCallbacksAndMockPreview(t *testing.T) {
 	if len(result.Messages) != 1 || !strings.Contains(result.Messages[0], "<b>Тест</b>") || !strings.Contains(result.Messages[0], "Продолжение") {
 		t.Fatalf("preview = %+v", result.Messages)
 	}
+	if result.Model != "mock" {
+		t.Fatalf("model = %q", result.Model)
+	}
 }
 
 func TestDocumentInputCallbacks(t *testing.T) {
@@ -257,6 +261,58 @@ func TestDocumentCommandParsers(t *testing.T) {
 	ref, title, category = parseCollectionAddBody("Любимое | Ссылка")
 	if ref != "Любимое" || title != "Ссылка" || category != "" {
 		t.Fatalf("collection ref=%q title=%q category=%q", ref, title, category)
+	}
+}
+
+func TestResolveUsefulDocumentRef(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	cfg := testWorkspaceLiveConfig()
+	publishedAt := now
+	doc, err := store.CreateWorkspaceDocument(ctx, sqlitestore.WorkspaceDocument{
+		Type:            "note",
+		Status:          "published",
+		Title:           "Японский",
+		TargetChatID:    cfg.Workspace.ChatID,
+		TargetTopicID:   cfg.Workspace.Topics.Useful,
+		TargetMessageID: 874,
+		PublishedAt:     &publishedAt,
+	}, sqlitestore.WorkspaceDocumentPart{Title: "Японский", SourceChatID: cfg.Workspace.ChatID, SourceMessageID: 12, SourceLink: "https://t.me/c/4301779750/12/12", Text: "text"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byLink, err := resolveUsefulDocumentRef(ctx, cfg, store, "https://t.me/c/4301779750/18/874")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byLink.ID != doc.ID {
+		t.Fatalf("by link = %+v, want doc #%d", byLink, doc.ID)
+	}
+	byTitle, err := resolveUsefulDocumentRef(ctx, cfg, store, "Японский")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byTitle.ID != doc.ID {
+		t.Fatalf("by title = %+v, want doc #%d", byTitle, doc.ID)
+	}
+	active, err := store.CreateWorkspaceDocument(ctx, sqlitestore.WorkspaceDocument{
+		Type:            "note",
+		Status:          "active",
+		Title:           "Черновик",
+		TargetChatID:    cfg.Workspace.ChatID,
+		TargetTopicID:   cfg.Workspace.Topics.Useful,
+		TargetMessageID: 875,
+	}, sqlitestore.WorkspaceDocumentPart{Title: "Черновик", SourceChatID: cfg.Workspace.ChatID, SourceMessageID: 13, Text: "draft"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := resolveUsefulDocumentRef(ctx, cfg, store, strconv.FormatInt(active.ID, 10)); err == nil || resolved.ID == active.ID {
+		t.Fatalf("active target doc resolved as useful: doc=%+v err=%v", resolved, err)
 	}
 }
 

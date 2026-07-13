@@ -35,6 +35,7 @@ type NotePublishRequest struct {
 
 type NotePublishResult struct {
 	Messages []string
+	Model    string
 }
 
 type mockNotePublishProvider struct{}
@@ -159,6 +160,7 @@ func (provider geminiNotePublishProvider) FormatNote(ctx context.Context, reques
 	for i, model := range models {
 		result, err := provider.formatNoteWithModel(ctx, client, body, model)
 		if err == nil {
+			result.Model = model
 			return result, nil
 		}
 		lastErr = err
@@ -222,7 +224,7 @@ func (provider geminiNotePublishProvider) formatNoteWithModel(ctx context.Contex
 	if len(messages) == 0 {
 		return NotePublishResult{}, fmt.Errorf("gemini returned no publish messages")
 	}
-	return NotePublishResult{Messages: messages}, nil
+	return NotePublishResult{Messages: messages, Model: model}, nil
 }
 
 func (provider geminiNotePublishProvider) candidateModels() []string {
@@ -473,5 +475,5 @@ func (mockNotePublishProvider) FormatNote(ctx context.Context, request NotePubli
 	if strings.TrimSpace(request.Revision) != "" {
 		b.WriteString("<blockquote>Mock preview пересобран с учётом правки, без добавления новых фактов.</blockquote>")
 	}
-	return NotePublishResult{Messages: []string{strings.TrimSpace(b.String())}}, nil
+	return NotePublishResult{Messages: []string{strings.TrimSpace(b.String())}, Model: "mock"}, nil
 }

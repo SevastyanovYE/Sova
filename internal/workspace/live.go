@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"html"
@@ -50,6 +51,7 @@ type publishPreviewDraft struct {
 	PreviewMessageIDs []int
 	PreviewTexts      []string
 	Revision          string
+	Model             string
 }
 
 type SeedDocumentIndexesOptions struct {
@@ -152,7 +154,7 @@ func handleWorkspaceMessage(ctx context.Context, cfg config.Config, store *sqlit
 		handleClusterCommand(ctx, cfg, store, client, message, threadID, rest)
 		return
 	}
-	if !edited && (command == "note" || command == "doc" || command == "template" || command == "collection") {
+	if !edited && (command == "note" || command == "doc" || command == "template" || command == "collection" || command == "useful") {
 		handleWorkspaceDocumentCommand(ctx, cfg, store, client, pendingInputs, publishDrafts, message, threadID, command, rest)
 		return
 	}
@@ -635,6 +637,8 @@ func handleWorkspaceDocumentCommand(ctx context.Context, cfg config.Config, stor
 		err = handleTemplateCommand(ctx, cfg, store, client, pendingInputs, message, threadID, action, body, now)
 	case "collection":
 		err = handleCollectionCommand(ctx, cfg, store, client, pendingInputs, message, threadID, action, body, now)
+	case "useful":
+		err = handleUsefulCommand(ctx, cfg, store, client, message, threadID, action, body, now)
 	}
 	if err != nil {
 		sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось выполнить /"+command, err)
@@ -994,6 +998,85 @@ func handleCollectionCommand(ctx context.Context, cfg config.Config, store *sqli
 		return sendWorkspaceDocumentShow(ctx, cfg, store, client, threadID, "collection", strings.TrimSpace(body), now)
 	default:
 		sendWorkspaceDocumentHelp(ctx, client, cfg.Workspace.ChatID, threadID, "collection")
+	}
+	return nil
+}
+
+func handleUsefulCommand(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, message nest.Message, threadID int, action, body string, now time.Time) error {
+	switch action {
+	case "help":
+		sendWorkspaceDocumentHelp(ctx, client, cfg.Workspace.ChatID, threadID, "useful")
+	case "rename":
+		ref, title := parseTwoPartCommand(body)
+		if ref == "" || title == "" {
+			return fmt.Errorf("format: /useful rename <id|название|ссылка> | <новое название>")
+		}
+		doc, err := resolveUsefulDocumentRef(ctx, cfg, store, ref)
+		if err != nil {
+			return err
+		}
+		title = strings.TrimSpace(title)
+		if err := store.UpdateWorkspaceDocumentTitle(ctx, doc.ID, title, now); err != nil {
+			return err
+		}
+		if parts, err := store.WorkspaceDocumentParts(ctx, doc.ID); err == nil && len(parts) > 0 {
+			if err := store.UpdateWorkspaceDocumentPartTitle(ctx, parts[0].ID, title, now); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
+		if err := updateUsefulIndex(ctx, cfg, store, client, now); err != nil {
+			return err
+		}
+		return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Переименовала публикацию: <b>"+html.EscapeString(title)+"</b>.")
+	case "review", "needs-review":
+		doc, err := resolveUsefulDocumentRef(ctx, cfg, store, body)
+		if err != nil {
+			return err
+		}
+		if err := store.UpdateWorkspaceDocumentStatus(ctx, doc.ID, "needs_review", now); err != nil {
+			return err
+		}
+		if err := updateUsefulIndex(ctx, cfg, store, client, now); err != nil {
+			return err
+		}
+		return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Пометила публикацию как needing review.")
+	case "archive", "delete":
+		doc, err := resolveUsefulDocumentRef(ctx, cfg, store, body)
+		if err != nil {
+			return err
+		}
+		if err := store.UpdateWorkspaceDocumentStatus(ctx, doc.ID, "archived", now); err != nil {
+			return err
+		}
+		if err := updateUsefulIndex(ctx, cfg, store, client, now); err != nil {
+			return err
+		}
+		return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Убрала публикацию из индекса Полезного. Сообщение в topic не удаляла.")
+	case "show":
+		body = strings.TrimSpace(body)
+		if body == "" {
+			text, err := renderUsefulIndex(ctx, cfg, store)
+			if err != nil {
+				return err
+			}
+			if err := updateUsefulIndex(ctx, cfg, store, client, now); err != nil {
+				return err
+			}
+			return client.SendMessage(ctx, nest.SendMessageRequest{ChatID: cfg.Workspace.ChatID, MessageThreadID: threadID, Text: text, ParseMode: "HTML"})
+		}
+		doc, err := resolveUsefulDocumentRef(ctx, cfg, store, body)
+		if err != nil {
+			return err
+		}
+		parts, err := store.WorkspaceDocumentParts(ctx, doc.ID)
+		if err != nil {
+			return err
+		}
+		return client.SendMessage(ctx, nest.SendMessageRequest{ChatID: cfg.Workspace.ChatID, MessageThreadID: threadID, Text: formatWorkspaceDocumentSummary(doc, parts), ParseMode: "HTML"})
+	default:
+		sendWorkspaceDocumentHelp(ctx, client, cfg.Workspace.ChatID, threadID, "useful")
 	}
 	return nil
 }
@@ -1643,6 +1726,59 @@ func resolveWorkspaceDocumentRefWithStatuses(ctx context.Context, store *sqlites
 	return matches[0], nil
 }
 
+func resolveUsefulDocumentRef(ctx context.Context, cfg config.Config, store *sqlitestore.Store, ref string) (sqlitestore.WorkspaceDocument, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return sqlitestore.WorkspaceDocument{}, fmt.Errorf("format: /useful <command> <id|название|ссылка>")
+	}
+	if messageID, ok := telegramMessageIDFromArg(cfg.Workspace.ChatID, ref); ok {
+		if doc, ok, err := store.WorkspaceDocumentByTargetMessage(ctx, cfg.Workspace.ChatID, messageID); err != nil {
+			return sqlitestore.WorkspaceDocument{}, err
+		} else if ok && isUsefulDocument(doc) {
+			return doc, nil
+		}
+	}
+	if id, err := strconv.ParseInt(ref, 10, 64); err == nil && id > 0 {
+		doc, err := store.WorkspaceDocumentByID(ctx, id)
+		if err == nil {
+			if !isUsefulDocument(doc) {
+				return sqlitestore.WorkspaceDocument{}, fmt.Errorf("document #%d is %s/%s, not published useful", id, doc.Type, doc.Status)
+			}
+			return doc, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return sqlitestore.WorkspaceDocument{}, err
+		}
+		if doc, ok, err := store.WorkspaceDocumentByTargetMessage(ctx, cfg.Workspace.ChatID, int(id)); err != nil {
+			return sqlitestore.WorkspaceDocument{}, err
+		} else if ok && isUsefulDocument(doc) {
+			return doc, nil
+		}
+	}
+	docs, err := store.WorkspaceDocumentsByType(ctx, "note", []string{"published", "needs_review"}, 1000)
+	if err != nil {
+		return sqlitestore.WorkspaceDocument{}, err
+	}
+	var matches []sqlitestore.WorkspaceDocument
+	for _, doc := range docs {
+		if strings.EqualFold(strings.TrimSpace(doc.Title), ref) {
+			matches = append(matches, doc)
+		}
+	}
+	if len(matches) == 0 {
+		return sqlitestore.WorkspaceDocument{}, documentNotFoundError{DocType: "useful", Ref: ref}
+	}
+	if len(matches) > 1 {
+		return sqlitestore.WorkspaceDocument{}, documentAmbiguousError{DocType: "useful", Ref: ref, Matches: matches}
+	}
+	return matches[0], nil
+}
+
+func isUsefulDocument(doc sqlitestore.WorkspaceDocument) bool {
+	return doc.Type == "note" && (doc.Status == "published" || doc.Status == "needs_review") &&
+		doc.TargetChatID != 0 && doc.TargetMessageID != 0
+}
+
 func sendDocumentResolveError(ctx context.Context, client *nest.Client, chatID int64, threadID int, docType, ref string, err error) error {
 	if ambiguous, ok := err.(documentAmbiguousError); ok {
 		var b strings.Builder
@@ -2059,13 +2195,17 @@ func createPublishPreview(ctx context.Context, cfg config.Config, store *sqlites
 	if err != nil {
 		return err
 	}
+	statusID := sendPublishStatus(ctx, cfg, client, fmt.Sprintf("Собираю заметку <b>#%d</b>: %s", doc.ID, html.EscapeString(doc.Title)))
 	parts, err := store.WorkspaceDocumentParts(ctx, documentID)
 	if err != nil {
+		editPublishStatus(ctx, cfg, client, statusID, "Не смогла прочитать части заметки: <code>"+html.EscapeString(compactWorkspaceLine(err.Error(), 300))+"</code>")
 		return err
 	}
 	if len(parts) == 0 {
+		editPublishStatus(ctx, cfg, client, statusID, "Остановилась: у заметки нет частей для публикации.")
 		return fmt.Errorf("note has no parts")
 	}
+	editPublishStatus(ctx, cfg, client, statusID, fmt.Sprintf("Нашла частей: <b>%d</b>. Отправляю текст в publish formatter.", len(parts)))
 	provider := NewNotePublishProvider(cfg)
 	result, err := provider.FormatNote(ctx, NotePublishRequest{
 		Title:    doc.Title,
@@ -2073,11 +2213,14 @@ func createPublishPreview(ctx context.Context, cfg config.Config, store *sqlites
 		Revision: revision,
 	})
 	if err != nil {
+		editPublishStatus(ctx, cfg, client, statusID, "Publish formatter вернул ошибку: <code>"+html.EscapeString(compactWorkspaceLine(err.Error(), 300))+"</code>")
 		return err
 	}
 	if len(result.Messages) == 0 {
+		editPublishStatus(ctx, cfg, client, statusID, "Publish formatter вернул пустой preview.")
 		return fmt.Errorf("publish provider returned empty preview")
 	}
+	editPublishStatus(ctx, cfg, client, statusID, fmt.Sprintf("Preview готов: сообщений <b>%d</b>. Отправляю его в Inbox.", len(result.Messages)))
 	var messageIDs []int
 	for i, text := range result.Messages {
 		request := nest.SendMessageRequest{
@@ -2092,17 +2235,53 @@ func createPublishPreview(ctx context.Context, cfg config.Config, store *sqlites
 		message, err := client.SendMessageResult(ctx, request)
 		if err != nil {
 			deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, messageIDs)
+			editPublishStatus(ctx, cfg, client, statusID, "Не смогла отправить preview в Inbox: <code>"+html.EscapeString(compactWorkspaceLine(err.Error(), 300))+"</code>")
 			return err
 		}
 		messageIDs = append(messageIDs, message.MessageID)
 	}
+	editPublishStatus(ctx, cfg, client, statusID, fmt.Sprintf("Preview готов. Кнопки под последним сообщением. Модель: <code>%s</code>.", html.EscapeString(publishModelLabel(result.Model))))
 	publishDrafts[documentID] = publishPreviewDraft{
 		DocumentID:        documentID,
 		PreviewMessageIDs: messageIDs,
 		PreviewTexts:      result.Messages,
 		Revision:          revision,
+		Model:             result.Model,
 	}
 	return nil
+}
+
+func sendPublishStatus(ctx context.Context, cfg config.Config, client *nest.Client, text string) int {
+	message, err := client.SendMessageResult(ctx, nest.SendMessageRequest{
+		ChatID:          cfg.Workspace.ChatID,
+		MessageThreadID: cfg.Workspace.Topics.Inbox,
+		Text:            "🛠 <b>Publish</b>\n\n" + strings.TrimSpace(text),
+		ParseMode:       "HTML",
+	})
+	if err != nil {
+		return 0
+	}
+	return message.MessageID
+}
+
+func editPublishStatus(ctx context.Context, cfg config.Config, client *nest.Client, messageID int, text string) {
+	if messageID <= 0 {
+		return
+	}
+	_ = client.EditMessageText(ctx, nest.EditMessageTextRequest{
+		ChatID:    cfg.Workspace.ChatID,
+		MessageID: messageID,
+		Text:      "🛠 <b>Publish</b>\n\n" + strings.TrimSpace(text),
+		ParseMode: "HTML",
+	})
+}
+
+func publishModelLabel(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "unknown"
+	}
+	return model
 }
 
 func handlePublishCallback(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, publishDrafts map[int64]publishPreviewDraft, callback nest.CallbackQuery, action string, documentID int64) {
@@ -2209,6 +2388,7 @@ func approvePublishPreview(ctx context.Context, cfg config.Config, store *sqlite
 		}
 		link := workspaceMessageLink(cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, published[0].MessageID)
 		text = strings.TrimSpace(text) + "\n\n<i>Опубликовано в Полезное:</i> <a href=\"" + html.EscapeString(link) + "\">" + html.EscapeString(doc.Title) + "</a>"
+		text += "\n<i>Модель publish:</i> <code>" + html.EscapeString(publishModelLabel(draft.Model)) + "</code>"
 		_ = client.EditMessageText(ctx, nest.EditMessageTextRequest{
 			ChatID:      callbackMessage.Chat.ID,
 			MessageID:   callbackMessage.MessageID,
@@ -2871,8 +3051,10 @@ func WorkspaceDocumentHelpText(command string) string {
 • <code>/collection order-item Куда</code> — в reply переставить элемент; также принимает <code>Элемент | Куда</code>.
 • <code>/collection show</code> или <code>/collection show Название</code> — обновить индекс или показать коллекцию.
 • <code>/id</code> в reply — показать Telegram/source/document IDs.`)
+	case "useful":
+		return UsefulHelpMessageText()
 	default:
-		return "Команды: <code>/doc</code>, <code>/template</code>, <code>/collection</code>."
+		return "Команды: <code>/doc</code>, <code>/template</code>, <code>/collection</code>, <code>/useful</code>."
 	}
 }
 
@@ -2881,11 +3063,22 @@ func TaskHelpMessageText() string {
 }
 
 func UsefulHelpMessageText() string {
-	return "💎 <b>Полезное</b>\n\nСюда попадают материалы после preview и кнопки <b>Опубликовать</b> из Заметок. Если задан <code>SOVA_GEMINI_API_KEY</code>, preview форматирует Gemini с fallback-моделями из <code>SOVA_GEMINI_*</code>; без ключа работает локальный mock. Исходники остаются в <b>Заметки</b>, а опубликованный материал получает связь с source IDs.\n\nЕсли исходная заметка потом меняется, опубликованная версия не переписывается молча: она помечается как needing review."
+	return strings.TrimSpace(`💎 <b>Полезное</b>
+
+Сюда попадают материалы после preview и кнопки <b>Опубликовать</b> из Заметок. Если задан <code>SOVA_GEMINI_API_KEY</code>, preview форматирует Gemini с fallback-моделями из <code>SOVA_GEMINI_*</code>; без ключа работает локальный mock. Исходники остаются в <b>Заметки</b>, а опубликованный материал получает связь с source IDs.
+
+Если исходная заметка потом меняется, опубликованная версия не переписывается молча: она помечается как needing review.
+
+<b>Команды из Inbox</b>
+• <code>/useful rename ID|ссылка|название | Новое название</code> — переименовать публикацию в индексе Полезного.
+• <code>/useful review ID|ссылка|название</code> — пометить публикацию как needing review.
+• <code>/useful archive ID|ссылка|название</code> — убрать публикацию из индекса, не удаляя сообщение.
+• <code>/useful show</code> или <code>/useful show ID|ссылка|название</code> — обновить индекс или показать публикацию.
+• <code>/useful help</code> — показать эту справку.`)
 }
 
 func InboxHelpMessageText() string {
-	return "📥 <b>Inbox</b>\n\nЭто default topic для команд и preview. Команды документов можно отправлять отсюда, но source всё равно берётся из профильного topic: <b>Заметки</b>, <b>Заготовки</b> или <b>Коллекции</b>, если ты не отвечаешь командой прямо на сообщение.\n\n<code>/id</code> в reply показывает Telegram/source/document IDs. Для cluster-команд ниже работает reply или ссылка на сообщение."
+	return "📥 <b>Inbox</b>\n\nЭто default topic для команд и preview. Команды документов можно отправлять отсюда, но source всё равно берётся из профильного topic: <b>Заметки</b>, <b>Заготовки</b> или <b>Коллекции</b>, если ты не отвечаешь командой прямо на сообщение.\n\nКоманды <code>/useful</code> принимают ID, название или ссылку на публикацию из <b>Полезного</b>.\n\n<code>/id</code> в reply показывает Telegram/source/document IDs. Для cluster-команд ниже работает reply или ссылка на сообщение."
 }
 
 func ExperienceHelpMessageText() string {

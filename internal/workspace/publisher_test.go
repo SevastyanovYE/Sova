@@ -58,6 +58,9 @@ func TestGeminiNotePublishProvider(t *testing.T) {
 	if len(result.Messages) != 1 || result.Messages[0] != "<b>Готово</b>\n\nПервая часть" {
 		t.Fatalf("messages = %#v", result.Messages)
 	}
+	if result.Model != "gemini-test" {
+		t.Fatalf("model = %q", result.Model)
+	}
 }
 
 func TestGeminiNotePublishProviderFallsBackOnTemporaryErrors(t *testing.T) {
@@ -95,6 +98,9 @@ func TestGeminiNotePublishProviderFallsBackOnTemporaryErrors(t *testing.T) {
 	}
 	if len(result.Messages) != 1 || result.Messages[0] != "ok" {
 		t.Fatalf("messages = %#v", result.Messages)
+	}
+	if result.Model != "gemini-fallback" {
+		t.Fatalf("model = %q", result.Model)
 	}
 	if len(paths) != 2 {
 		t.Fatalf("paths = %#v", paths)

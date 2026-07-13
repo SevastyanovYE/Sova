@@ -32,3 +32,11 @@ func TestRedactBotToken(t *testing.T) {
 		t.Fatalf("redaction marker missing: %s", got)
 	}
 }
+
+func TestApplyMessagePreviewPolicy(t *testing.T) {
+	payload := map[string]any{"text": "https://example.com"}
+	applyMessagePreviewPolicy(payload)
+	if got, ok := payload["disable_web_page_preview"].(bool); !ok || !got {
+		t.Fatalf("disable_web_page_preview = %#v", payload["disable_web_page_preview"])
+	}
+}
