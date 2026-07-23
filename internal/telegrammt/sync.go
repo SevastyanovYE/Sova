@@ -470,8 +470,11 @@ func (c *Client) fetchSourceMessages(ctx context.Context, api *tg.Client, source
 			Limit:    batchLimit,
 			OffsetID: offsetID,
 		}
-		if maxID > 0 {
-			request.MaxID = maxID
+		// MaxID defines the first page boundary. Reusing it together with a
+		// progressively older OffsetID can make Telegram return an empty second
+		// page, truncating a full-history scan at the API's 100-message batch.
+		if firstPageMaxID := telegramHistoryPageMaxID(maxID, offsetID); firstPageMaxID > 0 {
+			request.MaxID = firstPageMaxID
 		}
 		if minID > 0 {
 			request.MinID = minID
@@ -529,6 +532,13 @@ func (c *Client) fetchSourceMessages(ctx context.Context, api *tg.Client, source
 		return messages[i].Date.Before(messages[j].Date)
 	})
 	return messages, nil
+}
+
+func telegramHistoryPageMaxID(maxID, offsetID int) int {
+	if maxID > 0 && offsetID == 0 {
+		return maxID
+	}
+	return 0
 }
 
 func (c *Client) convertTelegramMessage(source resolvedSource, raw tg.MessageClass, senderNames map[int64]string) (sqlitestore.TelegramMessage, bool, error) {

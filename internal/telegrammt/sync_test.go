@@ -131,6 +131,15 @@ func TestResolveExplicitSourceAcceptsBotAPIChannelID(t *testing.T) {
 	}
 }
 
+func TestTelegramHistoryMaxIDOnlyAppliesToFirstPage(t *testing.T) {
+	if got := telegramHistoryPageMaxID(2464, 0); got != 2464 {
+		t.Fatalf("first page max ID = %d", got)
+	}
+	if got := telegramHistoryPageMaxID(2464, 2364); got != 0 {
+		t.Fatalf("later page retained max ID = %d", got)
+	}
+}
+
 func TestAppendTelegramRawJSONLAppendOnly(t *testing.T) {
 	stateDir := t.TempDir()
 	cfg := config.Config{StateDir: stateDir}
