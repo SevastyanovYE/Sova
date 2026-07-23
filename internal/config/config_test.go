@@ -20,8 +20,62 @@ func TestDefaults(t *testing.T) {
 	if cfg.OllamaModel != "qwen3:14b" {
 		t.Fatalf("model = %q", cfg.OllamaModel)
 	}
+	if cfg.Search.Enabled || cfg.Search.EmbeddingModel != "gemini-embedding-2" {
+		t.Fatalf("search defaults = %+v", cfg.Search)
+	}
+	wantModels := []string{"gemini-3.5-flash-lite", "gemma-4-31b-it", "gemini-3.1-flash-lite", "gemma-4-26b-a4b-it"}
+	if len(cfg.NestGoogleModels) != len(wantModels) {
+		t.Fatalf("Nest Google models = %#v", cfg.NestGoogleModels)
+	}
+	for i := range wantModels {
+		if cfg.NestGoogleModels[i] != wantModels[i] {
+			t.Fatalf("Nest Google model %d = %q, want %q", i, cfg.NestGoogleModels[i], wantModels[i])
+		}
+	}
 	if err := cfg.ValidateFoundation(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSearchConfigurationUsesSecondKeyWithoutChangingModel(t *testing.T) {
+	t.Setenv("SOVA_SEARCH_ENABLED", "true")
+	t.Setenv("SOVA_SEARCH_LEGACY_CHAT_ID", "-100123")
+	t.Setenv("SOVA_SEARCH_EMBEDDING_MODEL", "gemini-embedding-2")
+	t.Setenv("SOVA_SEARCH_FALLBACK_GEMINI_API_KEY", "fallback-key")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Search.Enabled || cfg.Search.LegacyChatID != -100123 || cfg.Search.EmbeddingModel != "gemini-embedding-2" || cfg.Search.FallbackAPIKey != "fallback-key" {
+		t.Fatalf("search config = %+v", cfg.Search)
+	}
+}
+
+func TestSearchLegacyChatIDAcceptsStableTelegramSourceRef(t *testing.T) {
+	t.Setenv("SOVA_SEARCH_LEGACY_CHAT_ID", "telegram:channel:2498436858")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Search.LegacyChatID != -1002498436858 {
+		t.Fatalf("legacy Bot API chat ID = %d", cfg.Search.LegacyChatID)
+	}
+}
+
+func TestNestGoogleModelsPreserveConfiguredOrderAndDeduplicate(t *testing.T) {
+	t.Setenv("SOVA_NEST_GOOGLE_MODELS", "second,first,SECOND")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"second", "first"}
+	if len(cfg.NestGoogleModels) != len(want) {
+		t.Fatalf("models = %#v", cfg.NestGoogleModels)
+	}
+	for i := range want {
+		if cfg.NestGoogleModels[i] != want[i] {
+			t.Fatalf("model %d = %q", i, cfg.NestGoogleModels[i])
+		}
 	}
 }
 

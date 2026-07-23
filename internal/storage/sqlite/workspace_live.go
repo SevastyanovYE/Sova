@@ -52,22 +52,23 @@ type WorkspaceClusterTail struct {
 }
 
 type WorkspaceTask struct {
-	ID              int64
-	SourceChatID    int64
-	SourceMessageID int
-	SourceLink      string
-	SourceClusterID int64
-	CardChatID      int64
-	CardTopicID     int
-	CardMessageID   int
-	Text            string
-	Emoji           string
-	Status          string
-	DeferredUntil   *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	CompletedAt     *time.Time
-	CancelledAt     *time.Time
+	ID                 int64
+	SourceChatID       int64
+	SourceMessageID    int
+	SourceLink         string
+	SourceClusterID    int64
+	CardChatID         int64
+	CardTopicID        int
+	CardMessageID      int
+	Text               string
+	Emoji              string
+	Status             string
+	DeferredUntil      *time.Time
+	DeferredGeneration int
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	CompletedAt        *time.Time
+	CancelledAt        *time.Time
 }
 
 type WorkspaceDerivedMessage struct {
@@ -406,18 +407,22 @@ func (s *Store) CreateWorkspaceTask(ctx context.Context, task WorkspaceTask, now
 		return WorkspaceTask{}, fmt.Errorf("new task status must be open or deferred")
 	}
 	var deferred any
+	deferredGeneration := 0
 	if task.DeferredUntil != nil && !task.DeferredUntil.IsZero() {
 		deferred = task.DeferredUntil.UTC().Format(time.RFC3339Nano)
+	}
+	if task.Status == "deferred" {
+		deferredGeneration = 1
 	}
 	result, err := s.db.ExecContext(ctx, `
 INSERT INTO workspace_tasks(
     source_chat_id, source_message_id, source_link, source_cluster_id,
     card_chat_id, card_topic_id, card_message_id, text, emoji, status,
-    deferred_until, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    deferred_until, deferred_generation, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.SourceChatID, task.SourceMessageID, task.SourceLink, task.SourceClusterID,
 		task.CardChatID, task.CardTopicID, task.CardMessageID, task.Text, task.Emoji,
-		task.Status, deferred, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
+		task.Status, deferred, deferredGeneration, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return WorkspaceTask{}, err
 	}
@@ -630,9 +635,11 @@ func (s *Store) UpdateWorkspaceTaskStatus(ctx context.Context, id int64, status 
 	result, err := s.db.ExecContext(ctx, `
 UPDATE workspace_tasks
 SET status = ?, deferred_until = ?, completed_at = COALESCE(?, completed_at),
-    cancelled_at = COALESCE(?, cancelled_at), updated_at = ?
+    cancelled_at = COALESCE(?, cancelled_at),
+    deferred_generation = CASE WHEN ? = 'deferred' THEN deferred_generation + 1 ELSE deferred_generation END,
+    updated_at = ?
 WHERE id = ?`,
-		status, deferred, completed, cancelled, now.UTC().Format(time.RFC3339Nano), id)
+		status, deferred, completed, cancelled, status, now.UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
 		return err
 	}
@@ -943,7 +950,7 @@ func scanWorkspaceClusterTail(scanner interface{ Scan(dest ...any) error }) (Wor
 func workspaceTaskSelect() string {
 	return `SELECT id, source_chat_id, source_message_id, source_link, source_cluster_id,
        card_chat_id, card_topic_id, card_message_id, text, emoji, status,
-       deferred_until, created_at, updated_at, completed_at, cancelled_at
+       deferred_until, deferred_generation, created_at, updated_at, completed_at, cancelled_at
 FROM workspace_tasks`
 }
 
@@ -955,7 +962,7 @@ func scanWorkspaceTask(scanner interface{ Scan(dest ...any) error }) (WorkspaceT
 		&task.ID, &task.SourceChatID, &task.SourceMessageID, &task.SourceLink,
 		&task.SourceClusterID, &task.CardChatID, &task.CardTopicID,
 		&task.CardMessageID, &task.Text, &task.Emoji, &task.Status,
-		&deferredRaw, &createdRaw, &updatedRaw, &completedRaw, &cancelledRaw,
+		&deferredRaw, &task.DeferredGeneration, &createdRaw, &updatedRaw, &completedRaw, &cancelledRaw,
 	); err != nil {
 		return WorkspaceTask{}, err
 	}

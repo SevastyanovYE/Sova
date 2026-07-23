@@ -39,6 +39,10 @@ binary files by default. Search indexes first and retrieve only targeted data.
 
 ## Verification
 
+Production releases and Inbox announcements must follow `docs/releasing.md`.
+Do not infer deployment success from local tests, and never announce a release
+from service startup.
+
 Run:
 
 ```bash
@@ -50,4 +54,3 @@ git diff --check
 For implementation steps, use a separate reviewer agent when requested by the
 active delivery plan. Reviewer summaries must cite files or tests, not dump raw
 logs into the main context.
-

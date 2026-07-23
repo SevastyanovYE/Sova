@@ -3,11 +3,9 @@ package doctor
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/SevastyanovYE/Sova/internal/codexcli"
 	"github.com/SevastyanovYE/Sova/internal/config"
@@ -26,7 +24,6 @@ func Run(ctx context.Context, cfg config.Config) []Check {
 		commandCheck("ffmpeg", "ffmpeg"),
 		commandCheck("tesseract", "tesseract"),
 		codexCheck(cfg.CodexPath),
-		commandCheck("ollama", "ollama"),
 		pathParentCheck("database", cfg.DatabasePath),
 		sessionPathCheck(cfg.TelegramSessionPath),
 	}
@@ -34,6 +31,8 @@ func Run(ctx context.Context, cfg config.Config) []Check {
 		configuredCheck("telegram_credentials", cfg.TelegramAppID != 0 && cfg.TelegramAppHash != "" && cfg.TelegramPhone != "", "set Telegram app ID, hash, and phone"),
 		configuredCheck("nest_telegram_sources", len(cfg.NestTelegramAllowedChats) > 0, "set SOVA_NEST_TELEGRAM_ALLOWED_CHATS to at least one Sova Nest study source"),
 		configuredCheck("nest", cfg.NestReady(), "set bot token, Nest chat ID, and all four topic IDs"),
+		configuredCheck("nest_google_models", cfg.Gemini.APIKey != "" && len(cfg.NestGoogleModels) > 0, "set SOVA_GEMINI_API_KEY and SOVA_NEST_GOOGLE_MODELS"),
+		searchConfigCheck(cfg),
 		configuredCheck("workspace_audit", cfg.WorkspaceAuditConfigured(), "set SOVA_WORKSPACE_LEGACY_SOURCE plus Telegram app ID/hash"),
 		configuredCheck("workspace_group", cfg.WorkspaceConfigured(), "set Workspace bot token, InSync v1.0 chat ID, and all Workspace topic IDs"),
 		configuredCheck("control_group", cfg.ControlConfigured(), "set Control bot token, chat ID, and all Control topic IDs"),
@@ -41,8 +40,17 @@ func Run(ctx context.Context, cfg config.Config) []Check {
 		configuredCheck("google_oauth_credentials", fileExists(cfg.GoogleCredentials), "place OAuth Desktop client JSON at "+cfg.GoogleCredentials),
 		configuredCheck("google_calendar_token", fileExists(cfg.GoogleToken), "run `sova google-login` after setting OAuth credentials"),
 	)
-	checks = append(checks, ollamaCheck(ctx, cfg))
 	return checks
+}
+
+func searchConfigCheck(cfg config.Config) Check {
+	if !cfg.Search.Enabled {
+		return Check{Name: "semantic_search", Status: "ok", Message: "disabled until full index is ready"}
+	}
+	if cfg.Gemini.APIKey == "" || cfg.Search.LegacyChatID == 0 || cfg.Search.EmbeddingModel != config.DefaultSearchEmbeddingModel {
+		return Check{Name: "semantic_search", Status: "needs_input", Message: "set the primary key, legacy chat ID, and gemini-embedding-2 before enabling search"}
+	}
+	return Check{Name: "semantic_search", Status: "ok", Message: "configured; fallback key is optional"}
 }
 
 func codexCheck(configuredPath string) Check {
@@ -85,27 +93,6 @@ func sessionPathCheck(path string) Check {
 		return Check{Name: "telegram_session_path", Status: "error", Message: "Telegram Desktop session path is forbidden"}
 	}
 	return Check{Name: "telegram_session_path", Status: "ok", Message: path}
-}
-
-func ollamaCheck(ctx context.Context, cfg config.Config) Check {
-	if _, err := exec.LookPath("ollama"); err != nil {
-		return Check{Name: "ollama_model", Status: "missing", Message: "install Ollama and run: ollama run " + cfg.OllamaModel}
-	}
-	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, strings.TrimRight(cfg.OllamaURL, "/")+"/api/tags", nil)
-	if err != nil {
-		return Check{Name: "ollama_model", Status: "error", Message: err.Error()}
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return Check{Name: "ollama_model", Status: "missing", Message: "Ollama is not reachable at " + cfg.OllamaURL}
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return Check{Name: "ollama_model", Status: "error", Message: resp.Status}
-	}
-	return Check{Name: "ollama_model", Status: "ok", Message: "Ollama reachable; required model=" + cfg.OllamaModel}
 }
 
 func fileExists(path string) bool {

@@ -25,6 +25,9 @@ const (
 	DefaultGeminiModel          = "gemini-3.5-flash"
 	DefaultGeminiFallbackModel1 = "gemini-3-flash-preview"
 	DefaultGeminiFallbackModel2 = "gemini-3.1-flash-lite"
+
+	DefaultNestGoogleModels     = "gemini-3.5-flash-lite,gemma-4-31b-it,gemini-3.1-flash-lite,gemma-4-26b-a4b-it"
+	DefaultSearchEmbeddingModel = "gemini-embedding-2"
 )
 
 type TopicIDs struct {
@@ -75,6 +78,13 @@ type GeminiConfig struct {
 	FallbackModels []string
 }
 
+type SearchConfig struct {
+	Enabled        bool
+	LegacyChatID   int64
+	EmbeddingModel string
+	FallbackAPIKey string
+}
+
 type Config struct {
 	Timezone                 string
 	StateDir                 string
@@ -94,6 +104,8 @@ type Config struct {
 	OllamaURL                string
 	OllamaModel              string
 	Gemini                   GeminiConfig
+	NestGoogleModels         []string
+	Search                   SearchConfig
 	CodexPath                string
 	GoogleCredentials        string
 	GoogleToken              string
@@ -204,6 +216,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	searchEnabled, err := boolEnv("SOVA_SEARCH_ENABLED")
+	if err != nil {
+		return Config{}, err
+	}
+	searchLegacyChatID, err := botAPIChatIDEnv("SOVA_SEARCH_LEGACY_CHAT_ID")
+	if err != nil {
+		return Config{}, err
+	}
 
 	stateDir := valueOrDefault("SOVA_STATE_DIR", defaultStateDir)
 	return Config{
@@ -248,11 +268,36 @@ func Load() (Config, error) {
 			Model:          valueOrDefault("SOVA_GEMINI_MODEL", DefaultGeminiModel),
 			FallbackModels: geminiFallbackModels(),
 		},
+		NestGoogleModels: nestGoogleModels(),
+		Search: SearchConfig{
+			Enabled: searchEnabled, LegacyChatID: searchLegacyChatID,
+			EmbeddingModel: valueOrDefault("SOVA_SEARCH_EMBEDDING_MODEL", DefaultSearchEmbeddingModel),
+			FallbackAPIKey: strings.TrimSpace(os.Getenv("SOVA_SEARCH_FALLBACK_GEMINI_API_KEY")),
+		},
 		CodexPath:         strings.TrimSpace(os.Getenv("SOVA_CODEX_PATH")),
 		GoogleCredentials: valueOrDefault("SOVA_GOOGLE_CREDENTIALS_PATH", defaultGoogleCredsPath),
 		GoogleToken:       valueOrDefault("SOVA_GOOGLE_TOKEN_PATH", defaultGoogleTokenPath),
 		GoogleCalendarID:  strings.TrimSpace(os.Getenv("SOVA_GOOGLE_CALENDAR_ID")),
 	}, nil
+}
+
+func nestGoogleModels() []string {
+	models := splitList(valueOrDefault("SOVA_NEST_GOOGLE_MODELS", DefaultNestGoogleModels))
+	out := make([]string, 0, len(models))
+	seen := map[string]struct{}{}
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	return out
 }
 
 func loadDotEnv(path string) error {
@@ -414,6 +459,54 @@ func int64Env(key string) (int64, error) {
 	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s must be an integer: %w", key, err)
+	}
+	return parsed, nil
+}
+
+// botAPIChatIDEnv accepts either the numeric Bot API chat ID or Sova's stable
+// MTProto source reference. Keeping both forms valid makes copied source refs
+// from diagnostics safe to use in configuration.
+func botAPIChatIDEnv(key string) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return 0, nil
+	}
+	if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return parsed, nil
+	}
+	ref := strings.TrimPrefix(value, "telegram:")
+	parts := strings.Split(ref, ":")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("%s must be a Bot API integer or telegram:<channel|chat|user>:<id>", key)
+	}
+	peerID, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+	if err != nil || peerID <= 0 {
+		return 0, fmt.Errorf("%s contains an invalid Telegram peer ID %q", key, parts[1])
+	}
+	switch strings.ToLower(strings.TrimSpace(parts[0])) {
+	case "channel":
+		botAPIID, err := strconv.ParseInt("-100"+strconv.FormatInt(peerID, 10), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s channel ID is too large: %w", key, err)
+		}
+		return botAPIID, nil
+	case "chat":
+		return -peerID, nil
+	case "user":
+		return peerID, nil
+	default:
+		return 0, fmt.Errorf("%s contains unsupported Telegram peer kind %q", key, parts[0])
+	}
+}
+
+func boolEnv(key string) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return false, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", key, err)
 	}
 	return parsed, nil
 }

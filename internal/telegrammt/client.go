@@ -43,13 +43,15 @@ func (c *Client) AuthStatus(ctx context.Context) (AuthStatus, error) {
 	}
 	client := c.newTelegramClient()
 	status := AuthStatus{SessionExists: fileExists(c.cfg.TelegramSessionPath)}
-	err := client.Run(ctx, func(runCtx context.Context) error {
-		authStatus, err := client.Auth().Status(runCtx)
-		if err != nil {
-			return fmt.Errorf("auth status: %w", err)
-		}
-		status.Authorized = authStatus.Authorized
-		return nil
+	err := c.withSessionLock(ctx, func() error {
+		return client.Run(ctx, func(runCtx context.Context) error {
+			authStatus, err := client.Auth().Status(runCtx)
+			if err != nil {
+				return fmt.Errorf("auth status: %w", err)
+			}
+			status.Authorized = authStatus.Authorized
+			return nil
+		})
 	})
 	if err != nil {
 		return AuthStatus{}, err
@@ -67,83 +69,85 @@ func (c *Client) Login(ctx context.Context, in io.Reader, out io.Writer) error {
 	client := c.newTelegramClient()
 	reader := bufio.NewReader(in)
 	_, _ = fmt.Fprintf(out, "starting dedicated Sova MTProto login for %s\n", maskPhone(c.cfg.TelegramPhone))
-	return client.Run(ctx, func(runCtx context.Context) error {
-		status, err := client.Auth().Status(runCtx)
-		if err != nil {
-			return fmt.Errorf("auth status: %w", err)
-		}
-		if status.Authorized {
-			_, _ = fmt.Fprintln(out, "session already authorized")
-			return nil
-		}
-		_, _ = fmt.Fprintln(out, "requesting login code...")
-		sentCodeClass, err := client.Auth().SendCode(runCtx, c.cfg.TelegramPhone, auth.SendCodeOptions{})
-		if err != nil {
-			return fmt.Errorf("send code: %w", err)
-		}
-		sentCode, ok, err := describeSentCode(out, sentCodeClass)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			if _, success := sentCodeClass.(*tg.AuthSentCodeSuccess); success {
+	return c.withSessionLock(ctx, func() error {
+		return client.Run(ctx, func(runCtx context.Context) error {
+			status, err := client.Auth().Status(runCtx)
+			if err != nil {
+				return fmt.Errorf("auth status: %w", err)
+			}
+			if status.Authorized {
+				_, _ = fmt.Fprintln(out, "session already authorized")
+				return nil
+			}
+			_, _ = fmt.Fprintln(out, "requesting login code...")
+			sentCodeClass, err := client.Auth().SendCode(runCtx, c.cfg.TelegramPhone, auth.SendCodeOptions{})
+			if err != nil {
+				return fmt.Errorf("send code: %w", err)
+			}
+			sentCode, ok, err := describeSentCode(out, sentCodeClass)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				if _, success := sentCodeClass.(*tg.AuthSentCodeSuccess); success {
+					_, _ = fmt.Fprintln(out, "login successful")
+					return nil
+				}
+				return fmt.Errorf("unexpected sent code type %T", sentCodeClass)
+			}
+			for {
+				code, err := promptLine(out, reader, "code (or `resend`, `cancel`): ")
+				if err != nil {
+					return fmt.Errorf("read code: %w", err)
+				}
+				switch strings.ToLower(strings.TrimSpace(code)) {
+				case "":
+					_, _ = fmt.Fprintln(out, "empty code; paste the Telegram login code or type `resend`")
+					continue
+				case "cancel", "quit", "exit":
+					return fmt.Errorf("login canceled")
+				case "resend":
+					sentCodeClass, err = client.Auth().ResendCode(runCtx, c.cfg.TelegramPhone, sentCode.PhoneCodeHash)
+					if err != nil {
+						return fmt.Errorf("resend code: %w", err)
+					}
+					sentCode, ok, err = describeSentCode(out, sentCodeClass)
+					if err != nil {
+						return err
+					}
+					if !ok {
+						return fmt.Errorf("unexpected resent code type %T", sentCodeClass)
+					}
+					continue
+				}
+				if _, err := client.Auth().SignIn(runCtx, c.cfg.TelegramPhone, code, sentCode.PhoneCodeHash); err != nil {
+					if tg.IsPhoneCodeInvalid(err) {
+						_, _ = fmt.Fprintln(out, "Telegram says this code is invalid. Use the fresh code from Telegram, or type `resend`.")
+						continue
+					}
+					if tg.IsPhoneCodeExpired(err) {
+						_, _ = fmt.Fprintln(out, "Telegram says this code expired. Type `resend` to request a new one.")
+						continue
+					}
+					if !errors.Is(err, auth.ErrPasswordAuthNeeded) {
+						return fmt.Errorf("sign in: %w", err)
+					}
+					password := strings.TrimSpace(os.Getenv("SOVA_TELEGRAM_PASSWORD"))
+					if password == "" {
+						_, _ = fmt.Fprintln(out, "two-factor authentication is enabled")
+						password, err = promptLine(out, reader, "password: ")
+						if err != nil {
+							return fmt.Errorf("read password: %w", err)
+						}
+					}
+					if _, err := client.Auth().Password(runCtx, password); err != nil {
+						return fmt.Errorf("sign in with password: %w", err)
+					}
+				}
 				_, _ = fmt.Fprintln(out, "login successful")
 				return nil
 			}
-			return fmt.Errorf("unexpected sent code type %T", sentCodeClass)
-		}
-		for {
-			code, err := promptLine(out, reader, "code (or `resend`, `cancel`): ")
-			if err != nil {
-				return fmt.Errorf("read code: %w", err)
-			}
-			switch strings.ToLower(strings.TrimSpace(code)) {
-			case "":
-				_, _ = fmt.Fprintln(out, "empty code; paste the Telegram login code or type `resend`")
-				continue
-			case "cancel", "quit", "exit":
-				return fmt.Errorf("login canceled")
-			case "resend":
-				sentCodeClass, err = client.Auth().ResendCode(runCtx, c.cfg.TelegramPhone, sentCode.PhoneCodeHash)
-				if err != nil {
-					return fmt.Errorf("resend code: %w", err)
-				}
-				sentCode, ok, err = describeSentCode(out, sentCodeClass)
-				if err != nil {
-					return err
-				}
-				if !ok {
-					return fmt.Errorf("unexpected resent code type %T", sentCodeClass)
-				}
-				continue
-			}
-			if _, err := client.Auth().SignIn(runCtx, c.cfg.TelegramPhone, code, sentCode.PhoneCodeHash); err != nil {
-				if tg.IsPhoneCodeInvalid(err) {
-					_, _ = fmt.Fprintln(out, "Telegram says this code is invalid. Use the fresh code from Telegram, or type `resend`.")
-					continue
-				}
-				if tg.IsPhoneCodeExpired(err) {
-					_, _ = fmt.Fprintln(out, "Telegram says this code expired. Type `resend` to request a new one.")
-					continue
-				}
-				if !errors.Is(err, auth.ErrPasswordAuthNeeded) {
-					return fmt.Errorf("sign in: %w", err)
-				}
-				password := strings.TrimSpace(os.Getenv("SOVA_TELEGRAM_PASSWORD"))
-				if password == "" {
-					_, _ = fmt.Fprintln(out, "two-factor authentication is enabled")
-					password, err = promptLine(out, reader, "password: ")
-					if err != nil {
-						return fmt.Errorf("read password: %w", err)
-					}
-				}
-				if _, err := client.Auth().Password(runCtx, password); err != nil {
-					return fmt.Errorf("sign in with password: %w", err)
-				}
-			}
-			_, _ = fmt.Fprintln(out, "login successful")
-			return nil
-		}
+		})
 	})
 }
 
@@ -159,47 +163,49 @@ func (c *Client) LoginQR(ctx context.Context, in io.Reader, out io.Writer) error
 	client := c.newTelegramClientWithHandler(dispatcher)
 	reader := bufio.NewReader(in)
 	_, _ = fmt.Fprintln(out, "starting dedicated Sova MTProto QR login")
-	return client.Run(ctx, func(runCtx context.Context) error {
-		status, err := client.Auth().Status(runCtx)
-		if err != nil {
-			return fmt.Errorf("auth status: %w", err)
-		}
-		if status.Authorized {
-			_, _ = fmt.Fprintln(out, "session already authorized")
-			return nil
-		}
-		_, _ = fmt.Fprintln(out, "scan this from an already logged-in Telegram app:")
-		_, _ = fmt.Fprintln(out, "Telegram Settings -> Devices -> Link Desktop Device")
-		showQR := func(ctx context.Context, token qrlogin.Token) error {
-			_, _ = fmt.Fprintf(out, "\nlogin URL: %s\n", token.URL())
-			if err := printTerminalQR(out, token.URL()); err != nil {
-				_, _ = fmt.Fprintf(out, "QR render failed: %v\n", err)
+	return c.withSessionLock(ctx, func() error {
+		return client.Run(ctx, func(runCtx context.Context) error {
+			status, err := client.Auth().Status(runCtx)
+			if err != nil {
+				return fmt.Errorf("auth status: %w", err)
 			}
-			_, _ = fmt.Fprintln(out, "waiting for scan and approval...")
-			return nil
-		}
-		authorization, err := client.QR().Auth(runCtx, loggedIn, showQR)
-		if err != nil {
-			if tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
-				_, _ = fmt.Fprintln(out, "two-factor authentication is enabled")
-				authorization, err = completePasswordAuth(runCtx, client, reader, out)
-				if err != nil {
-					return err
+			if status.Authorized {
+				_, _ = fmt.Fprintln(out, "session already authorized")
+				return nil
+			}
+			_, _ = fmt.Fprintln(out, "scan this from an already logged-in Telegram app:")
+			_, _ = fmt.Fprintln(out, "Telegram Settings -> Devices -> Link Desktop Device")
+			showQR := func(ctx context.Context, token qrlogin.Token) error {
+				_, _ = fmt.Fprintf(out, "\nlogin URL: %s\n", token.URL())
+				if err := printTerminalQR(out, token.URL()); err != nil {
+					_, _ = fmt.Fprintf(out, "QR render failed: %v\n", err)
 				}
-			} else {
-				return fmt.Errorf("qr login: %w", err)
+				_, _ = fmt.Fprintln(out, "waiting for scan and approval...")
+				return nil
 			}
-		}
-		if authorization == nil {
-			return fmt.Errorf("qr login completed without authorization")
-		}
-		user, ok := authorization.User.AsNotEmpty()
-		if ok {
-			_, _ = fmt.Fprintf(out, "login successful: id=%d username=%s\n", user.ID, user.Username)
+			authorization, err := client.QR().Auth(runCtx, loggedIn, showQR)
+			if err != nil {
+				if tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
+					_, _ = fmt.Fprintln(out, "two-factor authentication is enabled")
+					authorization, err = completePasswordAuth(runCtx, client, reader, out)
+					if err != nil {
+						return err
+					}
+				} else {
+					return fmt.Errorf("qr login: %w", err)
+				}
+			}
+			if authorization == nil {
+				return fmt.Errorf("qr login completed without authorization")
+			}
+			user, ok := authorization.User.AsNotEmpty()
+			if ok {
+				_, _ = fmt.Fprintf(out, "login successful: id=%d username=%s\n", user.ID, user.Username)
+				return nil
+			}
+			_, _ = fmt.Fprintln(out, "login successful")
 			return nil
-		}
-		_, _ = fmt.Fprintln(out, "login successful")
-		return nil
+		})
 	})
 }
 

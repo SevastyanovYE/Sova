@@ -109,8 +109,9 @@ matching bot-created task cards, removes the delayed-task backlog message when
 `--delete-backlog` is true, and marks matching Workspace tasks cancelled in
 SQLite. It does not delete user-authored source messages.
 
-`seed-command-help` sends the current command reference into each Workspace
-topic. It is not a pin operation; the user can pin useful messages manually.
+`seed-command-help` creates and pins the current command reference in every
+Workspace topic, including the Inbox command list and the quote instructions
+in `Опыт`. Later runs edit the tracked messages instead of creating duplicates.
 
 `seed-document-indexes` creates or updates the active Stage 6 index messages in
 `Заметки`, `Заготовки`, `Коллекции`, and `Полезное`. The live bot edits these
@@ -154,6 +155,8 @@ callbacks in `Задачи`, and accepts manual cluster/document commands:
 /collection move-item
 /collection order-item
 /collection show
+/quote
+/search <запрос>
 ```
 
 Cluster auto-attachment is intentionally narrow. Replies attach explicitly to
@@ -208,3 +211,21 @@ final approved material is posted to `Полезное`, source-to-derived mappi
 persisted, the note leaves the active Notes index, and a Useful index message is
 updated. Later source edits mark the published document/derived rows
 `needs_review` instead of silently rewriting final material.
+
+`/quote` is an Inbox-only wizard. It asks for the required quote text, then an
+optional author and optional title, and shows a Save/Cancel preview. The final
+message is a native Telegram `<blockquote>` in `Опыт`, with no printable quote
+marks added by Sova. Active quote links live in the tracked, pinned `Опыт`
+index. Editing the source message marks the quote `needs_review`, refreshes the
+index marker, and notifies Inbox instead of silently rewriting the final quote.
+
+`/search` is also Inbox-only. It becomes available only after
+`workspace search-index --full-scan` succeeds and `SOVA_SEARCH_ENABLED=true` is
+set. It searches current InSync, legacy InSync, and Sova.Nest together, without
+persisting the query or result list. The Workspace service performs a recent
+MTProto refresh every five minutes while search is enabled.
+
+Deferred tasks are checked immediately at service startup and once per minute.
+When their date arrives, the bot sends a fresh linked reminder in `Задачи`,
+reopens and edits the original card, and updates the deferred backlog. Each
+scheduled date is its own durable delivery generation.

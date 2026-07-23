@@ -1,5 +1,9 @@
 # Qwen Calibration And Tuning
 
+> Legacy transition tooling: production Nest no longer calls Ollama. These
+> commands and results remain for one release so earlier experiments can be
+> reproduced. See `docs/model_routing.md` for the active Google route.
+
 ## Goal
 
 Keep local `qwen3:14b` useful without letting it dominate the whole overview
@@ -13,7 +17,7 @@ The target is not maximum model accuracy at any cost. The target is:
 - keep the Qwen classification stage around 6 minutes or less;
 - degrade to conservative fallback instead of failing the run.
 
-## Runtime Defaults
+## Legacy local defaults
 
 - Model: `qwen3:14b`.
 - Temperature: `0`.
@@ -151,10 +155,10 @@ Batch-size follow-up for the two plausible models:
 | `qwen3:8b` | 8 | 11/13 | 2 | 0 | 5m 18s | 0.83/0.75 | 0.63/0.88 | 57/41 |
 | `qwen3:8b` | 12 | 7/9 | 2 | 0 | 4m 34s | 0.91/0.68 | 0.66/0.80 | 50/41 |
 
-Conclusion for MVP close:
+Historical conclusion before the Google migration:
 
-- Keep runtime default at `qwen3:14b` for now to avoid changing behavior at the
-  end of the MVP cycle.
+- The old runtime default was kept at `qwen3:14b` at MVP close. It is no longer
+  the production Nest runtime.
 - Do not treat `qwen3:14b` as a strong quality baseline at batch 16: it timed
   out and produced many missing decisions on the labeled set. Batch 8 is safer
   but too slow for frequent experimentation.

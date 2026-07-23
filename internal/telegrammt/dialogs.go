@@ -33,37 +33,91 @@ func (c *Client) DiscoverForumTopicsByTitles(ctx context.Context, titles []strin
 
 	client := c.newTelegramClient()
 	var results []ForumTopicsByTitle
-	err := client.Run(ctx, func(runCtx context.Context) error {
-		status, err := client.Auth().Status(runCtx)
-		if err != nil {
-			return fmt.Errorf("auth status: %w", err)
-		}
-		if !status.Authorized {
-			return fmt.Errorf("telegram session is not authorized; run `sova telegram-login`")
-		}
-		resolved, err := findDialogsByTitle(runCtx, client.API(), titles, defaultDialogSearchLimit)
-		if err != nil {
-			return err
-		}
-		results = make([]ForumTopicsByTitle, 0, len(resolved))
-		for _, item := range resolved {
-			topics, err := fetchForumTopics(runCtx, client.API(), item.source, topicLimit)
+	err := c.withSessionLock(ctx, func() error {
+		return client.Run(ctx, func(runCtx context.Context) error {
+			status, err := client.Auth().Status(runCtx)
 			if err != nil {
-				return fmt.Errorf("fetch forum topics for %s: %w", item.source.source.Title, err)
+				return fmt.Errorf("auth status: %w", err)
 			}
-			results = append(results, ForumTopicsByTitle{
-				RequestedTitle: item.requestedTitle,
-				Source:         item.source.source,
-				BotAPIChatID:   BotAPIChatID(item.source.source),
-				Topics:         topics,
-			})
-		}
-		return nil
+			if !status.Authorized {
+				return fmt.Errorf("telegram session is not authorized; run `sova telegram-login`")
+			}
+			resolved, err := findDialogsByTitle(runCtx, client.API(), titles, defaultDialogSearchLimit)
+			if err != nil {
+				return err
+			}
+			results = make([]ForumTopicsByTitle, 0, len(resolved))
+			for _, item := range resolved {
+				topics, err := fetchForumTopics(runCtx, client.API(), item.source, topicLimit)
+				if err != nil {
+					return fmt.Errorf("fetch forum topics for %s: %w", item.source.source.Title, err)
+				}
+				results = append(results, ForumTopicsByTitle{
+					RequestedTitle: item.requestedTitle,
+					Source:         item.source.source,
+					BotAPIChatID:   BotAPIChatID(item.source.source),
+					Topics:         topics,
+				})
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return nil, err
 	}
 	return results, nil
+}
+
+// ResolveDialogByBotAPIChatID finds the MTProto peer backing a Bot API chat
+// identifier. It is used by search backfill for the current Workspace group,
+// whose access hash is intentionally not exposed as another user setting.
+func (c *Client) ResolveDialogByBotAPIChatID(ctx context.Context, chatID int64) (sqlitestore.TelegramSource, error) {
+	if err := c.validateRuntime(); err != nil {
+		return sqlitestore.TelegramSource{}, err
+	}
+	if chatID == 0 {
+		return sqlitestore.TelegramSource{}, fmt.Errorf("Bot API chat ID is required")
+	}
+	if err := ensureSessionDir(c.cfg.TelegramSessionPath); err != nil {
+		return sqlitestore.TelegramSource{}, err
+	}
+	client := c.newTelegramClient()
+	var found sqlitestore.TelegramSource
+	err := c.withSessionLock(ctx, func() error {
+		return client.Run(ctx, func(runCtx context.Context) error {
+			status, err := client.Auth().Status(runCtx)
+			if err != nil {
+				return fmt.Errorf("auth status: %w", err)
+			}
+			if !status.Authorized {
+				return fmt.Errorf("telegram session is not authorized; run `sova telegram-login`")
+			}
+			iter := dialogquery.NewQueryBuilder(client.API()).GetDialogs().BatchSize(100).Iter()
+			scanned := 0
+			for iter.Next(runCtx) {
+				if scanned >= defaultDialogSearchLimit {
+					break
+				}
+				scanned++
+				source, _, ok, err := sourceFromDialogElem(iter.Value())
+				if err != nil {
+					return err
+				}
+				if ok && BotAPIChatID(source) == chatID {
+					found = source
+					return nil
+				}
+			}
+			if err := iter.Err(); err != nil {
+				return err
+			}
+			return fmt.Errorf("Bot API chat %d was not found in the first %d MTProto dialogs", chatID, defaultDialogSearchLimit)
+		})
+	})
+	if err != nil {
+		return sqlitestore.TelegramSource{}, err
+	}
+	return found, nil
 }
 
 func BotAPIChatID(source sqlitestore.TelegramSource) int64 {

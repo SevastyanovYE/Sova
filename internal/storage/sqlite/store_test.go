@@ -384,34 +384,37 @@ func TestInsertMessageDecisions(t *testing.T) {
 		Reason:     "экзамен",
 		Tags:       []string{"exam", "urgent"},
 		HasEvent:   true,
-		Model:      "qwen3:14b",
+		Model:      "gemini-3.5-flash-lite",
+		Provider:   "google",
+		Route:      "remote",
 	}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.InsertMessageDecisions(ctx, []MessageDecision{{
 		RunID: run.ID, ChatID: 100, MessageID: 42, Keep: true, Importance: 3,
-		Reason: "экзамен", Tags: []string{"exam", "urgent"}, HasEvent: true, Model: "qwen3:14b",
+		Reason: "экзамен", Tags: []string{"exam", "urgent"}, HasEvent: true,
+		Model: "gemini-3.5-flash-lite", Provider: "google", Route: "remote",
 	}}, now); err != nil {
 		t.Fatalf("idempotent decision insert: %v", err)
 	}
 
 	var keep, importance, hasEvent int
-	var reason, tags, model string
+	var reason, tags, storedModel, provider, route string
 	err = store.db.QueryRowContext(ctx, `
-SELECT keep, importance, reason, tags_json, has_event, model
+SELECT keep, importance, reason, tags_json, has_event, model, provider, route
 FROM message_decisions
 WHERE run_id = ? AND chat_id = ? AND message_id = ?`, run.ID, 100, 42).
-		Scan(&keep, &importance, &reason, &tags, &hasEvent, &model)
+		Scan(&keep, &importance, &reason, &tags, &hasEvent, &storedModel, &provider, &route)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			t.Fatal("decision was not inserted")
 		}
 		t.Fatal(err)
 	}
-	if keep != 1 || importance != 3 || reason != "экзамен" || tags != `["exam","urgent"]` || hasEvent != 1 || model != "qwen3:14b" {
-		t.Fatalf("stored decision = keep:%d importance:%d reason:%q tags:%q event:%d model:%q",
-			keep, importance, reason, tags, hasEvent, model)
+	if keep != 1 || importance != 3 || reason != "экзамен" || tags != `["exam","urgent"]` || hasEvent != 1 || storedModel != "gemini-3.5-flash-lite" || provider != "google" || route != "remote" {
+		t.Fatalf("stored decision = keep:%d importance:%d reason:%q tags:%q event:%d model:%q provider:%q route:%q",
+			keep, importance, reason, tags, hasEvent, storedModel, provider, route)
 	}
 }
 
@@ -430,27 +433,39 @@ func TestInsertModelCallAndRecent(t *testing.T) {
 	}
 	if err := store.InsertModelCall(ctx, ModelCall{
 		RunID:          run.ID,
-		Stage:          "qwen_classify",
+		Stage:          "model_classify",
 		BatchIndex:     1,
+		BatchID:        "c1",
+		Attempt:        1,
 		InputMessages:  24,
 		InputChars:     1800,
 		DurationMillis: 1200,
 		Success:        true,
-		Model:          "qwen3:14b",
+		Model:          "gemini-3.5-flash-lite",
+		Provider:       "google",
+		PromptTokens:   200,
+		OutputTokens:   40,
+		TotalTokens:    240,
+		FinishReason:   "STOP",
 	}, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.InsertModelCall(ctx, ModelCall{
 		RunID:          run.ID,
-		Stage:          "qwen_classify",
+		Stage:          "model_classify",
 		BatchIndex:     2,
+		BatchID:        "c2",
+		Attempt:        2,
 		InputMessages:  24,
 		InputChars:     1700,
 		DurationMillis: 75000,
 		Success:        false,
 		Fallbacks:      24,
 		Error:          "deadline exceeded",
-		Model:          "qwen3:14b",
+		Model:          "gemma-4-31b-it",
+		Provider:       "google",
+		StatusCode:     429,
+		ErrorClass:     "rate_limit",
 	}, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -461,11 +476,71 @@ func TestInsertModelCallAndRecent(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("calls = %d", len(calls))
 	}
-	if calls[0].BatchIndex != 2 || calls[0].Success || calls[0].Fallbacks != 24 {
+	if calls[0].BatchIndex != 2 || calls[0].BatchID != "c2" || calls[0].Attempt != 2 || calls[0].Success || calls[0].Fallbacks != 24 || calls[0].StatusCode != 429 || calls[0].ErrorClass != "rate_limit" {
 		t.Fatalf("latest call = %+v", calls[0])
 	}
-	if calls[1].BatchIndex != 1 || !calls[1].Success {
+	if calls[1].BatchIndex != 1 || !calls[1].Success || calls[1].Provider != "google" || calls[1].TotalTokens != 240 || calls[1].FinishReason != "STOP" {
 		t.Fatalf("older call = %+v", calls[1])
+	}
+}
+
+func TestOpenAddsProviderNeutralModelTelemetryColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE message_decisions (
+ run_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+ keep INTEGER NOT NULL, importance INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '',
+ tags_json TEXT NOT NULL DEFAULT '[]', has_event INTEGER NOT NULL,
+ model TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+ PRIMARY KEY(run_id, chat_id, message_id)
+);
+CREATE TABLE model_calls (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, stage TEXT NOT NULL,
+ batch_index INTEGER NOT NULL, input_messages INTEGER NOT NULL, input_chars INTEGER NOT NULL,
+ duration_ms INTEGER NOT NULL, success INTEGER NOT NULL, fallbacks INTEGER NOT NULL DEFAULT 0,
+ error TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+);`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for table, columns := range map[string][]string{
+		"message_decisions": {"provider", "route"},
+		"model_calls":       {"batch_id", "attempt", "provider", "status_code", "error_class", "prompt_tokens", "output_tokens", "total_tokens", "finish_reason"},
+	} {
+		rows, err := store.db.Query("PRAGMA table_info(" + table + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := map[string]bool{}
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			found[name] = true
+		}
+		rows.Close()
+		for _, column := range columns {
+			if !found[column] {
+				t.Fatalf("%s.%s was not migrated", table, column)
+			}
+		}
 	}
 }
 

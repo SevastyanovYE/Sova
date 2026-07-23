@@ -1,0 +1,19 @@
+[Unit]
+Description=Sova Nest overview service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sova
+Group=sova
+WorkingDirectory=/opt/sova
+EnvironmentFile=/etc/sova/sova.env
+ExecStart=/opt/sova/sova serve
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

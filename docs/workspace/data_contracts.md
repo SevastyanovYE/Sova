@@ -115,11 +115,22 @@ manual `/cluster` commands remain the correction path.
   `source_cluster_id`
 - card mapping: `card_chat_id`, `card_topic_id`, `card_message_id`
 - user-visible data: `text`, `emoji`, `status`, `deferred_until`
+- delivery identity: `deferred_generation`, incremented only by an explicit
+  assignment of deferred status (ordinary task edits do not change it)
 
 Task cards live in `Задачи`. The visible card text does not include a "Задача"
 heading or source link. Defer presets (`На неделю`, `На месяц`) resolve to
 08:00 in the configured project timezone; explicit user-entered dates keep the
 entered time or use the date-only default.
+
+`workspace_task_reminders` is a generation-keyed outbox unique on
+`(task_id, scheduled_for)`. Confirmed failures retry at 1, 5, 15, and 60
+minutes and then hourly. Ambiguous delivery becomes `unknown` and is not sent
+again automatically. A confirmed send is finalized by reopening the task,
+editing its card, and removing it from the deferred backlog.
+If a completed/cancelled/unknown schedule is explicitly assigned again at the
+same instant, the row is rearmed only when the task's persisted deferral
+generation is newer than the generation already recorded by the outbox row.
 
 `workspace_derived_messages` maps source messages/clusters to bot-created
 derived messages. Published derived messages can be marked `needs_review` when
@@ -129,6 +140,22 @@ their source is edited, instead of silently rewriting final material.
 the delayed-task backlog in `Задачи`. The task backlog intentionally lists only
 `deferred` tasks and links each item back to its original task card; open tasks
 stay visible as individual cards.
+
+`workspace_quotes` stores Inbox-created quotes:
+
+- optional `title` and `author`, plus required `text`;
+- `draft`, `active`, `needs_review`, or `archived` status;
+- source Inbox chat/message IDs and link;
+- target `Опыт` chat/topic/message IDs;
+- durable wizard user/stage and `draft`/`sending`/`sent`/`unknown` delivery
+  state, so restart restores an unfinished wizard and an ambiguous send is
+  never repeated automatically;
+- creation, update, and publication timestamps.
+
+The final Telegram message uses a native `<blockquote>`. Quote links are kept
+in the tracked `experience_quotes` topic index. A source edit changes only the
+quote status and index marker and produces an Inbox review notice; it never
+silently edits the published quote.
 
 `workspace_documents`, `workspace_document_parts`, and
 `workspace_document_types` store Stage 6 note/template/collection metadata:
@@ -144,13 +171,46 @@ stay visible as individual cards.
 - compact part text only; raw Telegram JSON remains outside prompt context
 
 The live bot maintains index messages for active notes in `Заметки`, templates
-in `Заготовки`, collection-card links in `Коллекции`, and published Useful
-links in `Полезное`. Notes render as a bold first-part link plus bracketed
+in `Заготовки`, collection-card links in `Коллекции`, quotes in `Опыт`, and
+published Useful links in `Полезное`. Notes render as a bold first-part link plus bracketed
 part links. Template indexes render active type headings and bold prompt links.
 Collection indexes are one flat list of collection-card links; each collection
 card stores its own description and item links. Published material is not
 silently rewritten on source edit: published documents and derived rows are
 marked `needs_review`.
+
+`workspace_publish_runs` and `workspace_publish_messages` form the durable
+Publish state machine and outbox:
+
+- a run stores its document, revision, formatter model, compact fallback route,
+  current stage, compact error, explicit approval time, and preview/status
+  message identities;
+- preview and final fragments store their ordered HTML plus delivery state;
+- only `pending` fragments are safe to send; `sending` and `unknown` are never
+  resent automatically because Telegram may already have accepted them;
+- a replacement preview becomes actionable only after all of its fragments
+  have confirmed Telegram IDs, then the previous preview becomes stale;
+- an approved run can resume final-fragment delivery and idempotent
+  document/derived/index finalization after restart.
+
+`.state/index/workspace-runs.md` contains compact stage, model, counts, and
+redacted failure data. It deliberately excludes source text, preview HTML,
+revision instructions, prompts, and raw provider responses.
+
+Semantic search uses `search_documents`, `search_embeddings`, and
+`search_sync_state`. The canonical identity is `(scope, message_id)` for the
+three scopes `workspace`, `legacy`, and `nest`. Vectors are local float32 blobs
+for one configured model/dimension pair; query text and result lists are never
+stored. Full-scan generation/cursor state checkpoints backfill; a rotating
+audit cursor revisits old history. Full-scan timestamps are the `/search`
+readiness gate.
+
+`workspace_deployment_receipts` and `workspace_release_announcements` bind a
+production release to an exact environment, version, and commit. Announcement
+reservation occurs before Telegram delivery; ambiguous delivery is recorded as
+`unknown` and cannot be sent again automatically. Announcement identity is the
+version within an environment, so moving a tag to another commit cannot resend
+the same release.
 
 ## Audit Artifacts
 

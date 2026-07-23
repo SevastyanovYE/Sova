@@ -36,17 +36,23 @@ type pendingTaskDateKey struct {
 }
 
 type pendingWorkspaceInput struct {
-	Kind        string
-	DocumentID  int64
-	PartID      int64
-	Title       string
-	PartTitle   string
-	Part        sqlitestore.WorkspaceDocumentPart
-	TypeOptions []string
-	Target      string
+	Kind         string
+	DocumentID   int64
+	PublishRunID int64
+	PartID       int64
+	Title        string
+	PartTitle    string
+	Part         sqlitestore.WorkspaceDocumentPart
+	TypeOptions  []string
+	Target       string
+	QuoteID      int64
+	QuoteText    string
+	Author       string
+	QuoteSource  sqlitestore.WorkspaceMessage
 }
 
 type publishPreviewDraft struct {
+	RunID             int64
 	DocumentID        int64
 	PreviewMessageIDs []int
 	PreviewTexts      []string
@@ -87,6 +93,29 @@ func Serve(ctx context.Context, cfg config.Config, store *sqlitestore.Store) err
 	pendingTaskDates := map[pendingTaskDateKey]int64{}
 	pendingInputs := map[pendingTaskDateKey]pendingWorkspaceInput{}
 	publishDrafts := map[int64]publishPreviewDraft{}
+	if err := restoreWorkspaceQuoteDrafts(ctx, cfg, store, client, pendingInputs, time.Now().UTC()); err != nil {
+		fmt.Printf("workspace quote recovery unavailable: %v\n", err)
+	}
+	if err := recoverInterruptedWorkspacePublishRuns(ctx, cfg, store, client, time.Now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Printf("workspace publish preview recovery unavailable: %v\n", err)
+	}
+	if err := resumeWorkspacePublishRuns(ctx, cfg, store, client, time.Now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Printf("workspace publish recovery unavailable: %v\n", err)
+	}
+	reminderLoopDone := make(chan struct{})
+	go func() {
+		defer close(reminderLoopDone)
+		runWorkspaceTaskReminderLoop(ctx, cfg, store, client)
+	}()
+	defer func() { <-reminderLoopDone }()
+	if cfg.Search.Enabled {
+		searchLoopDone := make(chan struct{})
+		go func() {
+			defer close(searchLoopDone)
+			runWorkspaceSearchSyncLoop(ctx, cfg, store)
+		}()
+		defer func() { <-searchLoopDone }()
+	}
 	fmt.Printf("sova workspace serve: polling Workspace chat %d; default topic Inbox=%d Tasks=%d\n",
 		cfg.Workspace.ChatID, cfg.Workspace.Topics.Inbox, cfg.Workspace.Topics.Tasks)
 	for {
@@ -150,6 +179,18 @@ func handleWorkspaceMessage(ctx context.Context, cfg config.Config, store *sqlit
 		return
 	}
 	command, rest := workspaceCommandName(message.Text)
+	if !edited && command == "search" {
+		if err := handleWorkspaceSearchCommand(ctx, cfg, store, client, message, threadID, rest); err != nil {
+			sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось выполнить поиск", err)
+		}
+		return
+	}
+	if !edited && command == "quote" {
+		if err := startQuoteWizard(ctx, cfg, client, pendingInputs, message, threadID); err != nil {
+			sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось запустить мастер цитаты", err)
+		}
+		return
+	}
 	if !edited && command == "cluster" {
 		handleClusterCommand(ctx, cfg, store, client, message, threadID, rest)
 		return
@@ -160,7 +201,7 @@ func handleWorkspaceMessage(ctx context.Context, cfg config.Config, store *sqlit
 	}
 	if !edited && command == "publish" {
 		if strings.EqualFold(strings.TrimSpace(rest), "cleanup") {
-			if err := handlePublishCleanup(ctx, cfg, client, publishDrafts, threadID); err != nil {
+			if err := handlePublishCleanup(ctx, cfg, store, client, publishDrafts, threadID); err != nil {
 				sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось очистить publish preview", err)
 			}
 			return
@@ -183,6 +224,9 @@ func handleWorkspaceMessage(ctx context.Context, cfg config.Config, store *sqlit
 		sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось сохранить сообщение", err)
 		return
 	}
+	if err := indexWorkspaceMessageForSearch(ctx, cfg, store, sourceMessage, now); err != nil {
+		sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось обновить поисковый индекс", err)
+	}
 	cluster, err := ensureMessageCluster(ctx, store, sourceMessage, edited, now)
 	if err != nil {
 		sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось обновить cluster", err)
@@ -193,6 +237,9 @@ func handleWorkspaceMessage(ctx context.Context, cfg config.Config, store *sqlit
 		return
 	}
 	if edited {
+		if err := syncWorkspaceQuoteForSourceEdit(ctx, cfg, store, client, sourceMessage, now); err != nil {
+			sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось отметить цитату на review", err)
+		}
 		if err := syncWorkspaceDocumentIndexesForSourceEdit(ctx, cfg, store, client, sourceMessage, now); err != nil {
 			sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось обновить индекс документа", err)
 		}
@@ -335,6 +382,10 @@ func sendAndStoreWorkspaceTaskCard(ctx context.Context, cfg config.Config, store
 }
 
 func handleWorkspaceCallback(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingTaskDates map[pendingTaskDateKey]int64, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, publishDrafts map[int64]publishPreviewDraft, callback nest.CallbackQuery) {
+	if action, ok := ParseQuoteCallback(callback.Data); ok {
+		handleQuoteCallback(ctx, cfg, store, client, pendingInputs, callback, action)
+		return
+	}
 	if action, index, ok := ParseDocumentInputCallback(callback.Data); ok {
 		handleDocumentInputCallback(ctx, cfg, store, client, pendingInputs, callback, action, index)
 		return
@@ -487,7 +538,7 @@ func handlePendingTaskDateMessage(ctx context.Context, cfg config.Config, store 
 	return true
 }
 
-func updateTaskBacklog(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, now time.Time) error {
+func updateTaskBacklog(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client taskReminderTelegram, now time.Time) error {
 	tasks, err := store.DeferredWorkspaceTasks(ctx, 100)
 	if err != nil {
 		return err
@@ -1174,6 +1225,9 @@ func handlePendingWorkspaceInputMessage(ctx context.Context, cfg config.Config, 
 	if !ok {
 		return false
 	}
+	if strings.HasPrefix(pending.Kind, "quote_") {
+		return handlePendingQuoteInput(ctx, cfg, store, client, pendingInputs, key, pending, message, threadID)
+	}
 	if command, _ := workspaceCommandName(message.Text); command != "" && !isCancelText(message.Text) {
 		delete(pendingInputs, key)
 		return false
@@ -1269,7 +1323,7 @@ func handlePendingWorkspaceInputMessage(ctx context.Context, cfg config.Config, 
 		}
 		err = deleteCollectionDocument(ctx, cfg, store, client, threadID, pending.DocumentID, now)
 	case "publish_revision":
-		err = rerunPublishPreview(ctx, cfg, store, client, publishDrafts, pending.DocumentID, value, now)
+		err = rerunPublishPreview(ctx, cfg, store, client, publishDrafts, pending.DocumentID, pending.PublishRunID, value, now)
 	default:
 		err = fmt.Errorf("unknown pending input %q", pending.Kind)
 	}
@@ -2168,25 +2222,40 @@ func handleNotePublishCommand(ctx context.Context, cfg config.Config, store *sql
 	return createPublishPreview(ctx, cfg, store, client, publishDrafts, doc.ID, "", now)
 }
 
-func rerunPublishPreview(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, publishDrafts map[int64]publishPreviewDraft, documentID int64, revision string, now time.Time) error {
-	if draft, ok := publishDrafts[documentID]; ok {
-		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, draft.PreviewMessageIDs)
+func rerunPublishPreview(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, publishDrafts map[int64]publishPreviewDraft, documentID int64, baseRunID int64, revision string, now time.Time) error {
+	base, err := store.WorkspacePublishRunByID(ctx, baseRunID)
+	if err != nil {
+		return err
 	}
+	if base.DocumentID != documentID || base.Status != "awaiting_approval" {
+		return fmt.Errorf("publish preview устарел; запусти публикацию ещё раз")
+	}
+	// createPublishPreview activates the replacement only after all of its
+	// Telegram messages are confirmed. Until then base stays actionable.
 	return createPublishPreview(ctx, cfg, store, client, publishDrafts, documentID, revision, now)
 }
 
-func handlePublishCleanup(ctx context.Context, cfg config.Config, client *nest.Client, publishDrafts map[int64]publishPreviewDraft, threadID int) error {
-	if len(publishDrafts) == 0 {
+func handlePublishCleanup(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, publishDrafts map[int64]publishPreviewDraft, threadID int) error {
+	runs, err := store.AwaitingWorkspacePublishRuns(ctx, 100)
+	if err != nil {
+		return err
+	}
+	if len(runs) == 0 {
 		return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Активных publish preview сейчас нет.")
 	}
 	drafts := 0
 	messages := 0
-	for documentID, draft := range publishDrafts {
-		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, draft.PreviewMessageIDs)
-		messages += len(draft.PreviewMessageIDs)
-		delete(publishDrafts, documentID)
+	for _, run := range runs {
+		if err := store.CancelWorkspacePublishRun(ctx, run.ID, time.Now().UTC()); err != nil {
+			return err
+		}
+		ids := workspacePublishMessageIDs(run.Messages)
+		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, ids)
+		messages += len(ids)
+		delete(publishDrafts, run.DocumentID)
 		drafts++
 	}
+	_ = writeWorkspacePublishRunsIndex(ctx, cfg, store)
 	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, fmt.Sprintf("Очистила publish preview: драфтов <b>%d</b>, сообщений <b>%d</b>.", drafts, messages))
 }
 
@@ -2205,6 +2274,10 @@ func createPublishPreview(ctx context.Context, cfg config.Config, store *sqlites
 		editPublishStatus(ctx, cfg, client, statusID, "Остановилась: у заметки нет частей для публикации.")
 		return fmt.Errorf("note has no parts")
 	}
+	run, err := store.CreateWorkspacePublishRun(ctx, documentID, revision, cfg.Workspace.ChatID, cfg.Workspace.Topics.Inbox, statusID, now)
+	if err != nil {
+		return err
+	}
 	editPublishStatus(ctx, cfg, client, statusID, fmt.Sprintf("Нашла частей: <b>%d</b>. Отправляю текст в publish formatter.", len(parts)))
 	provider := NewNotePublishProvider(cfg)
 	result, err := provider.FormatNote(ctx, NotePublishRequest{
@@ -2213,41 +2286,88 @@ func createPublishPreview(ctx context.Context, cfg config.Config, store *sqlites
 		Revision: revision,
 	})
 	if err != nil {
+		_ = store.FailWorkspacePublishRun(context.WithoutCancel(ctx), run.ID, publishTelemetryError(err), now)
+		_ = writeWorkspacePublishRunsIndex(context.WithoutCancel(ctx), cfg, store)
 		editPublishStatus(ctx, cfg, client, statusID, "Publish formatter вернул ошибку: <code>"+html.EscapeString(compactWorkspaceLine(err.Error(), 300))+"</code>")
 		return err
 	}
 	if len(result.Messages) == 0 {
+		_ = store.FailWorkspacePublishRun(context.WithoutCancel(ctx), run.ID, "publish provider returned empty preview", now)
+		_ = writeWorkspacePublishRunsIndex(context.WithoutCancel(ctx), cfg, store)
 		editPublishStatus(ctx, cfg, client, statusID, "Publish formatter вернул пустой preview.")
 		return fmt.Errorf("publish provider returned empty preview")
 	}
-	editPublishStatus(ctx, cfg, client, statusID, fmt.Sprintf("Preview готов: сообщений <b>%d</b>. Отправляю его в Inbox.", len(result.Messages)))
-	var messageIDs []int
-	for i, text := range result.Messages {
+	previewMessages, err := preparePublishPreviewMessages(result.Messages, revision)
+	if err != nil {
+		_ = store.FailWorkspacePublishRun(context.WithoutCancel(ctx), run.ID, publishTelemetryError(err), now)
+		_ = writeWorkspacePublishRunsIndex(context.WithoutCancel(ctx), cfg, store)
+		editPublishStatus(ctx, cfg, client, statusID, "Publish formatter вернул неподходящий Telegram HTML: <code>"+html.EscapeString(compactWorkspaceLine(err.Error(), 300))+"</code>")
+		return err
+	}
+	if err := store.SetWorkspacePublishPreview(ctx, run.ID, result.Model, previewMessages, now); err != nil {
+		_ = store.FailWorkspacePublishRun(context.WithoutCancel(ctx), run.ID, publishTelemetryError(err), now)
+		return err
+	}
+	if err := store.SetWorkspacePublishRouteSummary(ctx, run.ID, result.RouteSummary, now); err != nil {
+		_ = store.FailWorkspacePublishRun(context.WithoutCancel(ctx), run.ID, publishTelemetryError(err), now)
+		return err
+	}
+	if strings.TrimSpace(revision) != "" {
+		editPublishStatus(ctx, cfg, client, statusID, fmt.Sprintf("⚠️ <b>Свободная ревизия</b>. Preview готов: сообщений <b>%d</b>. Публикация возможна только после ручного подтверждения.", len(previewMessages)))
+	} else {
+		editPublishStatus(ctx, cfg, client, statusID, fmt.Sprintf("Preview готов: сообщений <b>%d</b>. Отправляю его в Inbox.", len(previewMessages)))
+	}
+	previewRows, err := store.WorkspacePublishMessages(ctx, run.ID, "preview")
+	if err != nil {
+		return err
+	}
+	for i, row := range previewRows {
+		displayText, err := publishPreviewDisplayText(row.Text, revision, i == len(previewRows)-1)
+		if err != nil {
+			_ = store.FailWorkspacePublishRun(context.WithoutCancel(ctx), run.ID, publishTelemetryError(err), now)
+			return err
+		}
 		request := nest.SendMessageRequest{
 			ChatID:          cfg.Workspace.ChatID,
 			MessageThreadID: cfg.Workspace.Topics.Inbox,
-			Text:            text,
+			Text:            displayText,
 			ParseMode:       "HTML",
 		}
-		if i == len(result.Messages)-1 {
+		if i == len(previewRows)-1 {
 			request.ReplyMarkup = PublishPreviewMarkup(documentID)
 		}
-		message, err := client.SendMessageResult(ctx, request)
+		_, _, err = sendDurablePublishMessage(ctx, store, client, row, request, now)
 		if err != nil {
-			deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, messageIDs)
+			persisted, _ := store.WorkspacePublishMessages(context.WithoutCancel(ctx), run.ID, "preview")
+			deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, workspacePublishMessageIDs(persisted))
+			_ = store.FailWorkspacePublishRun(context.WithoutCancel(ctx), run.ID, publishTelemetryError(err), now)
+			_ = writeWorkspacePublishRunsIndex(context.WithoutCancel(ctx), cfg, store)
 			editPublishStatus(ctx, cfg, client, statusID, "Не смогла отправить preview в Inbox: <code>"+html.EscapeString(compactWorkspaceLine(err.Error(), 300))+"</code>")
 			return err
 		}
-		messageIDs = append(messageIDs, message.MessageID)
 	}
+	oldRuns, err := store.ActivateWorkspacePublishPreview(ctx, run.ID, now)
+	if err != nil {
+		return err
+	}
+	persisted, err := store.WorkspacePublishRunByID(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	messageIDs := workspacePublishMessageIDs(persisted.Messages)
 	editPublishStatus(ctx, cfg, client, statusID, fmt.Sprintf("Preview готов. Кнопки под последним сообщением. Модель: <code>%s</code>.", html.EscapeString(publishModelLabel(result.Model))))
 	publishDrafts[documentID] = publishPreviewDraft{
+		RunID:             run.ID,
 		DocumentID:        documentID,
 		PreviewMessageIDs: messageIDs,
-		PreviewTexts:      result.Messages,
+		PreviewTexts:      previewMessages,
 		Revision:          revision,
 		Model:             result.Model,
 	}
+	for _, old := range oldRuns {
+		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, workspacePublishMessageIDs(old.Messages))
+	}
+	_ = writeWorkspacePublishRunsIndex(ctx, cfg, store)
 	return nil
 }
 
@@ -2289,7 +2409,12 @@ func handlePublishCallback(ctx context.Context, cfg config.Config, store *sqlite
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Эта кнопка не из Workspace.")
 		return
 	}
-	draft, ok := publishDrafts[documentID]
+	run, ok, err := store.WorkspacePublishRunForCallback(ctx, documentID, callback.Message.MessageID)
+	if err != nil {
+		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Не удалось прочитать publish preview.")
+		sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, callback.Message.MessageThreadID, "Не удалось прочитать publish preview", err)
+		return
+	}
 	if !ok {
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Preview устарел. Запусти /doc publish ещё раз.")
 		return
@@ -2297,7 +2422,7 @@ func handlePublishCallback(ctx context.Context, cfg config.Config, store *sqlite
 	now := time.Now().UTC()
 	switch action {
 	case "approve":
-		if err := approvePublishPreview(ctx, cfg, store, client, documentID, draft, callback.Message, now); err != nil {
+		if err := approvePublishPreview(ctx, cfg, store, client, run, callback.Message, now); err != nil {
 			_ = client.AnswerCallbackQuery(ctx, callback.ID, "Не получилось опубликовать.")
 			sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, callback.Message.MessageThreadID, "Не удалось опубликовать", err)
 			return
@@ -2305,16 +2430,29 @@ func handlePublishCallback(ctx context.Context, cfg config.Config, store *sqlite
 		delete(publishDrafts, documentID)
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Опубликовала.")
 	case "cancel":
-		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, draft.PreviewMessageIDs)
+		if run.Status != "awaiting_approval" {
+			_ = client.AnswerCallbackQuery(ctx, callback.ID, "Публикация уже была подтверждена и не может быть отменена.")
+			return
+		}
+		if err := store.CancelWorkspacePublishRun(ctx, run.ID, now); err != nil {
+			_ = client.AnswerCallbackQuery(ctx, callback.ID, "Не удалось отменить preview.")
+			return
+		}
+		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, workspacePublishMessageIDs(run.Messages))
 		delete(publishDrafts, documentID)
+		_ = writeWorkspacePublishRunsIndex(ctx, cfg, store)
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Отменила preview.")
 	case "edit":
+		if run.Status != "awaiting_approval" {
+			_ = client.AnswerCallbackQuery(ctx, callback.ID, "Публикация уже подтверждена; preview нельзя менять.")
+			return
+		}
 		key := pendingTaskDateKey{chatID: callback.Message.Chat.ID, threadID: callback.Message.MessageThreadID, userID: callback.From.ID}
-		pendingInputs[key] = pendingWorkspaceInput{Kind: "publish_revision", DocumentID: documentID}
+		pendingInputs[key] = pendingWorkspaceInput{Kind: "publish_revision", DocumentID: documentID, PublishRunID: run.ID}
 		_ = client.SendMessage(ctx, nest.SendMessageRequest{
 			ChatID:          callback.Message.Chat.ID,
 			MessageThreadID: callback.Message.MessageThreadID,
-			Text:            "Напиши, что поменять в preview. В mock-режиме я пересоберу текст без добавления новых фактов. Отменить можно словом <code>Отмена</code>.",
+			Text:            "Напиши, что поменять в preview. Явная правка может разрешить добавить, удалить или заметно переписать материал в указанном тобой объёме. Отменить можно словом <code>Отмена</code>.",
 			ParseMode:       "HTML",
 		})
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Жду правку.")
@@ -2323,43 +2461,122 @@ func handlePublishCallback(ctx context.Context, cfg config.Config, store *sqlite
 	}
 }
 
-func approvePublishPreview(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, documentID int64, draft publishPreviewDraft, callbackMessage *nest.Message, now time.Time) error {
-	doc, err := store.WorkspaceDocumentByID(ctx, documentID)
+func approvePublishPreview(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, run sqlitestore.WorkspacePublishRun, callbackMessage *nest.Message, now time.Time) error {
+	approved, err := store.ApproveWorkspacePublishRun(ctx, run.ID, now)
 	if err != nil {
 		return err
 	}
-	parts, err := store.WorkspaceDocumentParts(ctx, documentID)
+	return resumeWorkspacePublishRun(ctx, cfg, store, client, approved, callbackMessage, now)
+}
+
+func resumeWorkspacePublishRuns(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, now time.Time) error {
+	runs, err := store.ResumableWorkspacePublishRuns(ctx, 20)
 	if err != nil {
 		return err
 	}
-	var published []nest.Message
-	for _, text := range draft.PreviewTexts {
-		message, err := client.SendMessageResult(ctx, nest.SendMessageRequest{
-			ChatID:          cfg.Workspace.ChatID,
-			MessageThreadID: cfg.Workspace.Topics.Useful,
-			Text:            text,
-			ParseMode:       "HTML",
-		})
+	var failures []string
+	for _, run := range runs {
+		if err := resumeWorkspacePublishRun(ctx, cfg, store, client, run, nil, now); err != nil {
+			failures = append(failures, fmt.Sprintf("run %d: %s", run.ID, compactWorkspaceLine(err.Error(), 160)))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func resumeWorkspacePublishRun(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, run sqlitestore.WorkspacePublishRun, callbackMessage *nest.Message, now time.Time) (returnErr error) {
+	defer func() {
+		if returnErr == nil {
+			return
+		}
+		persistCtx, cancel := workspaceTaskReminderPersistenceContext(ctx)
+		defer cancel()
+		_ = store.SetWorkspacePublishRunError(persistCtx, run.ID, publishTelemetryError(returnErr), now)
+		_ = writeWorkspacePublishRunsIndex(persistCtx, cfg, store)
+	}()
+	run, err := store.ApproveWorkspacePublishRun(ctx, run.ID, now)
+	if err != nil {
+		return err
+	}
+	if run.Status == "publishing" {
+		for _, item := range run.Messages {
+			if item.Kind != "final" || item.Status != "pending" {
+				continue
+			}
+			_, _, err := sendDurablePublishMessage(ctx, store, client, item, nest.SendMessageRequest{
+				ChatID:          cfg.Workspace.ChatID,
+				MessageThreadID: cfg.Workspace.Topics.Useful,
+				Text:            item.Text,
+				ParseMode:       "HTML",
+			}, now)
+			if err != nil {
+				_ = store.SetWorkspacePublishRunError(context.WithoutCancel(ctx), run.ID, publishTelemetryError(err), now)
+				_ = writeWorkspacePublishRunsIndex(context.WithoutCancel(ctx), cfg, store)
+				return err
+			}
+		}
+		run, err = store.WorkspacePublishRunByID(ctx, run.ID)
 		if err != nil {
 			return err
 		}
-		published = append(published, message)
+		var blocked []string
+		for _, item := range run.Messages {
+			if item.Kind == "final" && item.Status != "sent" {
+				blocked = append(blocked, fmt.Sprintf("%d:%s", item.Position, item.Status))
+			}
+		}
+		if len(blocked) > 0 {
+			err := fmt.Errorf("final messages require manual reconciliation before completion: %s", strings.Join(blocked, ", "))
+			_ = store.SetWorkspacePublishRunError(context.WithoutCancel(ctx), run.ID, publishTelemetryError(err), now)
+			_ = writeWorkspacePublishRunsIndex(context.WithoutCancel(ctx), cfg, store)
+			return err
+		}
+		if err := store.MarkWorkspacePublishRunFinalizing(ctx, run.ID, now); err != nil {
+			return err
+		}
+		run.Status = "finalizing"
 	}
-	if len(published) == 0 {
+	if run.Status != "finalizing" {
+		return fmt.Errorf("workspace publish run %d cannot resume from %s", run.ID, run.Status)
+	}
+	run, err = store.WorkspacePublishRunByID(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	doc, err := store.WorkspaceDocumentByID(ctx, run.DocumentID)
+	if err != nil {
+		return err
+	}
+	parts, err := store.WorkspaceDocumentParts(ctx, run.DocumentID)
+	if err != nil {
+		return err
+	}
+	var finals []sqlitestore.WorkspacePublishMessage
+	for _, item := range run.Messages {
+		if item.Kind == "final" && item.Status == "sent" {
+			finals = append(finals, item)
+		}
+	}
+	if len(finals) == 0 {
 		return fmt.Errorf("nothing was published")
 	}
 	publishedAt := now
-	if err := store.UpdateWorkspaceDocumentTarget(ctx, documentID, cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, published[0].MessageID, &publishedAt, now); err != nil {
+	if finals[0].SentAt != nil {
+		publishedAt = finals[0].SentAt.UTC()
+	}
+	if err := store.UpdateWorkspaceDocumentTarget(ctx, run.DocumentID, cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, finals[0].MessageID, &publishedAt, now); err != nil {
 		return err
 	}
-	if err := store.UpdateWorkspaceDocumentStatus(ctx, documentID, "published", now); err != nil {
+	if err := store.UpdateWorkspaceDocumentStatus(ctx, run.DocumentID, "published", now); err != nil {
 		return err
 	}
 	for _, part := range parts {
 		if part.SourceChatID == 0 || part.SourceMessageID == 0 {
 			continue
 		}
-		for i, message := range published {
+		for i, message := range finals {
 			derivedType := fmt.Sprintf("useful_material_part_%d_msg_%d", part.PartNo, i+1)
 			if err := store.UpsertWorkspaceDerivedMessage(ctx, sqlitestore.WorkspaceDerivedMessage{
 				SourceChatID:     part.SourceChatID,
@@ -2381,14 +2598,19 @@ func approvePublishPreview(ctx context.Context, cfg config.Config, store *sqlite
 	if err := updateWorkspaceDocumentIndex(ctx, cfg, store, client, "note", now); err != nil {
 		return err
 	}
-	if callbackMessage != nil {
-		text := ""
-		if len(draft.PreviewTexts) > 0 {
-			text = draft.PreviewTexts[len(draft.PreviewTexts)-1]
-		}
-		link := workspaceMessageLink(cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, published[0].MessageID)
+	if err := store.CompleteWorkspacePublishRun(ctx, run.ID, now); err != nil {
+		return err
+	}
+	previewMessages, _ := store.WorkspacePublishMessages(ctx, run.ID, "preview")
+	if callbackMessage == nil && len(previewMessages) > 0 {
+		last := previewMessages[len(previewMessages)-1]
+		callbackMessage = &nest.Message{MessageID: last.MessageID, Chat: nest.Chat{ID: last.ChatID}, MessageThreadID: last.TopicID}
+	}
+	if callbackMessage != nil && len(previewMessages) > 0 {
+		text := previewMessages[len(previewMessages)-1].Text
+		link := workspaceMessageLink(cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, finals[0].MessageID)
 		text = strings.TrimSpace(text) + "\n\n<i>Опубликовано в Полезное:</i> <a href=\"" + html.EscapeString(link) + "\">" + html.EscapeString(doc.Title) + "</a>"
-		text += "\n<i>Модель publish:</i> <code>" + html.EscapeString(publishModelLabel(draft.Model)) + "</code>"
+		text += "\n<i>Модель publish:</i> <code>" + html.EscapeString(publishModelLabel(run.Model)) + "</code>"
 		_ = client.EditMessageText(ctx, nest.EditMessageTextRequest{
 			ChatID:      callbackMessage.Chat.ID,
 			MessageID:   callbackMessage.MessageID,
@@ -2397,7 +2619,18 @@ func approvePublishPreview(ctx context.Context, cfg config.Config, store *sqlite
 			ReplyMarkup: emptyMarkup(),
 		})
 	}
+	_ = writeWorkspacePublishRunsIndex(ctx, cfg, store)
 	return nil
+}
+
+func workspacePublishMessageIDs(messages []sqlitestore.WorkspacePublishMessage) []int {
+	ids := make([]int, 0, len(messages))
+	for _, message := range messages {
+		if message.Kind == "preview" && message.Status == "sent" && message.MessageID > 0 {
+			ids = append(ids, message.MessageID)
+		}
+	}
+	return ids
 }
 
 func deletePublishPreviewMessages(ctx context.Context, client *nest.Client, chatID int64, messageIDs []int) {
@@ -2645,6 +2878,29 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 		usefulItem.Status = status
 	}
 	result.Items = append(result.Items, usefulItem)
+	experienceText, err := renderExperienceQuoteIndex(ctx, store)
+	if err != nil {
+		return SeedDocumentIndexesResult{}, err
+	}
+	experienceItem := SeedDocumentIndexItem{
+		Type:    "quote",
+		Topic:   "Опыт",
+		TopicID: cfg.Workspace.Topics.Experience,
+		Status:  "dry_run",
+		Text:    experienceText,
+	}
+	if opts.Reset {
+		experienceItem.Status = "reset_dry_run"
+	}
+	if !opts.DryRun {
+		messageID, status, err := upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Experience, experienceQuoteIndexKey, experienceText, now, opts.Reset)
+		if err != nil {
+			return SeedDocumentIndexesResult{}, err
+		}
+		experienceItem.MessageID = messageID
+		experienceItem.Status = status
+	}
+	result.Items = append(result.Items, experienceItem)
 	return result, nil
 }
 
@@ -3078,11 +3334,23 @@ func UsefulHelpMessageText() string {
 }
 
 func InboxHelpMessageText() string {
-	return "📥 <b>Inbox</b>\n\nЭто default topic для команд и preview. Команды документов можно отправлять отсюда, но source всё равно берётся из профильного topic: <b>Заметки</b>, <b>Заготовки</b> или <b>Коллекции</b>, если ты не отвечаешь командой прямо на сообщение.\n\nКоманды <code>/useful</code> принимают ID, название или ссылку на публикацию из <b>Полезного</b>.\n\n<code>/id</code> в reply показывает Telegram/source/document IDs. Для cluster-команд ниже работает reply или ссылка на сообщение."
+	return strings.TrimSpace(`📥 <b>Inbox</b>
+
+Это default topic для команд и preview. Команды документов можно отправлять отсюда, но source всё равно берётся из профильного topic: <b>Заметки</b>, <b>Заготовки</b> или <b>Коллекции</b>, если ты не отвечаешь командой прямо на сообщение.
+
+<b>Основные команды</b>
+• <code>/quote</code> — пошагово добавить цитату в <b>Опыт</b>.
+• <code>/search запрос</code> — найти материал одновременно в новом InSync, старом InSync и Sova.Nest.
+• <code>/doc</code>, <code>/template</code>, <code>/collection</code> — работа с документами соответствующих разделов.
+• <code>/useful</code> — управление публикациями из <b>Полезного</b> по ID, названию или ссылке.
+• <code>/cluster</code> — показать, объединить, разделить или дополнить кластер сообщений.
+• <code>/id</code> в reply — показать Telegram/source/document IDs.
+
+Для cluster-команд работает reply, message ID или ссылка на сообщение.`)
 }
 
 func ExperienceHelpMessageText() string {
-	return "🌱 <b>Опыт</b>\n\nСюда можно складывать личные наблюдения и практические выводы. В текущем MVP специальных команд для этого topic нет: бот сохраняет компактные source IDs/links и не тащит raw данные в prompt context."
+	return "🌱 <b>Опыт</b>\n\nСюда можно складывать личные наблюдения, практические выводы и цитаты.\n\n<b>Цитаты</b>\nКоманда <code>/quote</code> запускается только из <b>Inbox</b>: бот спросит текст, необязательные автора и название, покажет preview, а после подтверждения опубликует цитату здесь. Ссылка автоматически появится в динамическом закреплённом индексе <b>Цитаты</b>."
 }
 
 func sendWorkspaceDocumentDone(ctx context.Context, client *nest.Client, chatID int64, threadID int, text string) error {
@@ -3286,7 +3554,7 @@ func pleasantDocumentTypeEmoji(name string) string {
 }
 
 func collectionCategories() []string {
-	return []string{"Рецепты", "Цитаты", "Стихи", "Аниме", "Списки", "Остальное"}
+	return []string{"Рецепты", "Стихи", "Аниме", "Списки", "Остальное"}
 }
 
 func resolveClusterForShow(ctx context.Context, store *sqlitestore.Store, message nest.Message, args []string) (sqlitestore.WorkspaceCluster, bool, error) {

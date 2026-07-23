@@ -24,17 +24,20 @@ provenance-preserving fallback digest and records the degraded mode in its
 summary. Legacy runs that failed specifically at the Codex step may be retried
 from their saved compact bundle without repeating Telegram sync.
 
-An incomplete, malformed, timed out, or otherwise unavailable Qwen
-classification batch is conservatively retained for the final digest and the
-run records Qwen fallbacks instead of failing. Classification decisions are
-stored after each processed batch so a later failure does not discard earlier
-work. Codex still filters the compact retained messages when writing the final
-digest.
+Nest classification and calendar extraction use the ordered Google model route
+documented in `docs/model_routing.md`. An incomplete, malformed, timed out, or
+otherwise unavailable classification batch is retried on weaker models, split,
+and finally retained through the local `keep-all` fallback. Event extraction
+uses the same route but creates no event after terminal failure. Classification
+decisions are stored after each processed batch so a later failure does not
+discard earlier work.
 
-Qwen model-call metrics are compact derived records. They may include run id,
-stage, batch index, message count, approximate input characters, duration,
-success/fallback counts, model name, and a short error string. They must not
-store Telegram message text, prompts, raw responses, secrets, or session data.
+Model-call metrics are compact derived records. They may include run id, stage,
+batch/attempt number, message count, approximate input characters, duration,
+provider/model, HTTP/error class, token counts, finish reason, and a short
+redacted error string. They must not store Telegram message text, prompts, raw
+responses, secrets, or session data. Decisions record the actual winning model
+or the local fallback route.
 
 Overview progress may be published to the Nest Status topic as one edited
 status message. Progress text is operational status, not prompt context. Short
@@ -67,6 +70,11 @@ sources must not be placed there. Each synced message preserves:
 
 The compact review surface is `.state/index/telegram-recent.md`; agents should
 read it before retrieving targeted raw records.
+
+MTProto access is serialized across processes with an advisory lock beside the
+dedicated session file. Search full/recent scans may upsert edited message
+metadata; the append-only raw JSONL remains the audit source for first-seen raw
+records.
 
 ## Calendar approval
 

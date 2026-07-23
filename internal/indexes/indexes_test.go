@@ -109,3 +109,27 @@ func TestWriteQwenPerformanceIndex(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteModelPerformanceIndexIncludesRouteTelemetry(t *testing.T) {
+	cfg := config.Config{StateDir: t.TempDir(), Timezone: "Europe/Moscow"}
+	generatedAt := time.Date(2026, 7, 23, 7, 0, 0, 0, time.UTC)
+	if err := WriteModelPerformanceIndex(cfg, []sqlitestore.ModelCall{{
+		RunID: 9, Stage: "model_classify", BatchIndex: 1, BatchID: "c1b",
+		Attempt: 2, InputMessages: 4, InputChars: 1800, DurationMillis: 900,
+		Success: true, Provider: "google", Model: "gemma-4-31b-it",
+		PromptTokens: 300, OutputTokens: 50, TotalTokens: 350, FinishReason: "STOP",
+		CreatedAt: generatedAt,
+	}}, generatedAt); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(ModelPerformanceIndexPath(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, want := range []string{"# Model Performance", "batch_id=`c1b`", "attempt=2", "provider=`google`", "model=`gemma-4-31b-it`", "tokens=350", "finish=`STOP`"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("model performance index missing %q:\n%s", want, content)
+		}
+	}
+}

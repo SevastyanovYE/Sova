@@ -271,7 +271,7 @@ func TestTopicPinDraftsMapToConfiguredTopics(t *testing.T) {
 	}
 }
 
-func TestWorkspaceCommandHelpSkipsTopicsWithoutCommands(t *testing.T) {
+func TestWorkspaceCommandHelpIncludesExperienceQuoteReference(t *testing.T) {
 	cfg := config.Config{
 		Workspace: config.WorkspaceConfig{
 			Topics: config.WorkspaceTopicIDs{
@@ -283,14 +283,13 @@ func TestWorkspaceCommandHelpSkipsTopicsWithoutCommands(t *testing.T) {
 	var topics []string
 	for _, draft := range WorkspaceCommandHelpDrafts(cfg) {
 		topics = append(topics, draft.Topic)
-	}
-	joined := strings.Join(topics, ",")
-	for _, forbidden := range []string{"Опыт", "Полезное"} {
-		if strings.Contains(joined, forbidden) {
-			t.Fatalf("command help includes %s: %v", forbidden, topics)
+		units := utf16Length(draft.Text) // conservative: includes markup Telegram does not render
+		if units > quoteTelegramTextLimit {
+			t.Fatalf("command help for %s is %d UTF-16 units", draft.Topic, units)
 		}
 	}
-	for _, required := range []string{"Inbox", "Задачи", "Заметки", "Заготовки", "Коллекции"} {
+	joined := strings.Join(topics, ",")
+	for _, required := range []string{"Inbox", "Задачи", "Заметки", "Опыт", "Полезное", "Заготовки", "Коллекции"} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("command help missing %s: %v", required, topics)
 		}

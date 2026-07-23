@@ -32,6 +32,10 @@ func Rebuild(ctx context.Context, cfg config.Config, store *sqlitestore.Store, g
 	if err != nil {
 		return err
 	}
+	if err := WriteModelPerformanceIndex(cfg, calls, generatedAt); err != nil {
+		return err
+	}
+	// One-release compatibility alias for existing agent navigation and tooling.
 	return WriteQwenPerformanceIndex(cfg, calls, generatedAt)
 }
 
@@ -131,18 +135,28 @@ func WriteCalendarIndex(cfg config.Config, candidates []sqlitestore.CalendarCand
 
 func WriteQwenPerformanceIndex(cfg config.Config, calls []sqlitestore.ModelCall, generatedAt time.Time) error {
 	path := QwenPerformanceIndexPath(cfg)
+	return writeModelPerformanceIndex(cfg, path, "Qwen Performance (legacy model-performance alias)", calls, generatedAt)
+}
+
+func WriteModelPerformanceIndex(cfg config.Config, calls []sqlitestore.ModelCall, generatedAt time.Time) error {
+	return writeModelPerformanceIndex(cfg, ModelPerformanceIndexPath(cfg), "Model Performance", calls, generatedAt)
+}
+
+func writeModelPerformanceIndex(cfg config.Config, path, title string, calls []sqlitestore.ModelCall, generatedAt time.Time) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	location := mustLocation(cfg.Timezone)
 	var b strings.Builder
-	b.WriteString("# Qwen Performance\n\n")
+	b.WriteString("# ")
+	b.WriteString(title)
+	b.WriteString("\n\n")
 	b.WriteString("Generated: ")
 	b.WriteString(generatedAt.In(location).Format(time.RFC3339))
 	b.WriteString("\n\n")
 	b.WriteString("This index stores only compact model-call metrics, not Telegram text or prompts.\n\n")
 	if len(calls) == 0 {
-		b.WriteString("No Qwen calls recorded yet.\n")
+		b.WriteString("No model calls recorded yet.\n")
 		return os.WriteFile(path, []byte(b.String()), 0o600)
 	}
 	for _, call := range calls {
@@ -152,6 +166,13 @@ func WriteQwenPerformanceIndex(cfg config.Config, calls []sqlitestore.ModelCall,
 		b.WriteString(call.Stage)
 		b.WriteString("` batch=")
 		b.WriteString(strconv.Itoa(call.BatchIndex))
+		if call.BatchID != "" {
+			b.WriteString(" batch_id=`")
+			b.WriteString(call.BatchID)
+			b.WriteString("`")
+		}
+		b.WriteString(" attempt=")
+		b.WriteString(strconv.Itoa(call.Attempt))
 		b.WriteString(" messages=")
 		b.WriteString(strconv.Itoa(call.InputMessages))
 		b.WriteString(" chars=")
@@ -165,8 +186,31 @@ func WriteQwenPerformanceIndex(cfg config.Config, calls []sqlitestore.ModelCall,
 			b.WriteString(strconv.Itoa(call.Fallbacks))
 		}
 		if call.Model != "" {
+			if call.Provider != "" {
+				b.WriteString(" provider=`")
+				b.WriteString(call.Provider)
+				b.WriteString("`")
+			}
 			b.WriteString(" model=`")
 			b.WriteString(call.Model)
+			b.WriteString("`")
+		}
+		if call.ErrorClass != "" {
+			b.WriteString(" error_class=`")
+			b.WriteString(call.ErrorClass)
+			b.WriteString("`")
+		}
+		if call.StatusCode != 0 {
+			b.WriteString(" status_code=")
+			b.WriteString(strconv.Itoa(call.StatusCode))
+		}
+		if call.TotalTokens > 0 {
+			b.WriteString(" tokens=")
+			b.WriteString(strconv.Itoa(call.TotalTokens))
+		}
+		if call.FinishReason != "" {
+			b.WriteString(" finish=`")
+			b.WriteString(call.FinishReason)
 			b.WriteString("`")
 		}
 		if call.Error != "" {
@@ -214,7 +258,11 @@ func QwenPerformanceIndexPath(cfg config.Config) string {
 	return filepath.Join(cfg.StateDir, "index", "qwen-performance.md")
 }
 
+func ModelPerformanceIndexPath(cfg config.Config) string {
+	return filepath.Join(cfg.StateDir, "index", "model-performance.md")
+}
+
 func Summary(cfg config.Config) string {
-	return fmt.Sprintf("updated %s, %s, and %s",
-		RunsIndexPath(cfg), CalendarIndexPath(cfg), QwenPerformanceIndexPath(cfg))
+	return fmt.Sprintf("updated %s, %s, %s, and legacy alias %s",
+		RunsIndexPath(cfg), CalendarIndexPath(cfg), ModelPerformanceIndexPath(cfg), QwenPerformanceIndexPath(cfg))
 }

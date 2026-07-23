@@ -1,5 +1,32 @@
 # Current State
 
+- The Sova 0.1.0 implementation is prepared locally but has not yet been
+  deployed, tagged, or announced. `VERSION`, `CHANGELOG.md`, embedded build
+  metadata, deployment receipts, and duplicate-safe Inbox announcement gates
+  are present; production execution remains a separate verified release step.
+- Workspace has an Inbox-only `/quote` wizard. Quotes are rendered as native
+  Telegram blockquotes, stored in `workspace_quotes`, linked from a dynamic
+  `Опыт` index, and moved to `needs_review` when their source message changes.
+  Wizard progress after text entry survives restart, and ambiguous Telegram
+  delivery is not automatically repeated.
+- Deferred tasks have a durable reminder outbox and a startup/minute worker.
+  Each schedule generation sends at most one reminder, retries confirmed
+  failures, never blindly retries ambiguous sends, reopens the task, and
+  refreshes its card and backlog.
+- Publish now uses the shared redacted Google REST client, source-part coverage,
+  safe Telegram HTML validation/splitting, a freer explicitly trusted revision
+  field, and durable preview/final outboxes that resume without duplicate sends.
+- Semantic search storage and routing exist for current InSync, legacy InSync,
+  and Sova.Nest. `workspace search-index --full-scan` is the readiness gate;
+  `/search` remains disabled until that pass succeeds and
+  `SOVA_SEARCH_ENABLED=true` is configured. Both API-key routes use the same
+  `gemini-embedding-2` 768-dimensional space.
+  MTProto full scans are bounded/checkpointed; background sync combines recent
+  refresh with a rotating historical edit/delete audit.
+- `workspace seed-command-help` now stores one tracked `command_help` message
+  per Workspace topic, pins it, and edits the same message on later runs. Inbox
+  lists `/quote` and `/search`; Experience has dedicated quote instructions.
+
 - Repository has a baseline commit and a working Go + SQLite MVP foundation.
 - Runtime: local Mac, Go, SQLite, one overview worker in `sova serve`.
 - Overview triggers: daily schedule, Nest service commands, pinned Chat button,
@@ -10,19 +37,21 @@
 - Sova Nest overview sync reads only `SOVA_NEST_TELEGRAM_ALLOWED_CHATS`.
   Workspace/personal Telegram sources stay in `SOVA_WORKSPACE_*` config and are
   not part of the study digest allowlist.
-- Local model: Ollama `qwen3:14b`.
+- Production Nest classification/event extraction uses the ordered Google route
+  `gemini-3.5-flash-lite`, `gemma-4-31b-it`, `gemini-3.1-flash-lite`,
+  `gemma-4-26b-a4b-it` via `SOVA_GEMINI_API_KEY`. Ollama/Qwen commands remain
+  for one transition release but are not used by the production overview.
 - Telegram auth: dedicated MTProto project session only.
 - Telegram sync verified end-to-end for two Sova Nest study sources: dry-run
   writes nothing, sync stores 200 messages, repeat sync dedupes to zero new
   messages, media metadata and one service message are handled.
 - `sova run --trigger manual` now calls Telegram sync and completes successfully
   when there are no new messages.
-- Qwen classification, compact run bundle generation, Codex digest generation,
-  and Nest Digest publication are wired. Qwen runs with compact output,
-  `think:false`, bounded batch/stage budgets, per-batch decision persistence,
-  conservative timeout/error fallback, and compact performance metrics. The
-  production classification batch target is 16 messages after `qwen3:14b`
-  timed out at larger batch sizes.
+- Google classification, compact run bundle generation, Codex digest generation,
+  and Nest Digest publication are wired. Classification and event extraction
+  use separate bounded batches, exact structured-response validation,
+  sequential model fallback, split retry, local keep-all/no-event terminal
+  behavior, per-attempt telemetry, and per-decision winning model persistence.
 - `sova serve` uses Bot API long polling for text commands in the Status service
   topic, an existing "Создать обзор" button in the Chat study topic, Status
   progress updates, Calendar date-edit callbacks, and the local daily scheduler.
@@ -40,11 +69,13 @@
 - Overview run 5 was recovered from 42 stored messages and published
   successfully after its original empty Qwen response.
 - Compact indexes exist for Telegram recent content, overview runs, and calendar
-  setup state under `.state/index/`. Qwen model-call metrics are indexed at
-  `.state/index/qwen-performance.md`; model comparison summaries are written to
+  setup state under `.state/index/`. Model-call metrics are indexed at
+  `.state/index/model-performance.md`; `.state/index/qwen-performance.md` is a
+  one-release compatibility alias. Historical model comparison summaries are written to
   `.state/index/qwen-benchmark.md` and labeled eval summaries to
   `.state/index/qwen-eval.md`.
-- Qwen runtime remains `qwen3:14b` for MVP close. A labeled 100-message eval on
+- Historical local Qwen evaluation remains reproducible but does not select the
+  production route. A labeled 100-message eval on
   2026-06-27 showed `qwen3:8b` is the best next candidate after prompt/event
   threshold tuning; `qwen3:4b`, `gemma3:4b`, and `llama3.2:3b` are not suitable
   for this MVP pipeline.

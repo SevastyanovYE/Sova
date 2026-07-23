@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/SevastyanovYE/Sova/internal/config"
+	"github.com/SevastyanovYE/Sova/internal/semanticsearch"
 	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
 )
 
@@ -140,6 +141,17 @@ func DoctorChecks(ctx context.Context, cfg config.Config, store *sqlitestore.Sto
 	}
 	if store == nil {
 		return append(checks, Check{Name: "workspace_database", Status: "needs_input", Message: "open SQLite store before audit"})
+	}
+	if cfg.Search.Enabled {
+		ready, err := semanticsearch.NewService(store, cfg.Search.EmbeddingModel, "", "").IndexReady(ctx)
+		switch {
+		case err != nil:
+			checks = append(checks, Check{Name: "semantic_search_index", Status: "error", Message: err.Error()})
+		case !ready:
+			checks = append(checks, Check{Name: "semantic_search_index", Status: "needs_input", Message: "run `sova workspace search-index --full-scan` before enabling /search"})
+		default:
+			checks = append(checks, Check{Name: "semantic_search_index", Status: "ok", Message: "all three scopes are ready"})
+		}
 	}
 	source, err := ResolveLegacySource(ctx, cfg, store)
 	if err != nil {
@@ -816,7 +828,7 @@ func TopicPinDrafts() []TopicPinDraft {
 		{"Опыт", "Личные выводы и наблюдения: что сработало, что не сработало, какие правила хочется сохранить для себя.\n\n<blockquote>Здесь важны контекст, голос и практический след, а не энциклопедическая гладкость.</blockquote>"},
 		{"Полезное", "Готовые материалы после preview/approval: инструкции, карточки, списки, маршруты и справки, к которым хочется быстро возвращаться.\n\n<blockquote>Сырые мысли сначала живут в Заметках, чтобы этот слой оставался чистым.</blockquote>"},
 		{"Заготовки", "Промпты, шаблоны, reusable instructions, письма и рабочие заготовки. Индекс собирает документы и их части ссылками на исходные сообщения.\n\nСложные миграции старых промптов сначала проходят review."},
-		{"Коллекции", "Рецепты, цитаты, стихи, аниме, списки и прочие подборки. Индекс держится по категориям: <b>Рецепты</b>, <b>Цитаты</b>, <b>Стихи</b>, <b>Аниме</b>, <b>Списки</b>, <b>Остальное</b>."},
+		{"Коллекции", "Рецепты, стихи, аниме, списки и прочие подборки. Индекс держится по категориям: <b>Рецепты</b>, <b>Стихи</b>, <b>Аниме</b>, <b>Списки</b>, <b>Остальное</b>."},
 	}
 }
 

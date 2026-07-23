@@ -167,6 +167,25 @@ func TestAppendTelegramRawJSONLAppendOnly(t *testing.T) {
 	}
 }
 
+func TestTelegramSenderNameUsesVisibleNameAndUsernameFallback(t *testing.T) {
+	user := &tg.User{ID: 42}
+	user.SetFirstName("Ada")
+	user.SetLastName("Lovelace")
+	if got := telegramUserDisplayName(user); got != "Ada Lovelace" {
+		t.Fatalf("display name = %q", got)
+	}
+	usernameOnly := &tg.User{ID: 43}
+	usernameOnly.SetUsername("sova_user")
+	if got := telegramUserDisplayName(usernameOnly); got != "@sova_user" {
+		t.Fatalf("username display = %q", got)
+	}
+	message := &tg.Message{}
+	message.SetFromID(&tg.PeerUser{UserID: 42})
+	if got := telegramMessageSender(message, map[int64]string{42: "Ada Lovelace"}); got != "Ada Lovelace" {
+		t.Fatalf("message sender = %q", got)
+	}
+}
+
 func rawJSONLLineCount(t *testing.T, path string) int {
 	t.Helper()
 	data, err := os.ReadFile(path)

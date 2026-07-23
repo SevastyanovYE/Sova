@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,23 +18,24 @@ import (
 	"github.com/SevastyanovYE/Sova/internal/codexcli"
 	"github.com/SevastyanovYE/Sova/internal/config"
 	"github.com/SevastyanovYE/Sova/internal/indexes"
+	"github.com/SevastyanovYE/Sova/internal/model"
 	"github.com/SevastyanovYE/Sova/internal/nest"
-	"github.com/SevastyanovYE/Sova/internal/qwen"
 	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
 	"github.com/SevastyanovYE/Sova/internal/telegrammt"
 )
 
 const (
-	qwenBatchSize             = 16
-	qwenBatchMaxChars         = 3200
-	qwenMessageMaxText        = 700
-	qwenBatchTimeout          = 75 * time.Second
-	qwenClassificationBudget  = 6 * time.Minute
-	qwenEventBatchTimeout     = 45 * time.Second
-	qwenEventExtractionBudget = 2 * time.Minute
+	modelBatchSize             = 32
+	modelBatchMaxChars         = 24000
+	modelMessageMaxText        = 1200
+	modelClassificationBudget  = 12 * time.Minute
+	modelEventBatchSize        = 12
+	modelEventBatchMaxChars    = 12000
+	modelEventMessageMaxText   = 2000
+	modelEventExtractionBudget = 8 * time.Minute
 )
 
-var qwenEventDatePattern = regexp.MustCompile(`(?i)(\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b)`)
+var modelEventDatePattern = regexp.MustCompile(`(?i)(\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b|\b(?:сегодня|завтра|послезавтра)\b)`)
 
 type Options struct {
 	GenerateDigest  bool
@@ -68,15 +70,14 @@ type Result struct {
 	Degraded           bool
 	DigestWarning      string
 	QwenFallbacks      int
-}
-
-type messageClassifier interface {
-	ClassifyBatch(context.Context, []qwen.MessageInput) (qwen.BatchResult, string, error)
+	ModelFallbacks     int
+	ModelSummary       string
 }
 
 type classifiedMessage struct {
 	Message  telegrammt.SyncedMessage
-	Decision qwen.MessageDecision
+	Decision model.MessageDecision
+	Winner   model.Winner
 }
 
 func ProductionOptions() Options {
@@ -146,27 +147,31 @@ func Run(ctx context.Context, cfg config.Config, trigger string, opts Options) (
 		return result, nil
 	}
 
-	classified, qwenFallbacks, err := classifyMessages(ctx, cfg, store, runRecord.ID, newMessages, opts)
+	modelRouter := model.NewGoogleRouter(cfg.Gemini.APIKey, cfg.NestGoogleModels)
+	classified, modelFallbacks, modelSummary, err := classifyMessages(ctx, cfg, store, modelRouter, runRecord.ID, newMessages, opts)
 	if err != nil {
-		return fail(fmt.Errorf("qwen classification: %w", err))
+		return fail(fmt.Errorf("model classification: %w", err))
 	}
 	result.ClassifiedMessages = len(classified)
 	result.KeptMessages = countKept(classified)
-	result.QwenFallbacks = qwenFallbacks
-	if qwenFallbacks > 0 {
+	result.QwenFallbacks = modelFallbacks // compatibility field for pre-0.1 callers
+	result.ModelFallbacks = modelFallbacks
+	result.ModelSummary = modelSummary
+	if modelFallbacks > 0 {
 		if opts.Progress == nil {
 			publishStatusBestEffort(ctx, cfg, fmt.Sprintf(
-				"Sova overview run %d used conservative Qwen fallback for %d message(s).",
-				runRecord.ID, qwenFallbacks,
+				"Sova overview run %d used local keep-all fallback for %d message(s).",
+				runRecord.ID, modelFallbacks,
 			))
 		}
 	}
 
-	calendarCandidates, err := extractCalendarCandidates(ctx, cfg, store, runRecord.ID, classified, opts)
+	calendarCandidates, eventModelSummary, err := extractCalendarCandidates(ctx, cfg, store, modelRouter, runRecord.ID, classified, opts)
 	if err != nil {
 		return fail(fmt.Errorf("calendar event extraction: %w", err))
 	}
 	result.CalendarCandidates = len(calendarCandidates)
+	result.ModelSummary = joinModelSummaries(result.ModelSummary, eventModelSummary)
 
 	emitProgress(ctx, opts, ProgressEvent{
 		RunID: runRecord.ID, Stage: "bundle", Message: "Собираю compact bundle для финального дайджеста.", EstimatedRemaining: 6 * time.Minute,
@@ -229,8 +234,11 @@ func Run(ctx context.Context, cfg config.Config, trigger string, opts Options) (
 	if result.Degraded {
 		summary += "; Codex unavailable, fallback digest used"
 	}
-	if result.QwenFallbacks > 0 {
-		summary += fmt.Sprintf("; qwen_fallbacks=%d", result.QwenFallbacks)
+	if result.ModelFallbacks > 0 {
+		summary += fmt.Sprintf("; model_fallbacks=%d", result.ModelFallbacks)
+	}
+	if result.ModelSummary != "" {
+		summary += "; models=" + result.ModelSummary
 	}
 	if err := store.FinishOverview(ctx, runRecord.ID, "success", summary, "", time.Now().UTC()); err != nil {
 		return fail(err)
@@ -264,7 +272,7 @@ func RetryFailedRun(ctx context.Context, cfg config.Config, runID int64) (Result
 	if strings.Contains(strings.ToLower(runRecord.Error), "codex digest") {
 		return retryFailedCodexRun(ctx, cfg, store, runRecord)
 	}
-	if strings.Contains(strings.ToLower(runRecord.Error), "qwen classification") {
+	if strings.Contains(strings.ToLower(runRecord.Error), "qwen classification") || strings.Contains(strings.ToLower(runRecord.Error), "model classification") {
 		return retryFailedQwenRun(ctx, cfg, store, runRecord)
 	}
 	return Result{}, fmt.Errorf("overview run %d does not have a safely retryable failure", runID)
@@ -323,17 +331,27 @@ func retryFailedQwenRun(ctx context.Context, cfg config.Config, store *sqlitesto
 	}
 	result := Result{RunID: runRecord.ID, Trigger: runRecord.Trigger, Status: "failed", NewMessages: len(messages)}
 	classified := conservativeClassifications(messages)
-	if err := insertClassifiedDecisions(ctx, store, runRecord.ID, cfg.OllamaModel, classified); err != nil {
+	inputs, _ := modelInputs(messages)
+	localAttempt := model.Attempt{
+		Provider: "local", Model: "keep-all", Attempt: 1, BatchID: "retry-local",
+		InputMessages: len(inputs), InputChars: model.ApproxChars(inputs), Success: true,
+		ErrorClass: "heuristic-fallback", FinishReason: "legacy-run-recovery",
+	}
+	recordModelAttempts(ctx, store, runRecord.ID, "model_classify", 1, []model.Attempt{localAttempt})
+	if err := insertClassifiedDecisions(ctx, store, runRecord.ID, classified); err != nil {
 		return result, fmt.Errorf("store conservative classifications: %w", err)
 	}
 	result.ClassifiedMessages = len(classified)
 	result.KeptMessages = countKept(classified)
 	result.QwenFallbacks = len(classified)
-	calendarCandidates, err := extractCalendarCandidates(ctx, cfg, store, runRecord.ID, classified, Options{})
+	result.ModelFallbacks = len(classified)
+	modelRouter := model.NewGoogleRouter(cfg.Gemini.APIKey, cfg.NestGoogleModels)
+	calendarCandidates, modelSummary, err := extractCalendarCandidates(ctx, cfg, store, modelRouter, runRecord.ID, classified, Options{})
 	if err != nil {
 		return result, fmt.Errorf("calendar event extraction: %w", err)
 	}
 	result.CalendarCandidates = len(calendarCandidates)
+	result.ModelSummary = modelSummary
 	syncResult := recoveredSyncResult(messages)
 	bundlePath, bundle, err := writeRunBundle(cfg, runRecord.ID, syncResult, messages, classified, time.Now().UTC())
 	if err != nil {
@@ -361,7 +379,7 @@ func retryFailedQwenRun(ctx context.Context, cfg config.Config, store *sqlitesto
 		return result, fmt.Errorf("publish calendar candidates: %w", err)
 	}
 	summary := fmt.Sprintf(
-		"recovered failed Qwen run: messages=%d classified=%d kept=%d qwen_fallbacks=%d calendar_candidates=%d; published to Nest Digest",
+		"recovered failed model run: messages=%d classified=%d kept=%d model_fallbacks=%d calendar_candidates=%d; published to Nest Digest",
 		result.NewMessages, result.ClassifiedMessages, result.KeptMessages, result.QwenFallbacks, result.CalendarCandidates,
 	)
 	if result.Degraded {
@@ -383,7 +401,7 @@ func syncedMessagesFromRecent(recent []sqlitestore.TelegramRecentMessage) []tele
 		messages = append(messages, telegrammt.SyncedMessage{
 			SourceRef: message.SourceRef, SourceTitle: message.SourceTitle, Username: message.Username,
 			ChatID: message.ChatID, MessageID: message.MessageID, Date: message.Date, Kind: message.Kind,
-			Text: message.Text, MediaType: message.MediaType, SourceLink: message.SourceLink,
+			Sender: message.Sender, Text: message.Text, MediaType: message.MediaType, SourceLink: message.SourceLink,
 		})
 	}
 	return messages
@@ -409,75 +427,44 @@ func recoveredSyncResult(messages []telegrammt.SyncedMessage) telegrammt.SyncRes
 	return result
 }
 
-func extractCalendarCandidates(ctx context.Context, cfg config.Config, store *sqlitestore.Store, runID int64, classified []classifiedMessage, opts Options) ([]sqlitestore.CalendarCandidate, error) {
+func extractCalendarCandidates(ctx context.Context, cfg config.Config, store *sqlitestore.Store, router *model.Router, runID int64, classified []classifiedMessage, opts Options) ([]sqlitestore.CalendarCandidate, string, error) {
 	inputs, byID := eventInputs(classified)
-	if len(inputs) == 0 {
-		return nil, nil
+	if err := hydrateEventContext(ctx, store, inputs, byID); err != nil {
+		return nil, "", err
 	}
-	client := qwen.New(cfg.OllamaURL, cfg.OllamaModel)
-	now := time.Now().UTC()
+	if len(inputs) == 0 {
+		return nil, "", nil
+	}
+	now := time.Now().In(mustLocation(cfg.Timezone))
 	var candidates []sqlitestore.CalendarCandidate
-	stageCtx, cancel := context.WithTimeout(ctx, qwenEventExtractionBudget)
+	var allAttempts []model.Attempt
+	stageCtx, cancel := context.WithTimeout(ctx, modelEventExtractionBudget)
 	defer cancel()
 	batches := eventBatches(inputs)
 	for batchIndex, batch := range batches {
 		emitProgress(ctx, opts, ProgressEvent{
-			RunID: runID, Stage: "qwen_events", Current: batchIndex + 1, Total: len(batches),
-			Message:            "Извлекаю календарные кандидаты через Qwen.",
-			EstimatedRemaining: qwenEventExtractionBudget - time.Duration(batchIndex)*qwenEventBatchTimeout,
+			RunID: runID, Stage: "model_events", Current: batchIndex + 1, Total: len(batches),
+			Message:            "Извлекаю календарные кандидаты через Google model route.",
+			EstimatedRemaining: time.Duration(len(batches)-batchIndex) * model.DefaultEventTimeout,
 		})
 		if stageCtx.Err() != nil {
-			recordModelCallBestEffort(ctx, store, sqlitestore.ModelCall{
-				RunID: runID, Stage: "qwen_events", BatchIndex: batchIndex + 1,
-				InputMessages: len(batch), InputChars: qwen.ApproxEventChars(batch),
-				DurationMillis: 0, Success: false, Fallbacks: len(batch),
-				Error: compactPlain(stageCtx.Err().Error(), 260), Model: cfg.OllamaModel,
-			})
 			publishStatusBestEffort(ctx, cfg, fmt.Sprintf(
-				"Sova overview run %d skipped %d calendar extraction item(s): Qwen event budget exceeded.",
+				"Sova overview run %d skipped %d calendar extraction item(s): model event budget exceeded.",
 				runID, len(batch),
 			))
 			continue
 		}
-		batchCtx, batchCancel := context.WithTimeout(stageCtx, qwenEventBatchTimeout)
-		started := time.Now()
-		result, raw, err := client.ExtractEvents(batchCtx, batch, now, cfg.Timezone)
-		duration := time.Since(started)
-		batchCancel()
+		output, err := router.ExtractEvents(stageCtx, fmt.Sprintf("e%d", batchIndex+1), batch, now, cfg.Timezone)
+		allAttempts = append(allAttempts, output.Attempts...)
+		recordModelAttempts(ctx, store, runID, "model_events", batchIndex+1, output.Attempts)
 		if err != nil {
-			errText := compactPlain(err.Error(), 260)
-			if strings.TrimSpace(raw) != "" {
-				errText = compactPlain(err.Error()+"; raw response: "+compactLine(raw, 260), 300)
-			}
-			recordModelCallBestEffort(ctx, store, sqlitestore.ModelCall{
-				RunID: runID, Stage: "qwen_events", BatchIndex: batchIndex + 1,
-				InputMessages: len(batch), InputChars: qwen.ApproxEventChars(batch),
-				DurationMillis: duration.Milliseconds(), Success: false, Fallbacks: len(batch),
-				Error: errText, Model: cfg.OllamaModel,
-			})
-			if qwen.IsIncompleteResult(err) {
-				publishStatusBestEffort(ctx, cfg, fmt.Sprintf(
-					"Sova overview run %d skipped %d incomplete calendar extraction result(s).",
-					runID, len(batch),
-				))
-				continue
-			}
-			publishStatusBestEffort(ctx, cfg, fmt.Sprintf(
-				"Sova overview run %d skipped %d calendar extraction item(s): %s",
-				runID, len(batch), errText,
-			))
-			continue
+			return nil, summarizeModelAttempts(allAttempts), err
 		}
-		recordModelCallBestEffort(ctx, store, sqlitestore.ModelCall{
-			RunID: runID, Stage: "qwen_events", BatchIndex: batchIndex + 1,
-			InputMessages: len(batch), InputChars: qwen.ApproxEventChars(batch),
-			DurationMillis: duration.Milliseconds(), Success: true, Model: cfg.OllamaModel,
-		})
-		for _, extracted := range result.Events {
+		for _, extracted := range output.Events {
 			message := byID[extracted.ID]
 			candidate, ok, err := calendarCandidateFromExtraction(cfg, runID, message, extracted)
 			if err != nil {
-				return nil, err
+				return nil, summarizeModelAttempts(allAttempts), err
 			}
 			if ok {
 				candidates = append(candidates, candidate)
@@ -487,42 +474,94 @@ func extractCalendarCandidates(ctx context.Context, cfg config.Config, store *sq
 	inserted, err := store.InsertCalendarCandidates(ctx, candidates, time.Now().UTC())
 	if err == nil {
 		emitProgress(ctx, opts, ProgressEvent{
-			RunID: runID, Stage: "qwen_events_done", Message: fmt.Sprintf("Календарная стадия готова: кандидатов %d.", len(inserted)), EstimatedRemaining: 6 * time.Minute,
+			RunID: runID, Stage: "model_events_done", Message: fmt.Sprintf("Календарная стадия готова: кандидатов %d; %s.", len(inserted), summarizeModelAttempts(allAttempts)), EstimatedRemaining: 6 * time.Minute,
 		})
 	}
-	return inserted, err
+	return inserted, summarizeModelAttempts(allAttempts), err
 }
 
-func eventInputs(classified []classifiedMessage) ([]qwen.EventInput, map[string]telegrammt.SyncedMessage) {
-	inputs := make([]qwen.EventInput, 0, len(classified))
+func hydrateEventContext(ctx context.Context, store *sqlitestore.Store, inputs []model.EventInput, byID map[string]telegrammt.SyncedMessage) error {
+	for index := range inputs {
+		message, ok := byID[inputs[index].ID]
+		if !ok {
+			continue
+		}
+		previous, err := store.TelegramMessagesBefore(ctx, message.SourceRef, message.Date, message.MessageID, 2)
+		if err != nil {
+			return err
+		}
+		contextItems := make([]model.EventContext, 0, len(previous))
+		for _, item := range previous {
+			if text := strings.TrimSpace(item.Text); text != "" {
+				contextItems = append(contextItems, model.EventContext{
+					Time: item.Date, Kind: item.Kind, Text: compactPromptText(text, 800),
+				})
+			}
+		}
+		if len(contextItems) > 0 {
+			inputs[index].Context = contextItems
+		}
+	}
+	return nil
+}
+
+func eventInputs(classified []classifiedMessage) ([]model.EventInput, map[string]telegrammt.SyncedMessage) {
+	sorted := append([]classifiedMessage(nil), classified...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Message.SourceRef != sorted[j].Message.SourceRef {
+			return sorted[i].Message.SourceRef < sorted[j].Message.SourceRef
+		}
+		if !sorted[i].Message.Date.Equal(sorted[j].Message.Date) {
+			return sorted[i].Message.Date.Before(sorted[j].Message.Date)
+		}
+		return sorted[i].Message.MessageID < sorted[j].Message.MessageID
+	})
+	inputs := make([]model.EventInput, 0, len(sorted))
 	byID := make(map[string]telegrammt.SyncedMessage, len(classified))
-	for _, item := range classified {
-		if !item.Decision.HasEvent || (!item.Decision.Keep && item.Decision.Importance < 1) {
-			continue
-		}
+	previousBySource := map[string][]classifiedMessage{}
+	for _, item := range sorted {
 		text := strings.TrimSpace(item.Message.Text)
-		if text == "" {
+		isCandidate := item.Decision.HasEvent || likelyEventText(text)
+		if !isCandidate || text == "" {
+			previousBySource[item.Message.SourceRef] = append(previousBySource[item.Message.SourceRef], item)
 			continue
 		}
-		id := messageID(item.Message)
-		inputs = append(inputs, qwen.EventInput{
+		contextItems := previousBySource[item.Message.SourceRef]
+		if len(contextItems) > 2 {
+			contextItems = contextItems[len(contextItems)-2:]
+		}
+		id := fmt.Sprintf("e%06d", len(inputs)+1)
+		input := model.EventInput{
 			ID:         id,
 			SourceRef:  item.Message.SourceRef,
 			SourceLink: item.Message.SourceLink,
-			Text:       compactLine(text, qwenMessageMaxText),
-		})
+			Time:       item.Message.Date,
+			Kind:       item.Message.Kind,
+			Text:       compactPromptText(text, modelEventMessageMaxText),
+		}
+		for _, previous := range contextItems {
+			if previousText := strings.TrimSpace(previous.Message.Text); previousText != "" {
+				input.Context = append(input.Context, model.EventContext{
+					Time: previous.Message.Date, Kind: previous.Message.Kind,
+					Text: compactPromptText(previousText, 800),
+				})
+			}
+		}
+		inputs = append(inputs, input)
 		byID[id] = item.Message
+		previousBySource[item.Message.SourceRef] = append(previousBySource[item.Message.SourceRef], item)
 	}
 	return inputs, byID
 }
 
-func eventBatches(inputs []qwen.EventInput) [][]qwen.EventInput {
-	var batches [][]qwen.EventInput
+func eventBatches(inputs []model.EventInput) [][]model.EventInput {
+	var batches [][]model.EventInput
 	for len(inputs) > 0 {
 		end := 0
-		for end < len(inputs) && end < qwenBatchSize {
+		source := inputs[0].SourceRef
+		for end < len(inputs) && end < modelEventBatchSize && inputs[end].SourceRef == source {
 			candidate := inputs[:end+1]
-			if end > 0 && qwen.ApproxEventChars(candidate) > qwenBatchMaxChars {
+			if end > 0 && model.ApproxEventChars(candidate) > modelEventBatchMaxChars {
 				break
 			}
 			end++
@@ -536,7 +575,7 @@ func eventBatches(inputs []qwen.EventInput) [][]qwen.EventInput {
 	return batches
 }
 
-func calendarCandidateFromExtraction(cfg config.Config, runID int64, message telegrammt.SyncedMessage, extracted qwen.EventCandidate) (sqlitestore.CalendarCandidate, bool, error) {
+func calendarCandidateFromExtraction(cfg config.Config, runID int64, message telegrammt.SyncedMessage, extracted model.EventCandidate) (sqlitestore.CalendarCandidate, bool, error) {
 	if !extracted.HasEvent || strings.TrimSpace(extracted.Title) == "" || strings.TrimSpace(extracted.Start) == "" {
 		return sqlitestore.CalendarCandidate{}, false, nil
 	}
@@ -580,151 +619,144 @@ func rebuildIndexesBestEffort(ctx context.Context, cfg config.Config, store *sql
 	}
 }
 
-func classifyMessages(ctx context.Context, cfg config.Config, store *sqlitestore.Store, runID int64, messages []telegrammt.SyncedMessage, opts Options) ([]classifiedMessage, int, error) {
-	inputs, byID := qwenInputs(messages)
+func classifyMessages(ctx context.Context, cfg config.Config, store *sqlitestore.Store, router *model.Router, runID int64, messages []telegrammt.SyncedMessage, opts Options) ([]classifiedMessage, int, string, error) {
+	inputs, byID := modelInputs(messages)
 	if len(inputs) == 0 {
-		return nil, 0, nil
+		return nil, 0, "", nil
 	}
-	client := qwen.New(cfg.OllamaURL, cfg.OllamaModel)
 	var classified []classifiedMessage
+	var allAttempts []model.Attempt
 	fallbacks := 0
-	stageCtx, cancel := context.WithTimeout(ctx, qwenClassificationBudget)
+	stageCtx, cancel := context.WithTimeout(ctx, modelClassificationBudget)
 	defer cancel()
-	batches := qwenBatches(inputs)
+	batches := modelBatches(inputs)
 	for batchIndex, batch := range batches {
 		remainingBatches := len(batches) - batchIndex
 		emitProgress(ctx, opts, ProgressEvent{
-			RunID: runID, Stage: "qwen_classify", Current: batchIndex + 1, Total: len(batches),
-			Message:            fmt.Sprintf("Классифицирую сообщения через Qwen: batch %d/%d.", batchIndex+1, len(batches)),
-			EstimatedRemaining: time.Duration(remainingBatches) * qwenBatchTimeout,
+			RunID: runID, Stage: "model_classify", Current: batchIndex + 1, Total: len(batches),
+			Message:            fmt.Sprintf("Классифицирую сообщения через Google model route: batch %d/%d.", batchIndex+1, len(batches)),
+			EstimatedRemaining: time.Duration(remainingBatches) * model.DefaultClassificationTimeout,
 		})
-		var decisions []qwen.MessageDecision
-		var batchFallbacks int
-		var errText string
-		var err error
-		started := time.Now()
 		if stageCtx.Err() != nil {
-			errText = "classification budget exceeded: " + stageCtx.Err().Error()
-			decisions = fallbackDecisions(batch, "Qwen не успел обработать пачку; сохранено для итогового обзора")
-			batchFallbacks = len(decisions)
-		} else {
-			batchCtx, batchCancel := context.WithTimeout(stageCtx, qwenBatchTimeout)
-			decisions, batchFallbacks, errText, err = classifyBatchResilient(batchCtx, client, batch)
-			batchCancel()
+			fallbackBatch := localKeepAll(batch, "общий бюджет классификации исчерпан")
+			batchClassified := make([]classifiedMessage, 0, len(fallbackBatch))
+			for _, decision := range fallbackBatch {
+				message := byID[decision.ID]
+				batchClassified = append(batchClassified, classifiedMessage{Message: message, Decision: decision, Winner: model.Winner{Provider: "local", Model: "keep-all", Fallback: true}})
+			}
+			if err := insertClassifiedDecisions(ctx, store, runID, batchClassified); err != nil {
+				return nil, fallbacks, summarizeModelAttempts(allAttempts), err
+			}
+			classified = append(classified, batchClassified...)
+			fallbacks += len(fallbackBatch)
+			localAttempt := model.Attempt{
+				Provider: "local", Model: "keep-all", Attempt: 1,
+				BatchID: fmt.Sprintf("c%d", batchIndex+1), InputMessages: len(batch), InputChars: model.ApproxChars(batch),
+				Success: true, ErrorClass: "heuristic-fallback", FinishReason: "classification-budget",
+			}
+			allAttempts = append(allAttempts, localAttempt)
+			recordModelAttempts(ctx, store, runID, "model_classify", batchIndex+1, []model.Attempt{localAttempt})
+			continue
 		}
-		duration := time.Since(started)
+		output, err := router.Classify(stageCtx, fmt.Sprintf("c%d", batchIndex+1), batch)
+		allAttempts = append(allAttempts, output.Attempts...)
+		recordModelAttempts(ctx, store, runID, "model_classify", batchIndex+1, output.Attempts)
 		if err != nil {
-			return nil, fallbacks, err
+			return nil, fallbacks, summarizeModelAttempts(allAttempts), err
 		}
-		fallbacks += batchFallbacks
-		batchClassified := make([]classifiedMessage, 0, len(decisions))
-		for _, decision := range decisions {
+		fallbacks += output.Fallbacks
+		batchClassified := make([]classifiedMessage, 0, len(output.Decisions))
+		for _, decision := range output.Decisions {
 			message := byID[decision.ID]
-			batchClassified = append(batchClassified, classifiedMessage{Message: message, Decision: decision})
+			batchClassified = append(batchClassified, classifiedMessage{Message: message, Decision: decision, Winner: output.Winners[decision.ID]})
 		}
-		if err := insertClassifiedDecisions(ctx, store, runID, cfg.OllamaModel, batchClassified); err != nil {
-			return nil, fallbacks, err
+		if err := insertClassifiedDecisions(ctx, store, runID, batchClassified); err != nil {
+			return nil, fallbacks, summarizeModelAttempts(allAttempts), err
 		}
-		recordModelCallBestEffort(ctx, store, sqlitestore.ModelCall{
-			RunID: runID, Stage: "qwen_classify", BatchIndex: batchIndex + 1,
-			InputMessages: len(batch), InputChars: qwen.ApproxChars(batch),
-			DurationMillis: duration.Milliseconds(), Success: batchFallbacks == 0,
-			Fallbacks: batchFallbacks, Error: compactPlain(errText, 260), Model: cfg.OllamaModel,
-		})
 		classified = append(classified, batchClassified...)
 	}
 	emitProgress(ctx, opts, ProgressEvent{
-		RunID: runID, Stage: "qwen_classify_done",
-		Message:            fmt.Sprintf("Qwen classification готова: classified=%d fallback=%d.", len(classified), fallbacks),
+		RunID: runID, Stage: "model_classify_done",
+		Message:            fmt.Sprintf("Классификация готова: classified=%d fallback=%d; %s.", len(classified), fallbacks, summarizeModelAttempts(allAttempts)),
 		EstimatedRemaining: 7 * time.Minute,
 	})
-	return classified, fallbacks, nil
+	return classified, fallbacks, summarizeModelAttempts(allAttempts), nil
 }
 
 func conservativeClassifications(messages []telegrammt.SyncedMessage) []classifiedMessage {
-	inputs, byID := qwenInputs(messages)
+	inputs, byID := modelInputs(messages)
 	classified := make([]classifiedMessage, 0, len(inputs))
-	for _, decision := range fallbackDecisions(inputs, "Qwen недоступен; сообщение сохранено для итогового обзора") {
+	for _, decision := range localKeepAll(inputs, "удалённые модели недоступны") {
 		classified = append(classified, classifiedMessage{
 			Message:  byID[decision.ID],
 			Decision: decision,
+			Winner:   model.Winner{Provider: "local", Model: "keep-all", Fallback: true},
 		})
 	}
 	return classified
 }
 
-func insertClassifiedDecisions(ctx context.Context, store *sqlitestore.Store, runID int64, model string, classified []classifiedMessage) error {
+func insertClassifiedDecisions(ctx context.Context, store *sqlitestore.Store, runID int64, classified []classifiedMessage) error {
 	decisions := make([]sqlitestore.MessageDecision, 0, len(classified))
 	for _, item := range classified {
 		decisions = append(decisions, sqlitestore.MessageDecision{
 			RunID: runID, ChatID: item.Message.ChatID, MessageID: item.Message.MessageID,
 			Keep: item.Decision.Keep, Importance: item.Decision.Importance,
 			Reason: item.Decision.Reason, Tags: item.Decision.Tags,
-			HasEvent: item.Decision.HasEvent, Model: model,
+			HasEvent: item.Decision.HasEvent, Model: item.Winner.Model,
+			Provider: item.Winner.Provider, Route: decisionRoute(item.Winner),
 		})
 	}
 	return store.InsertMessageDecisions(ctx, decisions, time.Now().UTC())
 }
 
-func classifyBatchResilient(ctx context.Context, client messageClassifier, batch []qwen.MessageInput) ([]qwen.MessageDecision, int, string, error) {
-	result, raw, err := client.ClassifyBatch(ctx, batch)
-	if err == nil {
-		return result.Decisions, 0, "", nil
-	}
-	if errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		return nil, 0, "", err
-	}
-	errText := err.Error()
-	reason := "Qwen не вернул решение; сохранено для итогового обзора"
-	if errors.Is(err, context.DeadlineExceeded) {
-		reason = "Qwen не успел обработать пачку; сохранено для итогового обзора"
-	}
-	if strings.TrimSpace(raw) != "" {
-		errText += "; raw response: " + compactLine(raw, 500)
-	}
-	return fallbackDecisions(batch, reason), len(batch), errText, nil
-}
-
-func fallbackDecisions(batch []qwen.MessageInput, reason string) []qwen.MessageDecision {
-	decisions := make([]qwen.MessageDecision, 0, len(batch))
+func localKeepAll(batch []model.MessageInput, reason string) []model.MessageDecision {
+	decisions := make([]model.MessageDecision, 0, len(batch))
 	for _, input := range batch {
-		hasEvent := likelyEventText(input.Text + " " + input.ExtractedText)
-		tags := []string{"qwen-fallback"}
-		if hasEvent {
-			tags = append(tags, "event-hint")
-		}
-		decisions = append(decisions, qwen.MessageDecision{
+		decisions = append(decisions, model.MessageDecision{
 			ID:         input.ID,
 			Keep:       true,
 			Importance: 1,
-			Reason:     reason,
-			Tags:       tags,
-			HasEvent:   hasEvent,
+			Reason:     reason + "; сообщение сохранено для итогового обзора",
+			Tags:       []string{"model-fallback", "keep-all"},
+			HasEvent:   false,
 		})
 	}
 	return decisions
 }
 
-func qwenInputs(messages []telegrammt.SyncedMessage) ([]qwen.MessageInput, map[string]telegrammt.SyncedMessage) {
-	inputs := make([]qwen.MessageInput, 0, len(messages))
+func modelInputs(messages []telegrammt.SyncedMessage) ([]model.MessageInput, map[string]telegrammt.SyncedMessage) {
+	sorted := append([]telegrammt.SyncedMessage(nil), messages...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].SourceRef != sorted[j].SourceRef {
+			return sorted[i].SourceRef < sorted[j].SourceRef
+		}
+		if !sorted[i].Date.Equal(sorted[j].Date) {
+			return sorted[i].Date.Before(sorted[j].Date)
+		}
+		return sorted[i].MessageID < sorted[j].MessageID
+	})
+	inputs := make([]model.MessageInput, 0, len(sorted))
 	byID := make(map[string]telegrammt.SyncedMessage, len(messages))
-	for _, message := range messages {
+	for _, message := range sorted {
 		text := strings.TrimSpace(message.Text)
 		if text == "" || message.Kind == "service" {
 			continue
 		}
-		id := messageID(message)
+		id := fmt.Sprintf("m%06d", len(inputs)+1)
 		kind := message.Kind
 		attachmentCount := 0
 		if message.MediaType != "" {
 			kind = kind + ":" + message.MediaType
 			attachmentCount = 1
 		}
-		inputs = append(inputs, qwen.MessageInput{
+		inputs = append(inputs, model.MessageInput{
 			ID:              id,
 			SourceRef:       message.SourceRef,
+			Time:            message.Date,
+			Sender:          message.Sender,
 			Kind:            kind,
-			Text:            compactPromptText(text, qwenMessageMaxText),
+			Text:            compactPromptText(text, modelMessageMaxText),
 			AttachmentCount: attachmentCount,
 		})
 		byID[id] = message
@@ -732,13 +764,14 @@ func qwenInputs(messages []telegrammt.SyncedMessage) ([]qwen.MessageInput, map[s
 	return inputs, byID
 }
 
-func qwenBatches(inputs []qwen.MessageInput) [][]qwen.MessageInput {
-	var batches [][]qwen.MessageInput
+func modelBatches(inputs []model.MessageInput) [][]model.MessageInput {
+	var batches [][]model.MessageInput
 	for len(inputs) > 0 {
 		end := 0
-		for end < len(inputs) && end < qwenBatchSize {
+		source := inputs[0].SourceRef
+		for end < len(inputs) && end < modelBatchSize && inputs[end].SourceRef == source {
 			candidate := inputs[:end+1]
-			if end > 0 && qwen.ApproxChars(candidate) > qwenBatchMaxChars {
+			if end > 0 && model.ApproxChars(candidate) > modelBatchMaxChars {
 				break
 			}
 			end++
@@ -750,6 +783,13 @@ func qwenBatches(inputs []qwen.MessageInput) [][]qwen.MessageInput {
 		inputs = inputs[end:]
 	}
 	return batches
+}
+
+func decisionRoute(winner model.Winner) string {
+	if winner.Fallback {
+		return "local_fallback"
+	}
+	return "remote"
 }
 
 func writeRunBundle(cfg config.Config, runID int64, syncResult telegrammt.SyncResult, messages []telegrammt.SyncedMessage, classified []classifiedMessage, generatedAt time.Time) (string, string, error) {
@@ -822,7 +862,7 @@ func buildRunBundle(runID int64, syncResult telegrammt.SyncResult, messages []te
 		b.WriteString("\n")
 	}
 	if eventCount == 0 {
-		b.WriteString("No event candidates detected by Qwen.\n")
+		b.WriteString("No event candidates detected by the model route or local date heuristic.\n")
 	}
 
 	b.WriteString("\n## Media And Unsupported Placeholders\n\n")
@@ -858,7 +898,7 @@ func buildRunBundle(runID int64, syncResult telegrammt.SyncResult, messages []te
 	}
 
 	b.WriteString("\n## Warnings And Uncertainty\n\n")
-	b.WriteString("- Qwen classifications are first-pass decisions and may be wrong.\n")
+	b.WriteString("- Remote model classifications are first-pass decisions and may be wrong.\n")
 	b.WriteString("- File, voice, image, OCR, and transcript extraction are not enabled in the text MVP.\n")
 	b.WriteString("- Calendar events must not be created without explicit approval in the Calendar topic.\n")
 	return b.String()
@@ -1063,6 +1103,67 @@ func recordModelCallBestEffort(ctx context.Context, store *sqlitestore.Store, ca
 	_ = store.InsertModelCall(ctx, call, time.Now().UTC())
 }
 
+func recordModelAttempts(ctx context.Context, store *sqlitestore.Store, runID int64, stage string, batchIndex int, attempts []model.Attempt) {
+	for _, attempt := range attempts {
+		recordModelCallBestEffort(ctx, store, sqlitestore.ModelCall{
+			RunID: runID, Stage: stage, BatchIndex: batchIndex, BatchID: attempt.BatchID,
+			Attempt: attempt.Attempt, InputMessages: attempt.InputMessages, InputChars: attempt.InputChars,
+			DurationMillis: attempt.Duration.Milliseconds(), Success: attempt.Success,
+			Error: compactPlain(attempt.Error, 300), Model: attempt.Model, Provider: attempt.Provider,
+			StatusCode: attempt.StatusCode, ErrorClass: attempt.ErrorClass,
+			PromptTokens: attempt.PromptTokens, OutputTokens: attempt.OutputTokens,
+			TotalTokens: attempt.TotalTokens, FinishReason: attempt.FinishReason,
+		})
+	}
+}
+
+func summarizeModelAttempts(attempts []model.Attempt) string {
+	if len(attempts) == 0 {
+		return "no remote model attempts"
+	}
+	wins := map[string]int{}
+	failures := map[string]int{}
+	for _, attempt := range attempts {
+		if attempt.Success {
+			wins[attempt.Model]++
+			continue
+		}
+		key := attempt.Model + ":" + attempt.ErrorClass
+		failures[key]++
+	}
+	var parts []string
+	for _, key := range sortedCountKeys(wins) {
+		parts = append(parts, fmt.Sprintf("%s=%d", key, wins[key]))
+	}
+	for _, key := range sortedCountKeys(failures) {
+		parts = append(parts, fmt.Sprintf("%s=%d", key, failures[key]))
+	}
+	if len(parts) == 0 {
+		return "remote route returned no winner"
+	}
+	return strings.Join(parts, ",")
+}
+
+func sortedCountKeys(values map[string]int) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func joinModelSummaries(values ...string) string {
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && value != "no remote model attempts" {
+			out = append(out, value)
+		}
+	}
+	return strings.Join(out, " | ")
+}
+
 func emitProgress(ctx context.Context, opts Options, event ProgressEvent) {
 	if opts.Progress == nil {
 		return
@@ -1106,7 +1207,7 @@ func likelyEventText(value string) bool {
 			return true
 		}
 	}
-	return qwenEventDatePattern.MatchString(lower)
+	return modelEventDatePattern.MatchString(lower)
 }
 
 func compactLine(value string, limit int) string {

@@ -8,14 +8,17 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/SevastyanovYE/Sova/internal/buildinfo"
 	"github.com/SevastyanovYE/Sova/internal/config"
 	"github.com/SevastyanovYE/Sova/internal/controller"
 	"github.com/SevastyanovYE/Sova/internal/doctor"
 	"github.com/SevastyanovYE/Sova/internal/gcalendar"
 	"github.com/SevastyanovYE/Sova/internal/indexes"
+	"github.com/SevastyanovYE/Sova/internal/model"
 	"github.com/SevastyanovYE/Sova/internal/nest"
 	"github.com/SevastyanovYE/Sova/internal/overview"
 	"github.com/SevastyanovYE/Sova/internal/qwen"
@@ -45,11 +48,14 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
+	case "version":
+		info := buildinfo.Current()
+		fmt.Printf("sova %s (%s)\n", info.Version, info.Commit)
+		return nil
 	case "init":
 		return initState(cfg)
 	case "doctor":
-		fmt.Print(doctor.Format(doctor.Run(ctx, cfg)))
-		return nil
+		return doctorCommand(ctx, cfg, args[1:])
 	case "run":
 		return runOverview(ctx, cfg, args[1:])
 	case "retry-run":
@@ -76,6 +82,8 @@ func run(ctx context.Context, args []string) error {
 		return telegramSync(ctx, cfg, args[1:])
 	case "qwen-smoke":
 		return qwenSmoke(ctx, cfg)
+	case "model-smoke":
+		return modelSmoke(ctx, cfg, args[1:])
 	case "qwen-calibrate":
 		return qwenCalibrate(ctx, cfg, args[1:])
 	case "qwen-benchmark":
@@ -275,8 +283,7 @@ func workspaceCommand(ctx context.Context, cfg config.Config, args []string) err
 
 	switch args[0] {
 	case "doctor":
-		fmt.Print(workspace.FormatChecks(workspace.DoctorChecks(ctx, cfg, store)))
-		return nil
+		return workspaceDoctor(ctx, cfg, store, args[1:])
 	case "discover":
 		return workspaceDiscover(ctx, cfg, store, args[1:])
 	case "sync-legacy":
@@ -296,11 +303,17 @@ func workspaceCommand(ctx context.Context, cfg config.Config, args []string) err
 	case "reset-topic-pins":
 		return workspaceResetTopicPins(ctx, cfg, args[1:])
 	case "seed-command-help":
-		return workspaceSeedCommandHelp(ctx, cfg, args[1:])
+		return workspaceSeedCommandHelp(ctx, cfg, store, args[1:])
 	case "seed-document-indexes":
 		return workspaceSeedDocumentIndexes(ctx, cfg, store, args[1:])
 	case "cleanup-test-tasks":
 		return workspaceCleanupTestTasks(ctx, cfg, store, args[1:])
+	case "search-index":
+		return workspaceSearchIndex(ctx, cfg, store, args[1:])
+	case "record-deployment":
+		return workspaceRecordDeployment(ctx, store, args[1:])
+	case "announce-release":
+		return workspaceAnnounceRelease(ctx, cfg, store, args[1:])
 	case "serve":
 		return workspace.Serve(ctx, cfg, store)
 	case "help", "-h", "--help":
@@ -309,6 +322,131 @@ func workspaceCommand(ctx context.Context, cfg config.Config, args []string) err
 	default:
 		return fmt.Errorf("unknown workspace command %q", args[0])
 	}
+}
+
+func doctorCommand(ctx context.Context, cfg config.Config, args []string) error {
+	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	strict := flags.Bool("strict", false, "return non-zero unless every check is ok")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	checks := doctor.Run(ctx, cfg)
+	fmt.Print(doctor.Format(checks))
+	if *strict {
+		for _, check := range checks {
+			if check.Status != "ok" {
+				return fmt.Errorf("strict doctor failed: %s is %s", check.Name, check.Status)
+			}
+		}
+	}
+	return nil
+}
+
+func workspaceDoctor(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace doctor", flag.ContinueOnError)
+	strict := flags.Bool("strict", false, "return non-zero unless every check is ok")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	checks := workspace.DoctorChecks(ctx, cfg, store)
+	fmt.Print(workspace.FormatChecks(checks))
+	if *strict {
+		for _, check := range checks {
+			if check.Status != "ok" {
+				return fmt.Errorf("strict workspace doctor failed: %s is %s", check.Name, check.Status)
+			}
+		}
+	}
+	return nil
+}
+
+func workspaceSearchIndex(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace search-index", flag.ContinueOnError)
+	fullScan := flags.Bool("full-scan", false, "scan all three source histories and enable the readiness checkpoint")
+	limit := flags.Int("limit", 0, "maximum messages per source (default: 250000 for full scan, 500 for incremental sync)")
+	timeout := flags.Duration("timeout", 2*time.Hour, "maximum time for MTProto sync and sequential embeddings; 0 disables the deadline")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *limit <= 0 {
+		if *fullScan {
+			*limit = 250000
+		} else {
+			*limit = 500
+		}
+	}
+	indexCtx := ctx
+	cancel := func() {}
+	if *timeout > 0 {
+		indexCtx, cancel = context.WithTimeout(ctx, *timeout)
+	}
+	defer cancel()
+	result, err := workspace.BuildSearchIndex(indexCtx, cfg, store, workspace.SearchIndexOptions{
+		FullScan: *fullScan, Limit: *limit, Now: time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("workspace search-index: workspace=%d legacy=%d nest=%d changed=%d embedded=%d primary=%d fallback=%d\n",
+		result.Sources["workspace"], result.Sources["legacy"], result.Sources["nest"],
+		result.Changed, result.Processed, result.Primary, result.Fallback)
+	if *fullScan {
+		fmt.Println("full scan completed; set SOVA_SEARCH_ENABLED=true to expose /search in Inbox")
+	}
+	return nil
+}
+
+func workspaceRecordDeployment(ctx context.Context, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace record-deployment", flag.ContinueOnError)
+	environment := flags.String("environment", "production", "deployment environment")
+	version := flags.String("version", "", "release version; default is embedded version")
+	commit := flags.String("commit", "", "release commit; default is embedded commit")
+	checks := flags.String("checks", "", "compact summary of completed production checks")
+	execute := flags.Bool("execute", false, "persist the receipt; default is dry-run")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	receipt, err := workspace.RecordDeploymentReceipt(ctx, store, workspace.DeploymentReceiptOptions{
+		Environment: *environment, Version: *version, Commit: *commit,
+		Checks: *checks, Execute: *execute, Now: time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	mode := "dry-run"
+	if *execute {
+		mode = "recorded"
+	}
+	fmt.Printf("deployment receipt %s: environment=%s version=%s commit=%s checks=%q\n",
+		mode, receipt.Environment, receipt.Version, receipt.Commit, receipt.Checks)
+	return nil
+}
+
+func workspaceAnnounceRelease(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace announce-release", flag.ContinueOnError)
+	repo := flags.String("repo", ".", "repository directory")
+	environment := flags.String("environment", "production", "deployment environment")
+	version := flags.String("version", "", "release version; default is VERSION")
+	commit := flags.String("commit", "", "release commit; default is embedded commit")
+	base := flags.String("base", "", "base commit; default is RELEASE_BASE")
+	execute := flags.Bool("execute", false, "send to Workspace Inbox; default is dry-run")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	result, err := workspace.AnnounceRelease(ctx, cfg, store, workspace.ReleaseAnnouncementOptions{
+		RepoDir: *repo, Environment: *environment, Version: *version,
+		Commit: *commit, BaseCommit: *base, Execute: *execute, Now: time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println(result.Text)
+	if result.Sent {
+		fmt.Printf("release announcement sent: message_id=%d\n", result.MessageID)
+	} else {
+		fmt.Println("dry-run only; --execute requires a deployment receipt for the same version and commit")
+	}
+	return nil
 }
 
 func workspaceSyncLegacy(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
@@ -690,9 +828,9 @@ func workspaceResetTopicPins(ctx context.Context, cfg config.Config, args []stri
 	return nil
 }
 
-func workspaceSeedCommandHelp(ctx context.Context, cfg config.Config, args []string) error {
+func workspaceSeedCommandHelp(ctx context.Context, cfg config.Config, store *sqlitestore.Store, args []string) error {
 	flags := flag.NewFlagSet("workspace seed-command-help", flag.ContinueOnError)
-	dryRun := flags.Bool("dry-run", false, "print planned command help messages without sending them")
+	dryRun := flags.Bool("dry-run", false, "print planned tracked command-help pin updates without sending them")
 	timeout := flags.Duration("timeout", 2*time.Minute, "maximum time for Bot API send calls; 0 disables the deadline")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -703,7 +841,7 @@ func workspaceSeedCommandHelp(ctx context.Context, cfg config.Config, args []str
 		seedCtx, cancel = context.WithTimeout(ctx, *timeout)
 	}
 	defer cancel()
-	result, err := workspace.SeedWorkspaceCommandHelp(seedCtx, cfg, workspace.SeedTopicPinsOptions{
+	result, err := workspace.SeedWorkspaceCommandHelp(seedCtx, cfg, store, workspace.SeedTopicPinsOptions{
 		DryRun: *dryRun,
 		Now:    time.Now().UTC(),
 	})
@@ -895,6 +1033,83 @@ func qwenSmoke(ctx context.Context, cfg config.Config) error {
 			decision.ID, decision.Keep, decision.Importance, decision.HasEvent, decision.Reason)
 	}
 	return nil
+}
+
+func modelSmoke(ctx context.Context, cfg config.Config, args []string) error {
+	flags := flag.NewFlagSet("model-smoke", flag.ContinueOnError)
+	all := flags.Bool("all", false, "check every configured Nest Google model instead of the first one")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.Gemini.APIKey) == "" {
+		return fmt.Errorf("SOVA_GEMINI_API_KEY is required")
+	}
+	models := append([]string(nil), cfg.NestGoogleModels...)
+	if len(models) == 0 {
+		return fmt.Errorf("SOVA_NEST_GOOGLE_MODELS must contain at least one model")
+	}
+	if !*all {
+		models = models[:1]
+	}
+	failed := 0
+	for _, modelName := range models {
+		router := model.NewGoogleRouter(cfg.Gemini.APIKey, []string{modelName})
+		output, err := router.Classify(ctx, "smoke", []model.MessageInput{
+			{ID: "m1", Time: time.Now(), Sender: "synthetic", Kind: "text", Text: "Экзамен завтра в 10:00."},
+			{ID: "m2", Time: time.Now(), Sender: "synthetic", Kind: "text", Text: "ахах мем"},
+		})
+		if err != nil || len(output.Decisions) != 2 || output.Winners["m1"].Fallback {
+			failed++
+			detail := modelSmokeFailureDetail(err, output.Attempts, "remote route produced no complete classification schema result")
+			fmt.Printf("model=%s ok=false error=%q\n", modelName, detail)
+			continue
+		}
+		events, eventErr := router.ExtractEvents(ctx, "smoke-event", []model.EventInput{{
+			ID: "e1", SourceRef: "synthetic", Time: time.Now(), Kind: "text",
+			Text: "Экзамен завтра в 10:00 в аудитории 504.",
+		}}, time.Now(), cfg.Timezone)
+		if eventErr != nil || len(events.Events) != 1 || events.Winners["e1"].Fallback {
+			failed++
+			detail := modelSmokeFailureDetail(eventErr, events.Attempts, "remote route produced no complete event schema result")
+			fmt.Printf("model=%s ok=false stage=events error=%q\n", modelName, detail)
+			continue
+		}
+		classifyAttempt := output.Attempts[len(output.Attempts)-1]
+		eventAttempt := events.Attempts[len(events.Attempts)-1]
+		fmt.Printf("model=%s ok=true classify_ms=%d event_ms=%d prompt_tokens=%d output_tokens=%d finish=%s/%s\n",
+			modelName, classifyAttempt.Duration.Milliseconds(), eventAttempt.Duration.Milliseconds(),
+			classifyAttempt.PromptTokens+eventAttempt.PromptTokens,
+			classifyAttempt.OutputTokens+eventAttempt.OutputTokens,
+			classifyAttempt.FinishReason, eventAttempt.FinishReason)
+	}
+	if failed > 0 {
+		return fmt.Errorf("model smoke failed for %d/%d configured model(s)", failed, len(models))
+	}
+	return nil
+}
+
+func modelSmokeFailureDetail(err error, attempts []model.Attempt, fallback string) string {
+	if err != nil {
+		return err.Error()
+	}
+	for index := len(attempts) - 1; index >= 0; index-- {
+		attempt := attempts[index]
+		if attempt.Provider == "local" {
+			continue
+		}
+		detail := "class=" + attempt.ErrorClass
+		if attempt.StatusCode != 0 {
+			detail += " status=" + strconv.Itoa(attempt.StatusCode)
+		}
+		if attempt.Model != "" {
+			detail += " model=" + attempt.Model
+		}
+		if attempt.Error != "" {
+			detail += " detail=" + attempt.Error
+		}
+		return detail
+	}
+	return fallback
 }
 
 func qwenCalibrate(ctx context.Context, cfg config.Config, args []string) error {
@@ -1591,14 +1806,15 @@ func printUsage() {
 	fmt.Println(`Sova MVP
 
 Usage:
+  sova version
   sova init
-  sova doctor
-	  sova run [--trigger manual|scheduled|nest_button]
-	  sova retry-run --id RUN_ID
+  sova doctor [--strict]
+  sova run [--trigger manual|scheduled|nest_button]
+  sova retry-run --id RUN_ID
   sova status
   sova index
   sova serve
-  sova workspace doctor
+  sova workspace doctor [--strict]
   sova workspace discover [--dry-run] [--limit 100]
   sova workspace sync-legacy [--limit 100] [--dry-run] [--backfill|--full-scan] [--timeout 5m]
   sova workspace audit [--dry-run] [--limit 0]
@@ -1611,6 +1827,9 @@ Usage:
   sova workspace seed-command-help [--dry-run] [--timeout 2m]
   sova workspace seed-document-indexes [--dry-run] [--reset] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
+  sova workspace search-index --full-scan [--limit 250000] [--timeout 2h]
+  sova workspace record-deployment --checks "..." [--execute]
+  sova workspace announce-release [--execute]
   sova workspace serve
   sova nest-check [--send-status]
   sova nest-seed-topics
@@ -1618,6 +1837,7 @@ Usage:
   sova telegram-login
   sova telegram-login-qr
   sova sync [--limit 100] [--dry-run] [--backfill]
+  sova model-smoke [--all]
   sova qwen-smoke
   sova qwen-calibrate --input examples.jsonl
   sova qwen-calibrate --run-id RUN_ID
@@ -1631,7 +1851,7 @@ func printWorkspaceUsage() {
 	fmt.Println(`Sova.Workspace MVP
 
 Usage:
-  sova workspace doctor
+  sova workspace doctor [--strict]
   sova workspace discover [--dry-run] [--limit 100]
   sova workspace sync-legacy [--limit 100] [--dry-run] [--backfill|--full-scan] [--timeout 5m]
   sova workspace audit [--dry-run] [--limit 0]
@@ -1644,6 +1864,9 @@ Usage:
   sova workspace seed-command-help [--dry-run] [--timeout 2m]
   sova workspace seed-document-indexes [--dry-run] [--reset] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
+  sova workspace search-index --full-scan [--limit 250000] [--timeout 2h]
+  sova workspace record-deployment --checks "..." [--execute]
+  sova workspace announce-release [--execute]
   sova workspace serve
 
 Notes:
@@ -1656,8 +1879,10 @@ Notes:
   bootstrap-topics creates only missing target forum topics and writes an env-style ID file.
   seed-topic-pins sends human-friendly pin draft messages into Workspace and/or Control topics.
   reset-topic-pins unpins each configured forum topic, sends and pins the clean main message, then sends command help only in command topics.
-  seed-command-help sends command reference messages into Workspace topics.
-  seed-document-indexes creates or updates active note/template/collection/useful index messages; --reset sends fresh pinned indexes and repoints future updates.
+  seed-command-help creates or updates one tracked pinned command reference in every Workspace topic.
+  seed-document-indexes creates or updates active note/template/collection/quote/useful index messages; --reset sends fresh pinned indexes and repoints future updates.
   cleanup-test-tasks deletes bot-created test task cards/backlog and marks matching tasks cancelled.
-  serve runs the live Workspace bot for clusters, edit-sync, task cards, and task callbacks.`)
+  search-index synchronizes new InSync, old InSync, and Sova.Nest, then builds a local exact-cosine index.
+  record-deployment and announce-release are dry-run by default; live announcement requires the matching receipt.
+  serve runs the live Workspace bot for clusters, edit-sync, task cards, reminders, quotes, Publish, and Inbox /search.`)
 }

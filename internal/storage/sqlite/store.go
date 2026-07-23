@@ -43,8 +43,10 @@ type TelegramMessage struct {
 	SourceID   int64
 	ChatID     int64
 	MessageID  int
+	TopicID    int
 	Date       time.Time
 	Kind       string
+	Sender     string
 	Text       string
 	MediaType  string
 	SourceLink string
@@ -57,8 +59,10 @@ type TelegramRecentMessage struct {
 	Username    string
 	ChatID      int64
 	MessageID   int
+	TopicID     int
 	Date        time.Time
 	Kind        string
+	Sender      string
 	Text        string
 	MediaType   string
 	SourceLink  string
@@ -74,6 +78,8 @@ type MessageDecision struct {
 	Tags       []string
 	HasEvent   bool
 	Model      string
+	Provider   string
+	Route      string
 }
 
 type ModelCall struct {
@@ -81,6 +87,8 @@ type ModelCall struct {
 	RunID          int64
 	Stage          string
 	BatchIndex     int
+	BatchID        string
+	Attempt        int
 	InputMessages  int
 	InputChars     int
 	DurationMillis int64
@@ -88,6 +96,13 @@ type ModelCall struct {
 	Fallbacks      int
 	Error          string
 	Model          string
+	Provider       string
+	StatusCode     int
+	ErrorClass     string
+	PromptTokens   int
+	OutputTokens   int
+	TotalTokens    int
+	FinishReason   string
 	CreatedAt      time.Time
 }
 
@@ -238,8 +253,10 @@ CREATE TABLE IF NOT EXISTS telegram_messages (
     source_id INTEGER NOT NULL REFERENCES telegram_sources(id),
     chat_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
+    topic_id INTEGER NOT NULL DEFAULT 0,
     date TEXT NOT NULL,
     kind TEXT NOT NULL,
+    sender TEXT NOT NULL DEFAULT '',
     text TEXT NOT NULL DEFAULT '',
     media_type TEXT NOT NULL DEFAULT '',
     source_link TEXT NOT NULL DEFAULT '',
@@ -259,6 +276,8 @@ CREATE TABLE IF NOT EXISTS message_decisions (
     tags_json TEXT NOT NULL DEFAULT '[]',
     has_event INTEGER NOT NULL CHECK (has_event IN (0, 1)),
     model TEXT NOT NULL DEFAULT '',
+	provider TEXT NOT NULL DEFAULT '',
+	route TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     PRIMARY KEY(run_id, chat_id, message_id),
     FOREIGN KEY(chat_id, message_id) REFERENCES telegram_messages(chat_id, message_id)
@@ -270,6 +289,8 @@ CREATE TABLE IF NOT EXISTS model_calls (
     run_id INTEGER NOT NULL REFERENCES overview_runs(id),
     stage TEXT NOT NULL,
     batch_index INTEGER NOT NULL,
+	batch_id TEXT NOT NULL DEFAULT '',
+	attempt INTEGER NOT NULL DEFAULT 1,
     input_messages INTEGER NOT NULL,
     input_chars INTEGER NOT NULL,
     duration_ms INTEGER NOT NULL,
@@ -277,6 +298,13 @@ CREATE TABLE IF NOT EXISTS model_calls (
     fallbacks INTEGER NOT NULL DEFAULT 0,
     error TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL DEFAULT '',
+	provider TEXT NOT NULL DEFAULT '',
+	status_code INTEGER NOT NULL DEFAULT 0,
+	error_class TEXT NOT NULL DEFAULT '',
+	prompt_tokens INTEGER NOT NULL DEFAULT 0,
+	output_tokens INTEGER NOT NULL DEFAULT 0,
+	total_tokens INTEGER NOT NULL DEFAULT 0,
+	finish_reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_model_calls_created
@@ -420,6 +448,7 @@ CREATE TABLE IF NOT EXISTS workspace_tasks (
     emoji TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK (status IN ('open', 'done', 'cancelled', 'deferred')),
     deferred_until TEXT,
+    deferred_generation INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     completed_at TEXT,
@@ -432,6 +461,27 @@ CREATE INDEX IF NOT EXISTS idx_workspace_tasks_status
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_tasks_card
     ON workspace_tasks(card_chat_id, card_message_id)
     WHERE card_chat_id != 0 AND card_message_id != 0;
+CREATE TABLE IF NOT EXISTS workspace_task_reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES workspace_tasks(id) ON DELETE CASCADE,
+    scheduled_for TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'retry', 'sent', 'completed', 'unknown', 'cancelled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    reminder_chat_id INTEGER NOT NULL DEFAULT 0,
+    reminder_topic_id INTEGER NOT NULL DEFAULT 0,
+    reminder_message_id INTEGER NOT NULL DEFAULT 0,
+    sent_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_id, scheduled_for)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_task_reminders_ready
+    ON workspace_task_reminders(status, next_attempt_at, scheduled_for, id);
 CREATE TABLE IF NOT EXISTS workspace_derived_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_chat_id INTEGER NOT NULL,
@@ -456,6 +506,105 @@ CREATE TABLE IF NOT EXISTS workspace_topic_indexes (
     message_id INTEGER NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY(chat_id, topic_id, index_key)
+);
+CREATE TABLE IF NOT EXISTS workspace_quotes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    author TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('draft', 'active', 'needs_review', 'archived')),
+    wizard_user_id INTEGER NOT NULL DEFAULT 0,
+    wizard_stage TEXT NOT NULL DEFAULT '',
+    delivery_status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (delivery_status IN ('draft', 'sending', 'sent', 'unknown')),
+    delivery_error TEXT NOT NULL DEFAULT '',
+    source_chat_id INTEGER NOT NULL,
+    source_message_id INTEGER NOT NULL,
+    source_link TEXT NOT NULL DEFAULT '',
+    target_chat_id INTEGER NOT NULL DEFAULT 0,
+    target_topic_id INTEGER NOT NULL DEFAULT 0,
+    target_message_id INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    published_at TEXT,
+    UNIQUE(source_chat_id, source_message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_quotes_status
+    ON workspace_quotes(status, published_at DESC, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_quotes_target
+    ON workspace_quotes(target_chat_id, target_message_id)
+    WHERE target_chat_id != 0 AND target_message_id != 0;
+CREATE TABLE IF NOT EXISTS workspace_deployment_receipts (
+    environment TEXT NOT NULL,
+    version TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    checks TEXT NOT NULL,
+    verified_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(environment, version, commit_sha)
+);
+CREATE TABLE IF NOT EXISTS workspace_release_announcements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    environment TEXT NOT NULL,
+    version TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('sending', 'sent', 'unknown')),
+    message_id INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(environment, version, commit_sha)
+);
+CREATE TABLE IF NOT EXISTS search_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL CHECK (scope IN ('workspace', 'legacy', 'nest')),
+    source_ref TEXT NOT NULL DEFAULT '',
+    source_title TEXT NOT NULL DEFAULT '',
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    topic_id INTEGER NOT NULL DEFAULT 0,
+    message_date TEXT NOT NULL,
+    text TEXT NOT NULL,
+    media_type TEXT NOT NULL DEFAULT '',
+    source_link TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deleted')),
+    index_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (index_status IN ('pending', 'ready', 'retry', 'error')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    scan_generation INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(scope, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_search_documents_pending
+    ON search_documents(index_status, next_attempt_at, id);
+CREATE INDEX IF NOT EXISTS idx_search_documents_scope_date
+    ON search_documents(scope, message_date DESC, message_id DESC);
+CREATE TABLE IF NOT EXISTS search_embeddings (
+    document_id INTEGER PRIMARY KEY REFERENCES search_documents(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    vector_blob BLOB NOT NULL,
+    provider_route TEXT NOT NULL DEFAULT '',
+    embedded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_search_embeddings_model
+    ON search_embeddings(model, dimensions, document_id);
+CREATE TABLE IF NOT EXISTS search_sync_state (
+    scope TEXT PRIMARY KEY CHECK (scope IN ('workspace', 'legacy', 'nest')),
+    last_message_id INTEGER NOT NULL DEFAULT 0,
+    full_scan_completed_at TEXT,
+    last_sync_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    scan_generation INTEGER NOT NULL DEFAULT 0,
+    scan_cursor INTEGER NOT NULL DEFAULT 0,
+    scan_started_at TEXT,
+    audit_cursor INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS workspace_documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -504,11 +653,115 @@ CREATE TABLE IF NOT EXISTS workspace_document_parts (
 );
 CREATE INDEX IF NOT EXISTS idx_workspace_document_parts_source
     ON workspace_document_parts(source_chat_id, source_message_id);
+CREATE TABLE IF NOT EXISTS workspace_publish_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES workspace_documents(id) ON DELETE CASCADE,
+    revision TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    route_summary TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN (
+        'generating', 'preview_sending', 'awaiting_approval', 'publishing',
+        'finalizing', 'completed', 'cancelled', 'failed', 'superseded'
+    )),
+    preview_chat_id INTEGER NOT NULL DEFAULT 0,
+    preview_topic_id INTEGER NOT NULL DEFAULT 0,
+    status_message_id INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    approved_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_publish_runs_document
+    ON workspace_publish_runs(document_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_workspace_publish_runs_resume
+    ON workspace_publish_runs(status, updated_at, id);
+CREATE TABLE IF NOT EXISTS workspace_publish_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES workspace_publish_runs(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('preview', 'final')),
+    position INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN (
+        'pending', 'sending', 'sent', 'unknown', 'deleted', 'cancelled'
+    )),
+    chat_id INTEGER NOT NULL DEFAULT 0,
+    topic_id INTEGER NOT NULL DEFAULT 0,
+    message_id INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    sent_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(run_id, kind, position)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_publish_messages_run
+    ON workspace_publish_messages(run_id, kind, position);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate SQLite: %w", err)
 	}
+	for _, migration := range []struct {
+		table, column, definition string
+	}{
+		{"message_decisions", "provider", "TEXT NOT NULL DEFAULT ''"},
+		{"message_decisions", "route", "TEXT NOT NULL DEFAULT ''"},
+		{"model_calls", "batch_id", "TEXT NOT NULL DEFAULT ''"},
+		{"model_calls", "attempt", "INTEGER NOT NULL DEFAULT 1"},
+		{"model_calls", "provider", "TEXT NOT NULL DEFAULT ''"},
+		{"model_calls", "status_code", "INTEGER NOT NULL DEFAULT 0"},
+		{"model_calls", "error_class", "TEXT NOT NULL DEFAULT ''"},
+		{"model_calls", "prompt_tokens", "INTEGER NOT NULL DEFAULT 0"},
+		{"model_calls", "output_tokens", "INTEGER NOT NULL DEFAULT 0"},
+		{"model_calls", "total_tokens", "INTEGER NOT NULL DEFAULT 0"},
+		{"model_calls", "finish_reason", "TEXT NOT NULL DEFAULT ''"},
+		{"telegram_messages", "topic_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"telegram_messages", "sender", "TEXT NOT NULL DEFAULT ''"},
+		{"search_documents", "scan_generation", "INTEGER NOT NULL DEFAULT 0"},
+		{"search_sync_state", "scan_generation", "INTEGER NOT NULL DEFAULT 0"},
+		{"search_sync_state", "scan_cursor", "INTEGER NOT NULL DEFAULT 0"},
+		{"search_sync_state", "scan_started_at", "TEXT"},
+		{"search_sync_state", "audit_cursor", "INTEGER NOT NULL DEFAULT 0"},
+		{"workspace_quotes", "wizard_user_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"workspace_quotes", "wizard_stage", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_quotes", "delivery_status", "TEXT NOT NULL DEFAULT 'draft'"},
+		{"workspace_quotes", "delivery_error", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_publish_runs", "route_summary", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_tasks", "deferred_generation", "INTEGER NOT NULL DEFAULT 0"},
+		{"workspace_task_reminders", "generation", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := s.ensureColumn(ctx, migration.table, migration.column, migration.definition); err != nil {
+			return fmt.Errorf("migrate SQLite %s.%s: %w", migration.table, migration.column, err)
+		}
+	}
 	return nil
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition)
+	return err
 }
 
 func (s *Store) TryStartOverview(ctx context.Context, trigger string, now time.Time, cooldown time.Duration) (Run, error) {
@@ -756,10 +1009,10 @@ func (s *Store) InsertTelegramMessages(ctx context.Context, messages []TelegramM
 		}
 		result, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO telegram_messages(
-    source_id, chat_id, message_id, date, kind, text, media_type, source_link, raw_json, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			message.SourceID, message.ChatID, message.MessageID, message.Date.UTC().Format(time.RFC3339Nano),
-			message.Kind, message.Text, message.MediaType, message.SourceLink, message.RawJSON,
+    source_id, chat_id, message_id, topic_id, date, kind, sender, text, media_type, source_link, raw_json, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			message.SourceID, message.ChatID, message.MessageID, message.TopicID, message.Date.UTC().Format(time.RFC3339Nano),
+			message.Kind, message.Sender, message.Text, message.MediaType, message.SourceLink, message.RawJSON,
 			time.Now().UTC().Format(time.RFC3339Nano))
 		if err != nil {
 			return 0, 0, err
@@ -835,7 +1088,7 @@ func (s *Store) RecentTelegramMessages(ctx context.Context, limit int) ([]Telegr
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.text, m.media_type, m.source_link
+SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.sender, m.text, m.media_type, m.source_link
 FROM telegram_messages m
 JOIN telegram_sources s ON s.id = m.source_id
 ORDER BY m.date DESC, m.chat_id DESC, m.message_id DESC
@@ -851,7 +1104,7 @@ LIMIT ?`, limit)
 		var dateRaw string
 		if err := rows.Scan(
 			&message.SourceRef, &message.SourceTitle, &message.Username, &message.ChatID,
-			&message.MessageID, &dateRaw, &message.Kind, &message.Text, &message.MediaType,
+			&message.MessageID, &dateRaw, &message.Kind, &message.Sender, &message.Text, &message.MediaType,
 			&message.SourceLink,
 		); err != nil {
 			return nil, err
@@ -898,7 +1151,7 @@ func (s *Store) RecentTelegramMessagesBySourceRefs(ctx context.Context, sourceRe
 	}
 	args = append(args, limit)
 	query := `
-SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.text, m.media_type, m.source_link
+SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.sender, m.text, m.media_type, m.source_link
 FROM telegram_messages m
 JOIN telegram_sources s ON s.id = m.source_id
 WHERE s.ref IN (` + strings.Join(placeholders, ",") + `)
@@ -917,7 +1170,7 @@ LIMIT ?`
 		var dateRaw string
 		if err := rows.Scan(
 			&message.SourceRef, &message.SourceTitle, &message.Username, &message.ChatID,
-			&message.MessageID, &dateRaw, &message.Kind, &message.Text, &message.MediaType,
+			&message.MessageID, &dateRaw, &message.Kind, &message.Sender, &message.Text, &message.MediaType,
 			&message.SourceLink,
 		); err != nil {
 			return nil, err
@@ -935,12 +1188,62 @@ LIMIT ?`
 	return messages, nil
 }
 
+// TelegramMessagesBefore returns the closest older messages from the same
+// source in chronological order. It lets event extraction recover context
+// across overview process/run boundaries without exposing Telegram IDs to the
+// model prompt.
+func (s *Store) TelegramMessagesBefore(ctx context.Context, sourceRef string, before time.Time, messageID, limit int) ([]TelegramRecentMessage, error) {
+	if strings.TrimSpace(sourceRef) == "" || before.IsZero() || messageID <= 0 {
+		return nil, fmt.Errorf("source, time, and message ID are required")
+	}
+	if limit <= 0 {
+		limit = 2
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind,
+       m.sender, m.text, m.media_type, m.source_link
+FROM telegram_messages m
+JOIN telegram_sources s ON s.id = m.source_id
+WHERE s.ref = ? AND (
+    m.date < ? OR (m.date = ? AND m.message_id < ?)
+)
+ORDER BY m.date DESC, m.message_id DESC
+LIMIT ?`, strings.TrimSpace(sourceRef), before.UTC().Format(time.RFC3339Nano),
+		before.UTC().Format(time.RFC3339Nano), messageID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var messages []TelegramRecentMessage
+	for rows.Next() {
+		var message TelegramRecentMessage
+		var dateRaw string
+		if err := rows.Scan(&message.SourceRef, &message.SourceTitle, &message.Username,
+			&message.ChatID, &message.MessageID, &dateRaw, &message.Kind, &message.Sender,
+			&message.Text, &message.MediaType, &message.SourceLink); err != nil {
+			return nil, err
+		}
+		message.Date, err = time.Parse(time.RFC3339Nano, dateRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse telegram context date: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for left, right := 0, len(messages)-1; left < right; left, right = left+1, right-1 {
+		messages[left], messages[right] = messages[right], messages[left]
+	}
+	return messages, nil
+}
+
 func (s *Store) TelegramMessagesCreatedBetween(ctx context.Context, start, end time.Time) ([]TelegramRecentMessage, error) {
 	if start.IsZero() || end.IsZero() || end.Before(start) {
 		return nil, fmt.Errorf("valid Telegram message creation window is required")
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.text, m.media_type, m.source_link
+SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.sender, m.text, m.media_type, m.source_link
 FROM telegram_messages m
 JOIN telegram_sources s ON s.id = m.source_id
 WHERE m.created_at >= ? AND m.created_at <= ?
@@ -956,7 +1259,7 @@ ORDER BY m.date, m.chat_id, m.message_id`,
 		var dateRaw string
 		if err := rows.Scan(
 			&message.SourceRef, &message.SourceTitle, &message.Username, &message.ChatID,
-			&message.MessageID, &dateRaw, &message.Kind, &message.Text, &message.MediaType,
+			&message.MessageID, &dateRaw, &message.Kind, &message.Sender, &message.Text, &message.MediaType,
 			&message.SourceLink,
 		); err != nil {
 			return nil, err
@@ -978,7 +1281,7 @@ func (s *Store) SampleTelegramTextMessages(ctx context.Context, limit int, seed 
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.text, m.media_type, m.source_link
+SELECT s.ref, s.title, s.username, m.chat_id, m.message_id, m.date, m.kind, m.sender, m.text, m.media_type, m.source_link
 FROM telegram_messages m
 JOIN telegram_sources s ON s.id = m.source_id
 WHERE TRIM(m.text) != '' AND m.kind != 'service'
@@ -995,7 +1298,7 @@ LIMIT ?`, seed, limit)
 		var dateRaw string
 		if err := rows.Scan(
 			&message.SourceRef, &message.SourceTitle, &message.Username, &message.ChatID,
-			&message.MessageID, &dateRaw, &message.Kind, &message.Text, &message.MediaType,
+			&message.MessageID, &dateRaw, &message.Kind, &message.Sender, &message.Text, &message.MediaType,
 			&message.SourceLink,
 		); err != nil {
 			return nil, err
@@ -1299,11 +1602,12 @@ func (s *Store) InsertMessageDecisions(ctx context.Context, decisions []MessageD
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO message_decisions(
-    run_id, chat_id, message_id, keep, importance, reason, tags_json, has_event, model, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    run_id, chat_id, message_id, keep, importance, reason, tags_json, has_event,
+    model, provider, route, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			decision.RunID, decision.ChatID, decision.MessageID, boolInt(decision.Keep),
 			decision.Importance, decision.Reason, string(tags), boolInt(decision.HasEvent),
-			decision.Model, now.UTC().Format(time.RFC3339Nano)); err != nil {
+			decision.Model, decision.Provider, decision.Route, now.UTC().Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
 	}
@@ -1321,16 +1625,23 @@ func (s *Store) InsertModelCall(ctx context.Context, call ModelCall, now time.Ti
 	if call.BatchIndex <= 0 {
 		return fmt.Errorf("model call batch index must be positive")
 	}
-	if call.InputMessages < 0 || call.InputChars < 0 || call.DurationMillis < 0 || call.Fallbacks < 0 {
+	if call.Attempt <= 0 {
+		call.Attempt = 1
+	}
+	if call.InputMessages < 0 || call.InputChars < 0 || call.DurationMillis < 0 || call.Fallbacks < 0 ||
+		call.StatusCode < 0 || call.PromptTokens < 0 || call.OutputTokens < 0 || call.TotalTokens < 0 {
 		return fmt.Errorf("model call metrics cannot be negative")
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO model_calls(
-    run_id, stage, batch_index, input_messages, input_chars, duration_ms,
-    success, fallbacks, error, model, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		call.RunID, call.Stage, call.BatchIndex, call.InputMessages, call.InputChars,
-		call.DurationMillis, boolInt(call.Success), call.Fallbacks, call.Error, call.Model,
+	 run_id, stage, batch_index, batch_id, attempt, input_messages, input_chars,
+	 duration_ms, success, fallbacks, error, model, provider, status_code,
+	 error_class, prompt_tokens, output_tokens, total_tokens, finish_reason, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		call.RunID, call.Stage, call.BatchIndex, call.BatchID, call.Attempt,
+		call.InputMessages, call.InputChars, call.DurationMillis, boolInt(call.Success),
+		call.Fallbacks, call.Error, call.Model, call.Provider, call.StatusCode,
+		call.ErrorClass, call.PromptTokens, call.OutputTokens, call.TotalTokens, call.FinishReason,
 		now.UTC().Format(time.RFC3339Nano))
 	return err
 }
@@ -1341,7 +1652,8 @@ func (s *Store) RecentModelCalls(ctx context.Context, limit int) ([]ModelCall, e
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, run_id, stage, batch_index, input_messages, input_chars, duration_ms,
-       success, fallbacks, error, model, created_at
+       success, fallbacks, error, model, created_at, batch_id, attempt, provider,
+	   status_code, error_class, prompt_tokens, output_tokens, total_tokens, finish_reason
 FROM model_calls
 ORDER BY created_at DESC, id DESC
 LIMIT ?`, limit)
@@ -1357,7 +1669,9 @@ LIMIT ?`, limit)
 		if err := rows.Scan(
 			&call.ID, &call.RunID, &call.Stage, &call.BatchIndex, &call.InputMessages,
 			&call.InputChars, &call.DurationMillis, &success, &call.Fallbacks,
-			&call.Error, &call.Model, &createdRaw,
+			&call.Error, &call.Model, &createdRaw, &call.BatchID, &call.Attempt,
+			&call.Provider, &call.StatusCode, &call.ErrorClass, &call.PromptTokens,
+			&call.OutputTokens, &call.TotalTokens, &call.FinishReason,
 		); err != nil {
 			return nil, err
 		}

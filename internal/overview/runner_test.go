@@ -1,29 +1,36 @@
 package overview
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/SevastyanovYE/Sova/internal/config"
-	"github.com/SevastyanovYE/Sova/internal/qwen"
+	"github.com/SevastyanovYE/Sova/internal/model"
+	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
 	"github.com/SevastyanovYE/Sova/internal/telegrammt"
 )
 
-type emptyClassifier struct{}
+func TestSyncedMessagesFromRecentPreservesSender(t *testing.T) {
+	messages := syncedMessagesFromRecent([]sqlitestore.TelegramRecentMessage{{
+		SourceRef: "telegram:channel:100",
+		ChatID:    100,
+		MessageID: 42,
+		Sender:    "Ярослав Севастьянов",
+		Text:      "Экзамен завтра в 10:00",
+	}})
 
-func (emptyClassifier) ClassifyBatch(_ context.Context, inputs []qwen.MessageInput) (qwen.BatchResult, string, error) {
-	return qwen.BatchResult{}, `{"decisions":[]}`, &qwen.IncompleteResultError{
-		Kind: "decisions", Expected: len(inputs),
+	if len(messages) != 1 || messages[0].Sender != "Ярослав Севастьянов" {
+		t.Fatalf("recovered messages = %+v", messages)
 	}
 }
 
-func TestQwenInputsSkipNonTextAndBoundMessages(t *testing.T) {
-	longText := strings.Repeat("a", qwenMessageMaxText+100)
+func TestModelInputsSkipNonTextUseOpaqueIDsAndBoundMessages(t *testing.T) {
+	longText := strings.Repeat("a", modelMessageMaxText+100)
 	messages := []telegrammt.SyncedMessage{
 		{
 			SourceRef:  "telegram:channel:100",
+			Sender:     "Ярослав Севастьянов",
 			ChatID:     100,
 			MessageID:  1,
 			Kind:       "message",
@@ -55,68 +62,83 @@ func TestQwenInputsSkipNonTextAndBoundMessages(t *testing.T) {
 		},
 	}
 
-	inputs, byID := qwenInputs(messages)
+	inputs, byID := modelInputs(messages)
 	if len(inputs) != 2 {
 		t.Fatalf("inputs = %d", len(inputs))
 	}
-	if _, ok := byID["telegram:100:1"]; !ok {
+	if _, ok := byID["m000001"]; !ok {
 		t.Fatal("missing first text message")
 	}
-	if len([]rune(inputs[0].Text)) > qwenMessageMaxText {
+	if strings.Contains(inputs[0].ID, "100") || len([]rune(inputs[0].Text)) > modelMessageMaxText {
 		t.Fatalf("text was not bounded: %d", len([]rune(inputs[0].Text)))
+	}
+	if inputs[0].Sender != "Ярослав Севастьянов" {
+		t.Fatalf("sender = %q", inputs[0].Sender)
 	}
 	if inputs[1].AttachmentCount != 1 || inputs[1].Kind != "message:messageMediaPhoto" {
 		t.Fatalf("media input = %+v", inputs[1])
 	}
 }
 
-func TestQwenBatchesStaySmall(t *testing.T) {
-	var inputs []qwen.MessageInput
-	for i := 0; i < qwenBatchSize+1; i++ {
-		inputs = append(inputs, qwen.MessageInput{
+func TestModelBatchesStaySmallAndDoNotMixSources(t *testing.T) {
+	var inputs []model.MessageInput
+	for i := 0; i < modelBatchSize+1; i++ {
+		inputs = append(inputs, model.MessageInput{
 			ID:        "id-" + string(rune('a'+i)),
 			SourceRef: "telegram:channel:100",
 			Kind:      "message",
 			Text:      strings.Repeat("x", 100),
 		})
 	}
+	inputs[len(inputs)-1].SourceRef = "telegram:channel:200"
 
-	batches := qwenBatches(inputs)
+	batches := modelBatches(inputs)
 	if len(batches) != 2 {
 		t.Fatalf("batches = %d", len(batches))
 	}
 	for _, batch := range batches {
-		if len(batch) > qwenBatchSize {
+		if len(batch) > modelBatchSize {
 			t.Fatalf("batch too large: %d", len(batch))
 		}
 	}
 }
 
-func TestClassifyBatchResilientFallsBackForIncompleteBatch(t *testing.T) {
-	decisions, fallbacks, errText, err := classifyBatchResilient(
-		context.Background(), emptyClassifier{}, []qwen.MessageInput{{ID: "a"}, {ID: "b"}},
-	)
-	if err != nil {
-		t.Fatal(err)
+func TestLocalKeepAllDoesNotCreateEvents(t *testing.T) {
+	decisions := localKeepAll([]model.MessageInput{{
+		ID:   "m1",
+		Text: "Экзамен завтра в 10:00",
+	}}, "fallback")
+	if len(decisions) != 1 || !decisions[0].Keep || decisions[0].HasEvent {
+		t.Fatalf("decisions = %+v", decisions)
 	}
-	if errText == "" {
-		t.Fatal("expected fallback error text")
-	}
-	if len(decisions) != 2 || fallbacks != 2 || !decisions[0].Keep || decisions[0].Importance != 1 {
-		t.Fatalf("decisions=%+v fallbacks=%d", decisions, fallbacks)
+	if !containsString(decisions[0].Tags, "keep-all") {
+		t.Fatalf("tags = %+v", decisions[0].Tags)
 	}
 }
 
-func TestFallbackDecisionsKeepEventHints(t *testing.T) {
-	decisions := fallbackDecisions([]qwen.MessageInput{{
-		ID:   "telegram:100:42",
-		Text: "Экзамен завтра в 10:00",
-	}}, "fallback")
-	if len(decisions) != 1 || !decisions[0].Keep || !decisions[0].HasEvent {
-		t.Fatalf("decisions = %+v", decisions)
+func TestEventInputsIncludeLocalDateHintAndTwoSameSourceContextMessages(t *testing.T) {
+	base := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
+	classified := []classifiedMessage{
+		{Message: telegrammt.SyncedMessage{SourceRef: "source-a", ChatID: 1, MessageID: 1, Date: base, Kind: "message", Text: "По ОММ обсуждали главы"}},
+		{Message: telegrammt.SyncedMessage{SourceRef: "source-b", ChatID: 2, MessageID: 1, Date: base.Add(time.Minute), Kind: "message", Text: "чужой контекст"}},
+		{Message: telegrammt.SyncedMessage{SourceRef: "source-a", ChatID: 1, MessageID: 2, Date: base.Add(2 * time.Minute), Kind: "message", Text: "Материалы лежат в общем файле"}},
+		{Message: telegrammt.SyncedMessage{SourceRef: "source-a", ChatID: 1, MessageID: 3, Date: base.Add(3 * time.Minute), Kind: "message", Text: "Завтра в 10:00"}},
 	}
-	if !containsString(decisions[0].Tags, "event-hint") {
-		t.Fatalf("tags = %+v", decisions[0].Tags)
+	inputs, byID := eventInputs(classified)
+	if len(inputs) != 1 {
+		t.Fatalf("inputs = %+v", inputs)
+	}
+	last := inputs[len(inputs)-1]
+	if last.ID != "e000001" || len(last.Context) != 2 {
+		t.Fatalf("last input = %+v", last)
+	}
+	for _, previous := range last.Context {
+		if strings.Contains(previous.Text, "чужой") {
+			t.Fatalf("cross-source context leaked: %+v", last.Context)
+		}
+	}
+	if byID[last.ID].MessageID != 3 {
+		t.Fatalf("mapping = %+v", byID[last.ID])
 	}
 }
 
@@ -140,7 +162,7 @@ func TestCodexPromptUsesTelegramPlainTextFormat(t *testing.T) {
 func TestFallbackDigestUsesTelegramPlainTextFormat(t *testing.T) {
 	digest := fallbackDigest(7, []classifiedMessage{{
 		Message:  telegrammt.SyncedMessage{Text: "Экзамен завтра", SourceLink: "https://t.me/c/100/1"},
-		Decision: qwen.MessageDecision{Keep: true, Importance: 3},
+		Decision: model.MessageDecision{Keep: true, Importance: 3},
 	}})
 	for _, want := range []string{"🦉 ОБЗОР SOVA", "ГЛАВНОЕ", "• Экзамен завтра", "Источник: https://t.me/c/100/1"} {
 		if !strings.Contains(digest, want) {
@@ -193,7 +215,7 @@ func TestBuildRunBundleKeepsImportantMessagesAndProvenance(t *testing.T) {
 		}}},
 		[]telegrammt.SyncedMessage{keptMessage, noiseMessage, mediaMessage},
 		[]classifiedMessage{
-			{Message: keptMessage, Decision: qwen.MessageDecision{
+			{Message: keptMessage, Decision: model.MessageDecision{
 				ID:         "telegram:100:10",
 				Keep:       true,
 				Importance: 3,
@@ -201,7 +223,7 @@ func TestBuildRunBundleKeepsImportantMessagesAndProvenance(t *testing.T) {
 				Tags:       []string{"exam"},
 				HasEvent:   true,
 			}},
-			{Message: noiseMessage, Decision: qwen.MessageDecision{
+			{Message: noiseMessage, Decision: model.MessageDecision{
 				ID:         "telegram:100:11",
 				Keep:       false,
 				Importance: 0,
@@ -243,7 +265,7 @@ func TestCalendarCandidateFromExtractionDefaultsEnd(t *testing.T) {
 		testConfig("Europe/Moscow"),
 		7,
 		message,
-		qwen.EventCandidate{
+		model.EventCandidate{
 			ID:          "telegram:100:42",
 			HasEvent:    true,
 			Title:       "[ОММ] Экзамен",

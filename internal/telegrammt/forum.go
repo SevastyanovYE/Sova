@@ -36,23 +36,25 @@ func (c *Client) DiscoverForumTopics(ctx context.Context, store *sqlitestore.Sto
 
 	client := c.newTelegramClient()
 	var discovery ForumTopicDiscovery
-	err := client.Run(ctx, func(runCtx context.Context) error {
-		status, err := client.Auth().Status(runCtx)
-		if err != nil {
-			return fmt.Errorf("auth status: %w", err)
-		}
-		if !status.Authorized {
-			return fmt.Errorf("telegram session is not authorized; run `sova telegram-login`")
-		}
+	err := c.withSessionLock(ctx, func() error {
+		return client.Run(ctx, func(runCtx context.Context) error {
+			status, err := client.Auth().Status(runCtx)
+			if err != nil {
+				return fmt.Errorf("auth status: %w", err)
+			}
+			if !status.Authorized {
+				return fmt.Errorf("telegram session is not authorized; run `sova telegram-login`")
+			}
 
-		resolver := peers.Options{}.Build(client.API())
-		source, err := c.resolveSyncSource(runCtx, store, client.API(), resolver, configuredRef)
-		if err != nil {
+			resolver := peers.Options{}.Build(client.API())
+			source, err := c.resolveSyncSource(runCtx, store, client.API(), resolver, configuredRef)
+			if err != nil {
+				return err
+			}
+			discovery.Source = source.source
+			discovery.Topics, err = fetchForumTopics(runCtx, client.API(), source, limit)
 			return err
-		}
-		discovery.Source = source.source
-		discovery.Topics, err = fetchForumTopics(runCtx, client.API(), source, limit)
-		return err
+		})
 	})
 	if err != nil {
 		return ForumTopicDiscovery{}, err

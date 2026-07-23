@@ -8,7 +8,16 @@ import (
 
 	"github.com/SevastyanovYE/Sova/internal/config"
 	"github.com/SevastyanovYE/Sova/internal/nest"
+	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
 )
+
+const workspaceCommandHelpIndexKey = "command_help"
+
+type commandHelpTelegram interface {
+	SendMessageResult(context.Context, nest.SendMessageRequest) (nest.Message, error)
+	EditMessageText(context.Context, nest.EditMessageTextRequest) error
+	PinChatMessage(context.Context, nest.PinChatMessageRequest) error
+}
 
 type SeedTopicPinsOptions struct {
 	DryRun             bool
@@ -125,21 +134,52 @@ func SeedControlTopicPins(ctx context.Context, cfg config.Config, opts SeedTopic
 	return result, nil
 }
 
-func SeedWorkspaceCommandHelp(ctx context.Context, cfg config.Config, opts SeedTopicPinsOptions) (SeedTopicPinsResult, error) {
+func SeedWorkspaceCommandHelp(ctx context.Context, cfg config.Config, store *sqlitestore.Store, opts SeedTopicPinsOptions) (SeedTopicPinsResult, error) {
 	if !cfg.WorkspaceConfigured() {
 		return SeedTopicPinsResult{}, fmt.Errorf("workspace group is not fully configured")
 	}
+	if store == nil {
+		return SeedTopicPinsResult{}, fmt.Errorf("workspace store is required")
+	}
+	return seedWorkspaceCommandHelpWithClient(ctx, cfg, store, nest.New(cfg.Workspace.BotToken), opts)
+}
+
+func seedWorkspaceCommandHelpWithClient(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client commandHelpTelegram, opts SeedTopicPinsOptions) (SeedTopicPinsResult, error) {
 	result := SeedTopicPinsResult{DryRun: opts.DryRun}
-	client := nest.New(cfg.Workspace.BotToken)
+	now := opts.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
 	for _, draft := range WorkspaceCommandHelpDrafts(cfg) {
 		item := SeedTopicPinItem{
 			Group:   "workspace_help",
 			Topic:   draft.Topic,
 			TopicID: draft.TopicID,
 			Text:    draft.Text,
-			Status:  "dry_run",
+			Status:  "dry_run_create_pinned",
 		}
-		if !opts.DryRun {
+		messageID, exists, err := store.WorkspaceTopicIndexMessage(ctx, cfg.Workspace.ChatID, draft.TopicID, workspaceCommandHelpIndexKey)
+		if err != nil {
+			return SeedTopicPinsResult{}, fmt.Errorf("load command help for %s: %w", draft.Topic, err)
+		}
+		if exists {
+			item.MessageID = messageID
+			item.Status = "dry_run_update_pinned"
+		}
+		if opts.DryRun {
+			result.Items = append(result.Items, item)
+			continue
+		}
+		if exists {
+			err := client.EditMessageText(ctx, nest.EditMessageTextRequest{
+				ChatID: cfg.Workspace.ChatID, MessageID: messageID,
+				Text: draft.Text, ParseMode: "HTML",
+			})
+			if err != nil && !isTelegramMessageNotModified(err) {
+				return SeedTopicPinsResult{}, fmt.Errorf("update command help in %s: %w", draft.Topic, err)
+			}
+			item.Status = "updated_pinned"
+		} else {
 			message, err := client.SendMessageResult(ctx, nest.SendMessageRequest{
 				ChatID:          cfg.Workspace.ChatID,
 				MessageThreadID: draft.TopicID,
@@ -150,7 +190,15 @@ func SeedWorkspaceCommandHelp(ctx context.Context, cfg config.Config, opts SeedT
 				return SeedTopicPinsResult{}, fmt.Errorf("send command help to %s: %w", draft.Topic, err)
 			}
 			item.MessageID = message.MessageID
-			item.Status = "sent"
+			if err := store.UpsertWorkspaceTopicIndex(ctx, cfg.Workspace.ChatID, draft.TopicID, workspaceCommandHelpIndexKey, message.MessageID, now); err != nil {
+				return SeedTopicPinsResult{}, fmt.Errorf("track command help in %s: %w", draft.Topic, err)
+			}
+			item.Status = "sent_pinned"
+		}
+		if err := client.PinChatMessage(ctx, nest.PinChatMessageRequest{
+			ChatID: cfg.Workspace.ChatID, MessageID: item.MessageID, DisableNotification: true,
+		}); err != nil {
+			return SeedTopicPinsResult{}, fmt.Errorf("pin command help in %s: %w", draft.Topic, err)
 		}
 		result.Items = append(result.Items, item)
 	}
@@ -159,9 +207,11 @@ func SeedWorkspaceCommandHelp(ctx context.Context, cfg config.Config, opts SeedT
 
 func WorkspaceCommandHelpDrafts(cfg config.Config) []SeedTopicPinItem {
 	return []SeedTopicPinItem{
-		{Topic: "Inbox", TopicID: cfg.Workspace.Topics.Inbox, Text: InboxHelpMessageText() + "\n\n" + UsefulHelpMessageText() + "\n\n" + ClusterHelpMessageText()},
+		{Topic: "Inbox", TopicID: cfg.Workspace.Topics.Inbox, Text: InboxHelpMessageText()},
 		{Topic: "Задачи", TopicID: cfg.Workspace.Topics.Tasks, Text: TaskHelpMessageText()},
 		{Topic: "Заметки", TopicID: cfg.Workspace.Topics.Notes, Text: WorkspaceDocumentHelpText("doc")},
+		{Topic: "Опыт", TopicID: cfg.Workspace.Topics.Experience, Text: ExperienceHelpMessageText()},
+		{Topic: "Полезное", TopicID: cfg.Workspace.Topics.Useful, Text: UsefulHelpMessageText()},
 		{Topic: "Заготовки", TopicID: cfg.Workspace.Topics.Templates, Text: WorkspaceDocumentHelpText("template")},
 		{Topic: "Коллекции", TopicID: cfg.Workspace.Topics.Collections, Text: WorkspaceDocumentHelpText("collection")},
 	}
@@ -183,6 +233,15 @@ func ResetWorkspaceTopicPins(ctx context.Context, cfg config.Config, opts SeedTo
 		topicID := workspaceTopicID(cfg, draft.Topic)
 		if topicID == 0 {
 			return SeedTopicPinsResult{}, fmt.Errorf("workspace topic %q is not configured", draft.Topic)
+		}
+		if draft.Topic == "Опыт" {
+			result.Items = append(result.Items, SeedTopicPinItem{
+				Group:   "workspace",
+				Topic:   draft.Topic,
+				TopicID: topicID,
+				Status:  "preserved_dynamic_index",
+			})
+			continue
 		}
 		unpin := SeedTopicPinItem{
 			Group:   "workspace",
