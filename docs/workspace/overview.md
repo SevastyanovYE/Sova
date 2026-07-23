@@ -116,6 +116,8 @@ in `Опыт`. Later runs edit the tracked messages instead of creating duplicat
 `seed-document-indexes` creates or updates the active Stage 6 index messages in
 `Заметки`, `Заготовки`, `Коллекции`, and `Полезное`. The live bot edits these
 same messages after `/note`, `/template`, `/collection`, and publish commands.
+Use `--type quote` to create or update only the pinned quote index in `Опыт`
+without touching the existing indexes in other topics.
 
 `serve` runs the live Workspace bot for `InSync v1.0`. It is separate from
 Nest `serve`: it polls `SOVA_WORKSPACE_BOT_TOKEN`, writes live Workspace

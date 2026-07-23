@@ -870,6 +870,7 @@ func workspaceSeedDocumentIndexes(ctx context.Context, cfg config.Config, store 
 	flags := flag.NewFlagSet("workspace seed-document-indexes", flag.ContinueOnError)
 	dryRun := flags.Bool("dry-run", false, "print planned document indexes without sending them")
 	reset := flags.Bool("reset", false, "send fresh pinned index messages and make future updates use them")
+	indexType := flags.String("type", "all", "limit the operation to all, note, template, collection, useful, or quote")
 	timeout := flags.Duration("timeout", 2*time.Minute, "maximum time for Bot API send/edit calls; 0 disables the deadline")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -883,6 +884,7 @@ func workspaceSeedDocumentIndexes(ctx context.Context, cfg config.Config, store 
 	result, err := workspace.SeedWorkspaceDocumentIndexes(seedCtx, cfg, store, workspace.SeedDocumentIndexesOptions{
 		DryRun: *dryRun,
 		Reset:  *reset,
+		Type:   *indexType,
 		Now:    time.Now().UTC(),
 	})
 	if err != nil {
@@ -1825,7 +1827,7 @@ Usage:
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
   sova workspace reset-topic-pins [--target workspace|control|all] [--execute] [--timeout 3m]
   sova workspace seed-command-help [--dry-run] [--timeout 2m]
-  sova workspace seed-document-indexes [--dry-run] [--reset] [--timeout 2m]
+  sova workspace seed-document-indexes [--type all|note|template|collection|useful|quote] [--dry-run] [--reset] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
   sova workspace search-index --full-scan [--limit 250000] [--timeout 2h]
   sova workspace record-deployment --checks "..." [--execute]
@@ -1862,7 +1864,7 @@ Usage:
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
   sova workspace reset-topic-pins [--target workspace|control|all] [--execute] [--timeout 3m]
   sova workspace seed-command-help [--dry-run] [--timeout 2m]
-  sova workspace seed-document-indexes [--dry-run] [--reset] [--timeout 2m]
+  sova workspace seed-document-indexes [--type all|note|template|collection|useful|quote] [--dry-run] [--reset] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
   sova workspace search-index --full-scan [--limit 250000] [--timeout 2h]
   sova workspace record-deployment --checks "..." [--execute]

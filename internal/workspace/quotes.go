@@ -341,33 +341,8 @@ func updateExperienceQuoteIndex(ctx context.Context, cfg config.Config, store *s
 	if err != nil {
 		return err
 	}
-	messageID, ok, err := store.WorkspaceTopicIndexMessage(ctx, cfg.Workspace.ChatID, cfg.Workspace.Topics.Experience, experienceQuoteIndexKey)
-	if err != nil {
-		return err
-	}
-	if ok {
-		err := client.EditMessageText(ctx, nest.EditMessageTextRequest{
-			ChatID: cfg.Workspace.ChatID, MessageID: messageID, Text: text, ParseMode: "HTML",
-		})
-		if err == nil || isTelegramMessageNotModified(err) {
-			return client.PinChatMessage(ctx, nest.PinChatMessageRequest{
-				ChatID: cfg.Workspace.ChatID, MessageID: messageID, DisableNotification: true,
-			})
-		}
-	}
-	message, err := client.SendMessageResult(ctx, nest.SendMessageRequest{
-		ChatID: cfg.Workspace.ChatID, MessageThreadID: cfg.Workspace.Topics.Experience,
-		Text: text, ParseMode: "HTML",
-	})
-	if err != nil {
-		return err
-	}
-	if err := store.UpsertWorkspaceTopicIndex(ctx, cfg.Workspace.ChatID, cfg.Workspace.Topics.Experience, experienceQuoteIndexKey, message.MessageID, now); err != nil {
-		return err
-	}
-	return client.PinChatMessage(ctx, nest.PinChatMessageRequest{
-		ChatID: cfg.Workspace.ChatID, MessageID: message.MessageID, DisableNotification: true,
-	})
+	_, _, err = upsertWorkspacePinnedIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Experience, experienceQuoteIndexKey, text, now)
+	return err
 }
 
 func renderExperienceQuoteIndex(ctx context.Context, store *sqlitestore.Store) (string, error) {

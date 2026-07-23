@@ -27,6 +27,7 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - ошибки доступности отдельной модели переключают обработку на следующую модель
 - конфигурация поиска принимает как Bot API chat ID, так и стабильный `telegram:channel:…` source ref
 - командные закрепы обновляются без дублей; отдельная справка по цитатам добавлена в «Опыт»
+- индекс цитат можно безопасно создать отдельно через `seed-document-indexes --type quote`, не трогая старые индексы
 
 [Unreleased]: https://github.com/SevastyanovYE/Sova/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/SevastyanovYE/Sova/compare/0b7c4b4cd10bbab9d764a327f0e39744413ace9d...v0.1.0

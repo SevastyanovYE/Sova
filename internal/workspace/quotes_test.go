@@ -153,3 +153,20 @@ func TestQuoteIndexParticipatesInSeedAndSurvivesGeneralPinReset(t *testing.T) {
 		t.Fatalf("general reset did not preserve experience index: %+v", reset.Items)
 	}
 }
+
+func TestSeedDocumentIndexesCanSelectOnlyQuote(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := testWorkspaceLiveConfig()
+	cfg.Workspace.BotToken = "test-token"
+	result, err := SeedWorkspaceDocumentIndexes(context.Background(), cfg, store, SeedDocumentIndexesOptions{DryRun: true, Type: "quote"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Type != "quote" || result.Items[0].TopicID != cfg.Workspace.Topics.Experience {
+		t.Fatalf("quote-only seed = %+v", result.Items)
+	}
+}

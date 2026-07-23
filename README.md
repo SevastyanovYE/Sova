@@ -127,7 +127,7 @@ go run ./cmd/sova nest-seed-topics
 | `/collection new`, `/collection add`, `/collection show` | Команды коллекций: создают отдельную карточку коллекции и один общий индекс ссылок на коллекции. |
 | `go run ./cmd/sova workspace seed-topic-pins --target all` | Отправляет human-friendly сообщения для закрепления в топики `InSync v1.0` и `Sova.Control`. |
 | `go run ./cmd/sova workspace seed-command-help` | Создаёт и закрепляет отслеживаемую справку по командам в каждом Workspace topic; повторный запуск обновляет те же сообщения. |
-| `go run ./cmd/sova workspace seed-document-indexes` | Создаёт или обновляет active indexes для `Заметки`, `Заготовки`, `Коллекции`, цитат в `Опыт` и `Полезное`. |
+| `go run ./cmd/sova workspace seed-document-indexes` | Создаёт или обновляет active indexes; `--type quote` затрагивает только закреплённый индекс цитат в `Опыт`. |
 | `go run ./cmd/sova workspace cleanup-test-tasks --execute` | Удаляет bot-created тестовые task cards/backlog и помечает найденные проверочные задачи отменёнными. |
 | `go run ./cmd/sova workspace search-index --full-scan` | Строит semantic index нового InSync, старого InSync и Sova.Nest перед включением `/search`. |
 | `/quote` | Запускает из Inbox мастер цитаты для «Опыт» с нативным Telegram blockquote и динамическим индексом. |

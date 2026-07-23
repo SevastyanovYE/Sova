@@ -63,6 +63,7 @@ type publishPreviewDraft struct {
 type SeedDocumentIndexesOptions struct {
 	DryRun bool
 	Reset  bool
+	Type   string
 	Now    time.Time
 }
 
@@ -2820,6 +2821,13 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 	if store == nil {
 		return SeedDocumentIndexesResult{}, fmt.Errorf("store is required")
 	}
+	selectedType := strings.ToLower(strings.TrimSpace(opts.Type))
+	if selectedType == "" {
+		selectedType = "all"
+	}
+	if selectedType != "all" && selectedType != "note" && selectedType != "template" && selectedType != "collection" && selectedType != "useful" && selectedType != "quote" {
+		return SeedDocumentIndexesResult{}, fmt.Errorf("document index type must be all, note, template, collection, useful, or quote")
+	}
 	now := opts.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -2827,6 +2835,9 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 	client := nest.New(cfg.Workspace.BotToken)
 	result := SeedDocumentIndexesResult{DryRun: opts.DryRun}
 	for _, docType := range []string{"note", "template", "collection"} {
+		if selectedType != "all" && selectedType != docType {
+			continue
+		}
 		topicID, key, err := workspaceDocumentIndexTarget(cfg, docType)
 		if err != nil {
 			return SeedDocumentIndexesResult{}, err
@@ -2855,53 +2866,100 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 		}
 		result.Items = append(result.Items, item)
 	}
-	usefulText, err := renderUsefulIndex(ctx, cfg, store)
-	if err != nil {
-		return SeedDocumentIndexesResult{}, err
-	}
-	usefulItem := SeedDocumentIndexItem{
-		Type:    "useful",
-		Topic:   "Полезное",
-		TopicID: cfg.Workspace.Topics.Useful,
-		Status:  "dry_run",
-		Text:    usefulText,
-	}
-	if opts.Reset {
-		usefulItem.Status = "reset_dry_run"
-	}
-	if !opts.DryRun {
-		messageID, status, err := upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Useful, usefulIndexKey, usefulText, now, opts.Reset)
+	if selectedType == "all" || selectedType == "useful" {
+		usefulText, err := renderUsefulIndex(ctx, cfg, store)
 		if err != nil {
 			return SeedDocumentIndexesResult{}, err
 		}
-		usefulItem.MessageID = messageID
-		usefulItem.Status = status
+		usefulItem := SeedDocumentIndexItem{
+			Type:    "useful",
+			Topic:   "Полезное",
+			TopicID: cfg.Workspace.Topics.Useful,
+			Status:  "dry_run",
+			Text:    usefulText,
+		}
+		if opts.Reset {
+			usefulItem.Status = "reset_dry_run"
+		}
+		if !opts.DryRun {
+			messageID, status, err := upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Useful, usefulIndexKey, usefulText, now, opts.Reset)
+			if err != nil {
+				return SeedDocumentIndexesResult{}, err
+			}
+			usefulItem.MessageID = messageID
+			usefulItem.Status = status
+		}
+		result.Items = append(result.Items, usefulItem)
 	}
-	result.Items = append(result.Items, usefulItem)
-	experienceText, err := renderExperienceQuoteIndex(ctx, store)
-	if err != nil {
-		return SeedDocumentIndexesResult{}, err
-	}
-	experienceItem := SeedDocumentIndexItem{
-		Type:    "quote",
-		Topic:   "Опыт",
-		TopicID: cfg.Workspace.Topics.Experience,
-		Status:  "dry_run",
-		Text:    experienceText,
-	}
-	if opts.Reset {
-		experienceItem.Status = "reset_dry_run"
-	}
-	if !opts.DryRun {
-		messageID, status, err := upsertWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Experience, experienceQuoteIndexKey, experienceText, now, opts.Reset)
+	if selectedType == "all" || selectedType == "quote" {
+		experienceText, err := renderExperienceQuoteIndex(ctx, store)
 		if err != nil {
 			return SeedDocumentIndexesResult{}, err
 		}
-		experienceItem.MessageID = messageID
-		experienceItem.Status = status
+		experienceItem := SeedDocumentIndexItem{
+			Type:    "quote",
+			Topic:   "Опыт",
+			TopicID: cfg.Workspace.Topics.Experience,
+			Status:  "dry_run",
+			Text:    experienceText,
+		}
+		if opts.Reset {
+			experienceItem.Status = "reset_dry_run"
+		}
+		if !opts.DryRun {
+			var messageID int
+			var status string
+			if opts.Reset {
+				messageID, status, err = sendWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Experience, experienceQuoteIndexKey, experienceText, now, true)
+			} else {
+				messageID, status, err = upsertWorkspacePinnedIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Experience, experienceQuoteIndexKey, experienceText, now)
+			}
+			if err != nil {
+				return SeedDocumentIndexesResult{}, err
+			}
+			experienceItem.MessageID = messageID
+			experienceItem.Status = status
+		}
+		result.Items = append(result.Items, experienceItem)
 	}
-	result.Items = append(result.Items, experienceItem)
 	return result, nil
+}
+
+func upsertWorkspacePinnedIndexMessage(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, topicID int, key, text string, now time.Time) (int, string, error) {
+	messageID, ok, err := store.WorkspaceTopicIndexMessage(ctx, cfg.Workspace.ChatID, topicID, key)
+	if err != nil {
+		return 0, "", err
+	}
+	status := "updated_pinned"
+	if ok {
+		err := client.EditMessageText(ctx, nest.EditMessageTextRequest{
+			ChatID: cfg.Workspace.ChatID, MessageID: messageID, Text: text, ParseMode: "HTML",
+		})
+		if err != nil && !isTelegramMessageNotModified(err) {
+			return 0, "", err
+		}
+		if isTelegramMessageNotModified(err) {
+			status = "unchanged_pinned"
+		}
+	} else {
+		message, err := client.SendMessageResult(ctx, nest.SendMessageRequest{
+			ChatID: cfg.Workspace.ChatID, MessageThreadID: topicID, Text: text, ParseMode: "HTML",
+		})
+		if err != nil {
+			return 0, "", err
+		}
+		messageID = message.MessageID
+		if err := store.UpsertWorkspaceTopicIndex(ctx, cfg.Workspace.ChatID, topicID, key, messageID, now); err != nil {
+			return 0, "", err
+		}
+		status = "sent_pinned"
+	}
+	if err := client.PinChatMessage(ctx, nest.PinChatMessageRequest{
+		ChatID: cfg.Workspace.ChatID, MessageID: messageID, DisableNotification: true,
+	}); err != nil {
+		return 0, "", err
+	}
+	return messageID, status, nil
 }
 
 func upsertWorkspaceDocumentIndexMessage(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, topicID int, key, text string, now time.Time, reset bool) (int, string, error) {
