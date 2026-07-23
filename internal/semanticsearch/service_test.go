@@ -3,6 +3,7 @@ package semanticsearch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -13,14 +14,28 @@ import (
 )
 
 type fakeEmbedClient struct {
-	values []float32
-	err    error
-	calls  int
+	values     []float32
+	err        error
+	batchErr   error
+	calls      int
+	batchCalls int
 }
 
 func (f *fakeEmbedClient) EmbedContent(context.Context, googleai.EmbedRequest) (googleai.EmbedResponse, error) {
 	f.calls++
 	return googleai.EmbedResponse{Values: f.values, Model: DefaultEmbeddingModel}, f.err
+}
+
+func (f *fakeEmbedClient) BatchEmbedContents(_ context.Context, request googleai.BatchEmbedRequest) (googleai.BatchEmbedResponse, error) {
+	f.batchCalls++
+	if f.batchErr != nil {
+		return googleai.BatchEmbedResponse{}, f.batchErr
+	}
+	values := make([][]float32, len(request.Texts))
+	for index := range values {
+		values[index] = append([]float32(nil), f.values...)
+	}
+	return googleai.BatchEmbedResponse{Values: values, Model: DefaultEmbeddingModel}, nil
 }
 
 func TestServiceFallsBackToSecondKeyForAuthenticationError(t *testing.T) {
@@ -80,6 +95,35 @@ func TestServiceExactCosineSearchRequiresFullScan(t *testing.T) {
 	results, route, err := service.Search(ctx, "сова", 10)
 	if err != nil || route != "primary" || len(results) != 2 || results[0].Document.MessageID != 1 {
 		t.Fatalf("route=%q results=%+v err=%v", route, results, err)
+	}
+}
+
+func TestIndexPendingUsesSmallSequentialBatches(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "semantic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	documents := make([]sqlitestore.SearchDocument, 33)
+	for index := range documents {
+		documents[index] = sqlitestore.SearchDocument{
+			Scope: "legacy", ChatID: 1, MessageID: index + 1, MessageDate: now,
+			Text: "message", ContentHash: fmt.Sprintf("hash-%d", index),
+		}
+	}
+	if _, err := store.UpsertSearchDocuments(ctx, documents, now); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeEmbedClient{values: unitVector(0)}
+	service := &Service{store: store, model: DefaultEmbeddingModel, primary: client, now: func() time.Time { return now }}
+	summary, err := service.IndexPending(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Processed != 33 || summary.Primary != 33 || client.batchCalls != 2 || client.calls != 0 {
+		t.Fatalf("summary=%+v batch_calls=%d calls=%d", summary, client.batchCalls, client.calls)
 	}
 }
 

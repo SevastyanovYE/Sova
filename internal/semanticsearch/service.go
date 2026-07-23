@@ -15,12 +15,14 @@ import (
 const (
 	DefaultEmbeddingModel = "gemini-embedding-2"
 	defaultResultLimit    = 10
+	embeddingBatchSize    = 32
 )
 
 var ErrIndexNotReady = errors.New("semantic search index has not completed its full scan")
 
 type embedClient interface {
 	EmbedContent(context.Context, googleai.EmbedRequest) (googleai.EmbedResponse, error)
+	BatchEmbedContents(context.Context, googleai.BatchEmbedRequest) (googleai.BatchEmbedResponse, error)
 }
 
 type Service struct {
@@ -93,35 +95,43 @@ func (s *Service) IndexPending(ctx context.Context, limit int) (IndexSummary, er
 		return IndexSummary{}, err
 	}
 	var summary IndexSummary
-	var failures []string
-	for _, document := range documents {
-		vector, route, embedErr := s.embed(ctx, prepareDocument(document.SourceTitle, document.Text))
+	for start := 0; start < len(documents); start += embeddingBatchSize {
+		end := start + embeddingBatchSize
+		if end > len(documents) {
+			end = len(documents)
+		}
+		batch := documents[start:end]
+		texts := make([]string, len(batch))
+		for index, document := range batch {
+			texts[index] = prepareDocument(document.SourceTitle, document.Text)
+		}
+		vectors, route, embedErr := s.embedBatch(ctx, texts)
 		if embedErr != nil {
 			now := s.now().UTC()
-			delay := searchRetryDelay(document.Attempts + 1)
-			if err := s.store.MarkSearchDocumentRetry(ctx, document.ID, now.Add(delay), redactSearchError(embedErr.Error(), s.primaryKey, s.fallbackKey), false, now); err != nil {
+			for _, document := range batch {
+				delay := searchRetryDelay(document.Attempts + 1)
+				if err := s.store.MarkSearchDocumentRetry(ctx, document.ID, now.Add(delay), redactSearchError(embedErr.Error(), s.primaryKey, s.fallbackKey), false, now); err != nil {
+					return summary, err
+				}
+				summary.Queued++
+			}
+			return summary, fmt.Errorf("documents %d-%d: embedding temporarily unavailable", batch[0].ID, batch[len(batch)-1].ID)
+		}
+		for index, document := range batch {
+			normalized, err := Normalize(vectors[index])
+			if err != nil {
 				return summary, err
 			}
-			summary.Queued++
-			failures = append(failures, fmt.Sprintf("document %d: embedding temporarily unavailable", document.ID))
-			continue
+			if err := s.store.SaveSearchEmbedding(ctx, document.ID, s.model, DefaultEmbeddingDimensions, EncodeFloat32(normalized), route, s.now().UTC()); err != nil {
+				return summary, err
+			}
+			summary.Processed++
+			if route == "fallback" {
+				summary.Fallback++
+			} else {
+				summary.Primary++
+			}
 		}
-		normalized, err := Normalize(vector)
-		if err != nil {
-			return summary, err
-		}
-		if err := s.store.SaveSearchEmbedding(ctx, document.ID, s.model, DefaultEmbeddingDimensions, EncodeFloat32(normalized), route, s.now().UTC()); err != nil {
-			return summary, err
-		}
-		summary.Processed++
-		if route == "fallback" {
-			summary.Fallback++
-		} else {
-			summary.Primary++
-		}
-	}
-	if len(failures) > 0 {
-		return summary, fmt.Errorf("%s", strings.Join(failures, "; "))
 	}
 	return summary, nil
 }
@@ -208,6 +218,24 @@ func (s *Service) embed(ctx context.Context, text string) ([]float32, string, er
 		return nil, "", fmt.Errorf("primary embedding route failed: %s", redactSearchError(primaryErr.Error(), s.primaryKey, s.fallbackKey))
 	}
 	response, fallbackErr := s.fallback.EmbedContent(ctx, request)
+	if fallbackErr == nil {
+		return response.Values, "fallback", nil
+	}
+	return nil, "", fmt.Errorf("primary and fallback embedding routes failed: %s; %s",
+		redactSearchError(primaryErr.Error(), s.primaryKey, s.fallbackKey),
+		redactSearchError(fallbackErr.Error(), s.primaryKey, s.fallbackKey))
+}
+
+func (s *Service) embedBatch(ctx context.Context, texts []string) ([][]float32, string, error) {
+	request := googleai.BatchEmbedRequest{Model: s.model, Texts: texts, OutputDimensions: DefaultEmbeddingDimensions}
+	response, primaryErr := s.primary.BatchEmbedContents(ctx, request)
+	if primaryErr == nil {
+		return response.Values, "primary", nil
+	}
+	if !searchFallbackEligible(primaryErr) || s.fallback == nil {
+		return nil, "", fmt.Errorf("primary embedding route failed: %s", redactSearchError(primaryErr.Error(), s.primaryKey, s.fallbackKey))
+	}
+	response, fallbackErr := s.fallback.BatchEmbedContents(ctx, request)
 	if fallbackErr == nil {
 		return response.Values, "fallback", nil
 	}
