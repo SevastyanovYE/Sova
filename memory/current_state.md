@@ -1,9 +1,34 @@
 # Current State
 
-- The Sova 0.1.0 implementation is prepared locally but has not yet been
-  deployed, tagged, or announced. `VERSION`, `CHANGELOG.md`, embedded build
-  metadata, deployment receipts, and duplicate-safe Inbox announcement gates
-  are present; production execution remains a separate verified release step.
+- Sova 0.1.0 is deployed to production at commit
+  `26cd40be8143a0f73d82332ac3e668b8085e0f40`. Both
+  `sova-workspace.service` and `sova-nest.service` are active with zero restarts.
+  The release is not tagged or announced and has no deployment receipt because
+  the complete strict release gate has not passed.
+- Production additive migrations and SQLite `quick_check` succeeded. A verified
+  pre-deployment database, binary, and environment backup remain under
+  `/var/backups/sova/` and `/opt/sova/`/`/etc/sova/` respectively.
+- Existing Workspace command-help messages were registered and edited in place:
+  Inbox `497`, Tasks `498`, Notes `499`, Experience `500`, Useful `501`,
+  Templates `502`, and Collections `503`. No replacement command-help messages
+  were sent. Experience has one new pinned, tracked quote index at message
+  `1061`.
+- The production semantic-search corpus full scan is complete for current
+  InSync (916 active text messages, IDs `9..1063`), old InSync (2166,
+  IDs `3..2464`), and Sova.Nest (74, IDs `3..95`). MTProto outer-page
+  continuation now uses `offset_id`; the server validated pagination beyond
+  both the 100-message API page and the 500-message checkpoint page.
+- Search uses the official synchronous `batchEmbedContents` endpoint in
+  sequential batches of 20 and the same `gemini-embedding-2`/768-dimensional
+  space for both keys. Production currently has 1973 ready vectors out of 3156;
+  the primary and fallback projects reached their observed quota near 1000
+  embeddings each. The remaining durable queue will resume automatically from
+  the Workspace five-minute loop after the provider quota window resets.
+  `/search` returns the index-building response until `IndexReady` succeeds.
+- Production Google Calendar OAuth client and token files are installed with
+  mode `0600`. General strict doctor remains blocked by absent Go, ffmpeg,
+  tesseract, and Codex CLI; Workspace strict doctor remains blocked only by the
+  incomplete embedding queue. Codex credentials were not copied or repurposed.
 - Workspace has an Inbox-only `/quote` wizard. Quotes are rendered as native
   Telegram blockquotes, stored in `workspace_quotes`, linked from a dynamic
   `Опыт` index, and moved to `needs_review` when their source message changes.
