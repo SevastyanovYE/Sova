@@ -1,7 +1,7 @@
 # Current State
 
-- Sova 0.1.0 is deployed to production at commit
-  `26cd40be8143a0f73d82332ac3e668b8085e0f40`. Both
+- Sova 0.1.0 is deployed to production from the final rollout commit; the
+  installed binary exposes its exact revision through `sova version`. Both
   `sova-workspace.service` and `sova-nest.service` are active with zero restarts.
   The release is not tagged or announced and has no deployment receipt because
   the complete strict release gate has not passed.
