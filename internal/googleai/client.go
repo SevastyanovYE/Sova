@@ -74,9 +74,9 @@ func (e *APIError) Error() string {
 		parts = append(parts, compact(e.Message, 300))
 	}
 	if len(parts) == 0 {
-		return "Google generateContent failed"
+		return "Google API request failed"
 	}
-	return "Google generateContent failed: " + strings.Join(parts, "; ")
+	return "Google API request failed: " + strings.Join(parts, "; ")
 }
 
 type ErrorClass string
@@ -100,7 +100,7 @@ type ResponseError struct {
 }
 
 func (e *ResponseError) Error() string {
-	return "invalid Google generateContent response: " + compact(e.Reason, 240)
+	return "invalid Google API response: " + compact(e.Reason, 240)
 }
 
 func New(apiKey string) *Client {
