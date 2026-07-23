@@ -106,7 +106,7 @@ func TestIndexPendingUsesSmallSequentialBatches(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
-	documents := make([]sqlitestore.SearchDocument, 33)
+	documents := make([]sqlitestore.SearchDocument, 41)
 	for index := range documents {
 		documents[index] = sqlitestore.SearchDocument{
 			Scope: "legacy", ChatID: 1, MessageID: index + 1, MessageDate: now,
@@ -122,7 +122,7 @@ func TestIndexPendingUsesSmallSequentialBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.Processed != 33 || summary.Primary != 33 || client.batchCalls != 2 || client.calls != 0 {
+	if summary.Processed != 41 || summary.Primary != 41 || client.batchCalls != 3 || client.calls != 0 {
 		t.Fatalf("summary=%+v batch_calls=%d calls=%d", summary, client.batchCalls, client.calls)
 	}
 }

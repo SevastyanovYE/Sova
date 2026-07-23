@@ -15,7 +15,10 @@ import (
 const (
 	DefaultEmbeddingModel = "gemini-embedding-2"
 	defaultResultLimit    = 10
-	embeddingBatchSize    = 32
+	// The observed free-tier item window is 100 embeddings per project.
+	// Twenty keeps requests compact and fills that window without stranding a
+	// partially over-limit batch before switching to the fallback project.
+	embeddingBatchSize = 20
 )
 
 var ErrIndexNotReady = errors.New("semantic search index has not completed its full scan")
