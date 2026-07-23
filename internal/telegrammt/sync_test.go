@@ -131,12 +131,17 @@ func TestResolveExplicitSourceAcceptsBotAPIChannelID(t *testing.T) {
 	}
 }
 
-func TestTelegramHistoryMaxIDOnlyAppliesToFirstPage(t *testing.T) {
-	if got := telegramHistoryPageMaxID(2464, 0); got != 2464 {
-		t.Fatalf("first page max ID = %d", got)
+func TestTelegramHistoryCursorBecomesInitialOffset(t *testing.T) {
+	offset := telegramHistoryInitialOffsetID(2464)
+	if got := offset; got != 2464 {
+		t.Fatalf("initial offset ID = %d, want 2464", got)
 	}
-	if got := telegramHistoryPageMaxID(2464, 2364); got != 0 {
-		t.Fatalf("later page retained max ID = %d", got)
+	request := newTelegramHistoryRequest(&tg.InputPeerEmpty{}, 100, offset, 0)
+	if request.OffsetID != 2464 || request.MaxID != 0 {
+		t.Fatalf("history boundary uses offset_id=%d max_id=%d, want 2464/0", request.OffsetID, request.MaxID)
+	}
+	if got := telegramHistoryInitialOffsetID(0); got != 0 {
+		t.Fatalf("initial offset ID without cursor = %d, want 0", got)
 	}
 }
 

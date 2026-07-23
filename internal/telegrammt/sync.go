@@ -459,26 +459,17 @@ func (c *Client) fetchSourceMessages(ctx context.Context, api *tg.Client, source
 	var messages []sqlitestore.TelegramMessage
 	seen := map[int]struct{}{}
 	senderNames := map[int64]string{}
-	offsetID := 0
+	// HistoryMaxID is a persisted full-scan cursor, not an independent API
+	// filter. Continue from it through offset_id so every internal page uses
+	// the same pagination mechanism. Combining max_id on the first request
+	// with offset_id on later requests can make the next outer scan page empty.
+	offsetID := telegramHistoryInitialOffsetID(maxID)
 	for len(messages) < limit {
 		batchLimit := limit - len(messages)
 		if batchLimit > maxHistoryBatchLimit {
 			batchLimit = maxHistoryBatchLimit
 		}
-		request := &tg.MessagesGetHistoryRequest{
-			Peer:     source.inputPeer,
-			Limit:    batchLimit,
-			OffsetID: offsetID,
-		}
-		// MaxID defines the first page boundary. Reusing it together with a
-		// progressively older OffsetID can make Telegram return an empty second
-		// page, truncating a full-history scan at the API's 100-message batch.
-		if firstPageMaxID := telegramHistoryPageMaxID(maxID, offsetID); firstPageMaxID > 0 {
-			request.MaxID = firstPageMaxID
-		}
-		if minID > 0 {
-			request.MinID = minID
-		}
+		request := newTelegramHistoryRequest(source.inputPeer, batchLimit, offsetID, minID)
 		history, err := api.MessagesGetHistory(ctx, request)
 		if err != nil {
 			return nil, err
@@ -534,11 +525,23 @@ func (c *Client) fetchSourceMessages(ctx context.Context, api *tg.Client, source
 	return messages, nil
 }
 
-func telegramHistoryPageMaxID(maxID, offsetID int) int {
-	if maxID > 0 && offsetID == 0 {
-		return maxID
+func telegramHistoryInitialOffsetID(historyCursor int) int {
+	if historyCursor > 0 {
+		return historyCursor
 	}
 	return 0
+}
+
+func newTelegramHistoryRequest(peer tg.InputPeerClass, limit, offsetID, minID int) *tg.MessagesGetHistoryRequest {
+	request := &tg.MessagesGetHistoryRequest{
+		Peer:     peer,
+		Limit:    limit,
+		OffsetID: offsetID,
+	}
+	if minID > 0 {
+		request.MinID = minID
+	}
+	return request
 }
 
 func (c *Client) convertTelegramMessage(source resolvedSource, raw tg.MessageClass, senderNames map[int64]string) (sqlitestore.TelegramMessage, bool, error) {
