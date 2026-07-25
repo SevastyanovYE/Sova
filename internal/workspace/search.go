@@ -347,32 +347,45 @@ func searchMessages(result telegrammt.SyncResult) []sqlitestore.TelegramRecentMe
 func formatWorkspaceSearchResults(cfg config.Config, query string, results []semanticsearch.SearchResult) string {
 	var builder strings.Builder
 	builder.WriteString("🔎 <b>")
-	builder.WriteString(html.EscapeString(query))
+	builder.WriteString(html.EscapeString(truncatePlainUTF16(query, 300)))
 	builder.WriteString("</b>\n")
 	if len(results) == 0 {
 		builder.WriteString("\nНичего подходящего не нашлось.")
 		return builder.String()
 	}
+	shown := 0
 	for index, result := range results {
 		document := result.Document
-		builder.WriteString("\n")
-		builder.WriteString(fmt.Sprintf("%d. <b>%s</b>", index+1, html.EscapeString(searchScopeLabel(document.Scope))))
+		var item strings.Builder
+		item.WriteString("\n")
+		item.WriteString(fmt.Sprintf("%d. <b>%s</b>", index+1, html.EscapeString(searchScopeLabel(document.Scope))))
 		if topic := workspaceTopicLabel(cfg, document.Scope, document.TopicID); topic != "" {
-			builder.WriteString(" · ")
-			builder.WriteString(html.EscapeString(topic))
+			item.WriteString(" · ")
+			item.WriteString(html.EscapeString(topic))
 		}
-		builder.WriteString(" · ")
-		builder.WriteString(document.MessageDate.In(mustLocation(cfg.Timezone)).Format("02.01.2006"))
-		builder.WriteString("\n")
+		item.WriteString(" · ")
+		item.WriteString(document.MessageDate.In(mustLocation(cfg.Timezone)).Format("02.01.2006"))
+		item.WriteString("\n")
 		snippet := html.EscapeString(semanticsearch.CompactSnippet(document.Text, 220))
 		if strings.TrimSpace(document.SourceLink) != "" {
-			builder.WriteString("<a href=\"")
-			builder.WriteString(html.EscapeString(document.SourceLink))
-			builder.WriteString("\">")
-			builder.WriteString(snippet)
-			builder.WriteString("</a>")
+			item.WriteString("<a href=\"")
+			item.WriteString(html.EscapeString(document.SourceLink))
+			item.WriteString("\">")
+			item.WriteString(snippet)
+			item.WriteString("</a>")
 		} else {
-			builder.WriteString(snippet)
+			item.WriteString(snippet)
+		}
+		if !telegramHTMLFits(builder.String()+item.String(), workspaceTelegramSafeTextLimit) {
+			break
+		}
+		builder.WriteString(item.String())
+		shown++
+	}
+	if shown < len(results) {
+		note := fmt.Sprintf("\n\n<i>Показаны %d из %d результатов: остальные не поместились в одно сообщение.</i>", shown, len(results))
+		if telegramHTMLFits(builder.String()+note, workspaceTelegramSafeTextLimit) {
+			builder.WriteString(note)
 		}
 	}
 	return builder.String()

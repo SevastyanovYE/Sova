@@ -18,6 +18,11 @@ type Store struct {
 	db *sql.DB
 }
 
+// overviewRunLease is deliberately longer than the combined model-stage
+// budgets. A process that dies mid-run cannot otherwise clear the partial
+// unique index on running overviews and would block Nest indefinitely.
+const overviewRunLease = 2 * time.Hour
+
 type Run struct {
 	ID         int64
 	Trigger    string
@@ -335,6 +340,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_candidates_run_message
     ON calendar_candidates(run_id, chat_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_calendar_candidates_status
     ON calendar_candidates(status, updated_at DESC);
+CREATE TABLE IF NOT EXISTS overview_publications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES overview_runs(id),
+    kind TEXT NOT NULL CHECK (kind IN ('digest', 'calendar')),
+    position INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'retry', 'sent', 'unknown')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    chat_id INTEGER NOT NULL DEFAULT 0,
+    topic_id INTEGER NOT NULL DEFAULT 0,
+    message_id INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    sent_at TEXT,
+    UNIQUE(run_id, kind, position)
+);
+CREATE INDEX IF NOT EXISTS idx_overview_publications_run
+    ON overview_publications(run_id, kind, position);
 CREATE TABLE IF NOT EXISTS workspace_topics (
     source_ref TEXT NOT NULL,
     chat_id INTEGER NOT NULL,
@@ -444,6 +468,9 @@ CREATE TABLE IF NOT EXISTS workspace_tasks (
     card_chat_id INTEGER NOT NULL DEFAULT 0,
     card_topic_id INTEGER NOT NULL DEFAULT 0,
     card_message_id INTEGER NOT NULL DEFAULT 0,
+    card_delivery_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (card_delivery_status IN ('pending', 'sending', 'sent', 'unknown')),
+    card_delivery_error TEXT NOT NULL DEFAULT '',
     text TEXT NOT NULL,
     emoji TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK (status IN ('open', 'done', 'cancelled', 'deferred')),
@@ -467,7 +494,7 @@ CREATE TABLE IF NOT EXISTS workspace_task_reminders (
     scheduled_for TEXT NOT NULL,
     generation INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'retry', 'sent', 'completed', 'unknown', 'cancelled')),
+        CHECK (status IN ('pending', 'retry', 'sending', 'sent', 'completed', 'unknown', 'cancelled')),
     attempts INTEGER NOT NULL DEFAULT 0,
     next_attempt_at TEXT,
     last_error TEXT NOT NULL DEFAULT '',
@@ -519,6 +546,12 @@ CREATE TABLE IF NOT EXISTS workspace_quotes (
     delivery_status TEXT NOT NULL DEFAULT 'draft'
         CHECK (delivery_status IN ('draft', 'sending', 'sent', 'unknown')),
     delivery_error TEXT NOT NULL DEFAULT '',
+    edit_title TEXT NOT NULL DEFAULT '',
+    edit_text TEXT NOT NULL DEFAULT '',
+    edit_author TEXT NOT NULL DEFAULT '',
+    edit_delivery_status TEXT NOT NULL DEFAULT '',
+    edit_delivery_error TEXT NOT NULL DEFAULT '',
+    format_version INTEGER NOT NULL DEFAULT 1,
     source_chat_id INTEGER NOT NULL,
     source_message_id INTEGER NOT NULL,
     source_link TEXT NOT NULL DEFAULT '',
@@ -725,15 +758,88 @@ CREATE INDEX IF NOT EXISTS idx_workspace_publish_messages_run
 		{"workspace_quotes", "wizard_stage", "TEXT NOT NULL DEFAULT ''"},
 		{"workspace_quotes", "delivery_status", "TEXT NOT NULL DEFAULT 'draft'"},
 		{"workspace_quotes", "delivery_error", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_quotes", "edit_title", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_quotes", "edit_text", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_quotes", "edit_author", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_quotes", "edit_delivery_status", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_quotes", "edit_delivery_error", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_quotes", "format_version", "INTEGER NOT NULL DEFAULT 0"},
 		{"workspace_publish_runs", "route_summary", "TEXT NOT NULL DEFAULT ''"},
 		{"workspace_tasks", "deferred_generation", "INTEGER NOT NULL DEFAULT 0"},
+		{"workspace_tasks", "card_delivery_status", "TEXT NOT NULL DEFAULT ''"},
+		{"workspace_tasks", "card_delivery_error", "TEXT NOT NULL DEFAULT ''"},
 		{"workspace_task_reminders", "generation", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		if err := s.ensureColumn(ctx, migration.table, migration.column, migration.definition); err != nil {
 			return fmt.Errorf("migrate SQLite %s.%s: %w", migration.table, migration.column, err)
 		}
 	}
+	if err := s.ensureWorkspaceTaskReminderSendingStatus(ctx); err != nil {
+		return fmt.Errorf("migrate SQLite workspace_task_reminders sending status: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE workspace_tasks
+SET card_delivery_status = CASE WHEN card_message_id != 0 THEN 'sent' ELSE 'unknown' END,
+    card_delivery_error = CASE WHEN card_message_id != 0 THEN '' ELSE 'legacy task card delivery is not recorded' END
+WHERE card_delivery_status = ''`); err != nil {
+		return fmt.Errorf("migrate SQLite workspace task card delivery state: %w", err)
+	}
 	return nil
+}
+
+func (s *Store) ensureWorkspaceTaskReminderSendingStatus(ctx context.Context) error {
+	var schema string
+	if err := s.db.QueryRowContext(ctx, `
+SELECT sql
+FROM sqlite_master
+WHERE type = 'table' AND name = 'workspace_task_reminders'`).Scan(&schema); err != nil {
+		return err
+	}
+	if strings.Contains(strings.ToLower(schema), "'sending'") {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE workspace_task_reminders_migrating (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL REFERENCES workspace_tasks(id) ON DELETE CASCADE,
+    scheduled_for TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'retry', 'sending', 'sent', 'completed', 'unknown', 'cancelled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    reminder_chat_id INTEGER NOT NULL DEFAULT 0,
+    reminder_topic_id INTEGER NOT NULL DEFAULT 0,
+    reminder_message_id INTEGER NOT NULL DEFAULT 0,
+    sent_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_id, scheduled_for)
+);
+INSERT INTO workspace_task_reminders_migrating(
+    id, task_id, scheduled_for, generation, status, attempts, next_attempt_at,
+    last_error, reminder_chat_id, reminder_topic_id, reminder_message_id,
+    sent_at, completed_at, created_at, updated_at
+)
+SELECT id, task_id, scheduled_for, generation, status, attempts, next_attempt_at,
+       last_error, reminder_chat_id, reminder_topic_id, reminder_message_id,
+       sent_at, completed_at, created_at, updated_at
+FROM workspace_task_reminders;
+DROP TABLE workspace_task_reminders;
+ALTER TABLE workspace_task_reminders_migrating RENAME TO workspace_task_reminders;
+CREATE INDEX idx_workspace_task_reminders_ready
+    ON workspace_task_reminders(status, next_attempt_at, scheduled_for, id);`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
@@ -774,12 +880,13 @@ func (s *Store) TryStartOverview(ctx context.Context, trigger string, now time.T
 	}
 	defer tx.Rollback()
 
+	var latestID int64
 	var status, startedRaw string
 	err = tx.QueryRowContext(ctx, `
-SELECT status, started_at
+SELECT id, status, started_at
 FROM overview_runs
 ORDER BY started_at DESC, id DESC
-LIMIT 1`).Scan(&status, &startedRaw)
+LIMIT 1`).Scan(&latestID, &status, &startedRaw)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Run{}, err
 	}
@@ -789,11 +896,30 @@ LIMIT 1`).Scan(&status, &startedRaw)
 			return Run{}, fmt.Errorf("parse latest run time: %w", parseErr)
 		}
 		if status == "running" {
-			return Run{}, ErrRunActive
-		}
-		nextAllowed := startedAt.Add(cooldown)
-		if now.Before(nextAllowed) {
-			return Run{}, &CooldownError{NextAllowedAt: nextAllowed}
+			if now.Before(startedAt.Add(overviewRunLease)) {
+				return Run{}, ErrRunActive
+			}
+			const staleSummary = "stale running overview lease expired"
+			result, updateErr := tx.ExecContext(ctx, `
+UPDATE overview_runs
+SET status = 'failed', finished_at = ?, summary = ?, error = ?
+WHERE id = ? AND status = 'running'`,
+				now.UTC().Format(time.RFC3339Nano), staleSummary, staleSummary, latestID)
+			if updateErr != nil {
+				return Run{}, updateErr
+			}
+			updated, updateErr := result.RowsAffected()
+			if updateErr != nil {
+				return Run{}, updateErr
+			}
+			if updated != 1 {
+				return Run{}, ErrRunActive
+			}
+		} else {
+			nextAllowed := startedAt.Add(cooldown)
+			if now.Before(nextAllowed) {
+				return Run{}, &CooldownError{NextAllowedAt: nextAllowed}
+			}
 		}
 	}
 
@@ -1836,6 +1962,112 @@ WHERE id = ?`,
 	return nil
 }
 
+// RejectCalendarCandidate rejects only a candidate that has not been reserved
+// for provider creation. The compare-and-set prevents a stale Reject callback
+// from racing an approval after the Google event identity has been reserved.
+func (s *Store) RejectCalendarCandidate(ctx context.Context, id int64, now time.Time) (CalendarCandidate, bool, error) {
+	if id <= 0 {
+		return CalendarCandidate{}, false, fmt.Errorf("calendar candidate id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CalendarCandidate{}, false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+UPDATE calendar_candidates
+SET status = 'rejected', error = '', updated_at = ?
+WHERE id = ? AND status IN ('pending', 'failed')`,
+		now.UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return CalendarCandidate{}, false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return CalendarCandidate{}, false, err
+	}
+	candidate, err := scanCalendarCandidate(tx.QueryRowContext(ctx, `
+SELECT id, run_id, chat_id, message_id, source_link, title, start_at, end_at,
+       timezone, location, description, confidence, status, calendar_event_id,
+       error, created_at, updated_at
+FROM calendar_candidates
+WHERE id = ?`, id))
+	if err != nil {
+		return CalendarCandidate{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return CalendarCandidate{}, false, err
+	}
+	return candidate, affected == 1, nil
+}
+
+// ReserveCalendarCandidateApproval binds an approval to one deterministic
+// external event ID before the provider call. Existing approved reservations
+// are returned so a retry can reconcile a crash after provider acceptance.
+func (s *Store) ReserveCalendarCandidateApproval(ctx context.Context, id int64, eventID string, now time.Time) (CalendarCandidate, bool, error) {
+	eventID = strings.TrimSpace(eventID)
+	if id <= 0 || eventID == "" {
+		return CalendarCandidate{}, false, fmt.Errorf("calendar approval identity is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CalendarCandidate{}, false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+UPDATE calendar_candidates
+SET status = 'approved', calendar_event_id = ?, error = '', updated_at = ?
+WHERE id = ? AND status IN ('pending', 'failed')`,
+		eventID, now.UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return CalendarCandidate{}, false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return CalendarCandidate{}, false, err
+	}
+	candidate, err := scanCalendarCandidate(tx.QueryRowContext(ctx, `
+SELECT id, run_id, chat_id, message_id, source_link, title, start_at, end_at,
+       timezone, location, description, confidence, status, calendar_event_id,
+       error, created_at, updated_at
+FROM calendar_candidates
+WHERE id = ?`, id))
+	if err != nil {
+		return CalendarCandidate{}, false, err
+	}
+	if candidate.Status == "approved" && candidate.CalendarEventID != eventID {
+		return CalendarCandidate{}, false, fmt.Errorf("calendar candidate %d is reserved for another event id", id)
+	}
+	if err := tx.Commit(); err != nil {
+		return CalendarCandidate{}, false, err
+	}
+	return candidate, affected == 1, nil
+}
+
+func (s *Store) CompleteCalendarCandidateApproval(ctx context.Context, id int64, eventID string, now time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE calendar_candidates
+SET status = 'created', error = '', updated_at = ?
+WHERE id = ? AND status = 'approved' AND calendar_event_id = ?`,
+		now.UTC().Format(time.RFC3339Nano), id, strings.TrimSpace(eventID))
+	if err != nil {
+		return err
+	}
+	return requireOneRow(result, "approved calendar candidate %d not found", id)
+}
+
+func (s *Store) FailCalendarCandidateApproval(ctx context.Context, id int64, eventID, runErr string, now time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE calendar_candidates
+SET status = 'failed', error = ?, updated_at = ?
+WHERE id = ? AND status = 'approved' AND calendar_event_id = ?`,
+		compactReleaseError(runErr), now.UTC().Format(time.RFC3339Nano), id, strings.TrimSpace(eventID))
+	if err != nil {
+		return err
+	}
+	return requireOneRow(result, "approved calendar candidate %d not found", id)
+}
+
 func (s *Store) UpdateCalendarCandidateTime(ctx context.Context, id int64, startAt, endAt time.Time, now time.Time) error {
 	if id <= 0 {
 		return fmt.Errorf("calendar candidate id is required")
@@ -1846,7 +2078,7 @@ func (s *Store) UpdateCalendarCandidateTime(ctx context.Context, id int64, start
 	result, err := s.db.ExecContext(ctx, `
 UPDATE calendar_candidates
 SET start_at = ?, end_at = ?, updated_at = ?
-WHERE id = ? AND status NOT IN ('created', 'rejected')`,
+WHERE id = ? AND status NOT IN ('approved', 'created', 'rejected')`,
 		startAt.UTC().Format(time.RFC3339Nano),
 		endAt.UTC().Format(time.RFC3339Nano),
 		now.UTC().Format(time.RFC3339Nano),

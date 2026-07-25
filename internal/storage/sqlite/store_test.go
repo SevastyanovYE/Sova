@@ -52,6 +52,48 @@ func TestRejectsConcurrentRun(t *testing.T) {
 	}
 }
 
+func TestOverviewRunningLeaseRecoversOnlyAtExpiryAfterReopen(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "sova.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	startedAt := time.Date(2026, 7, 24, 8, 0, 0, 0, time.UTC)
+	staleRun, err := store.TryStartOverview(ctx, "manual", startedAt, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TryStartOverview(ctx, "scheduled", startedAt.Add(overviewRunLease-time.Nanosecond), 15*time.Minute); !errors.Is(err, ErrRunActive) {
+		t.Fatalf("run before lease expiry: got %v, want ErrRunActive", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	replacement, err := store.TryStartOverview(ctx, "scheduled", startedAt.Add(overviewRunLease), 15*time.Minute)
+	if err != nil {
+		t.Fatalf("run at lease expiry: %v", err)
+	}
+	if replacement.ID == staleRun.ID || replacement.Status != "running" {
+		t.Fatalf("replacement run = %+v", replacement)
+	}
+
+	recovered, ok, err := store.RunByID(ctx, staleRun.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || recovered.Status != "failed" || recovered.FinishedAt == nil || recovered.Error != "stale running overview lease expired" {
+		t.Fatalf("recovered stale run = %+v, ok=%t", recovered, ok)
+	}
+}
+
 func TestRecoverFailedOverview(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
 	if err != nil {

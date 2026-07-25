@@ -59,6 +59,7 @@ func TestWorkspaceTaskReminderRetryAndReopenLifecycle(t *testing.T) {
 	}
 	reminder := ready[0]
 	next := now.Add(time.Minute)
+	claimReminderForSend(t, store, reminder.ID, now)
 	if err := store.MarkWorkspaceTaskReminderRetry(ctx, reminder.ID, next, "temporary failure", now); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +70,7 @@ func TestWorkspaceTaskReminderRetryAndReopenLifecycle(t *testing.T) {
 	if err != nil || len(ready) != 1 || ready[0].Attempts != 1 {
 		t.Fatalf("due retry=%+v err=%v", ready, err)
 	}
+	claimReminderForSend(t, store, reminder.ID, next)
 	if err := store.MarkWorkspaceTaskReminderSent(ctx, reminder.ID, -1001, 10, 90, next); err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +103,7 @@ func TestWorkspaceTaskReminderRetryAndReopenLifecycle(t *testing.T) {
 	if err != nil || !ok || newReminder.Status != "pending" {
 		t.Fatalf("new generation=%+v ok=%t err=%v", newReminder, ok, err)
 	}
+	claimReminderForSend(t, store, newReminder.ID, newSchedule)
 	if err := store.MarkWorkspaceTaskReminderSent(ctx, newReminder.ID, -1001, 10, 91, newSchedule); err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +143,7 @@ func TestWorkspaceTaskReminderUnknownIsNotRearmedByTextEdit(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("reminder=%+v ok=%t err=%v", reminder, ok, err)
 	}
+	claimReminderForSend(t, store, reminder.ID, now)
 	if err := store.MarkWorkspaceTaskReminderUnknown(ctx, reminder.ID, "ambiguous Telegram result", now); err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +191,7 @@ func TestWorkspaceTaskReminderExplicitSameDateDeferralSupersedesRetry(t *testing
 	if err != nil || !ok {
 		t.Fatalf("reminder=%+v ok=%t err=%v", reminder, ok, err)
 	}
+	claimReminderForSend(t, store, reminder.ID, now)
 	if err := store.MarkWorkspaceTaskReminderRetry(ctx, reminder.ID, now.Add(time.Hour), "rate limited", now); err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +225,7 @@ func TestWorkspaceTaskReminderStaleSentGenerationCannotReopenTask(t *testing.T) 
 	if err != nil || !ok {
 		t.Fatalf("reminder=%+v ok=%t err=%v", reminder, ok, err)
 	}
+	claimReminderForSend(t, store, reminder.ID, now)
 	if err := store.MarkWorkspaceTaskReminderSent(ctx, reminder.ID, -1001, 10, 99, now); err != nil {
 		t.Fatal(err)
 	}
@@ -244,6 +250,55 @@ func TestWorkspaceTaskReminderStaleSentGenerationCannotReopenTask(t *testing.T) 
 	}
 	if created, err := store.EnsureDueWorkspaceTaskReminders(ctx, reassignedAt); err != nil || created != 1 {
 		t.Fatalf("current generation rearmed=%d err=%v", created, err)
+	}
+}
+
+func TestWorkspaceTaskReminderInterruptedSendRecoversAsUnknown(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "sova.db")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	dueAt := now.Add(-time.Minute)
+	task := createReminderTestTask(t, store, 51, &dueAt, now)
+	if _, err := store.EnsureDueWorkspaceTaskReminders(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	reminder, ok, err := store.WorkspaceTaskReminderByTaskAndSchedule(ctx, task.ID, dueAt)
+	if err != nil || !ok {
+		t.Fatalf("reminder=%+v ok=%t err=%v", reminder, ok, err)
+	}
+	claimReminderForSend(t, store, reminder.ID, now)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	recovered, err := store.RecoverInterruptedWorkspaceTaskReminders(ctx, now.Add(time.Minute))
+	if err != nil || recovered != 1 {
+		t.Fatalf("recovered=%d err=%v", recovered, err)
+	}
+	ready, err := store.ReadyWorkspaceTaskReminders(ctx, now.Add(24*time.Hour), 10)
+	if err != nil || len(ready) != 0 {
+		t.Fatalf("interrupted reminder became ready=%+v err=%v", ready, err)
+	}
+	stored, ok, err := store.WorkspaceTaskReminderByTaskAndSchedule(ctx, task.ID, dueAt)
+	if err != nil || !ok || stored.Status != "unknown" || stored.Attempts != 1 {
+		t.Fatalf("stored=%+v ok=%t err=%v", stored, ok, err)
+	}
+}
+
+func claimReminderForSend(t *testing.T, store *Store, reminderID int64, now time.Time) {
+	t.Helper()
+	claimed, err := store.ClaimWorkspaceTaskReminderForSend(context.Background(), reminderID, now)
+	if err != nil || !claimed {
+		t.Fatalf("claim reminder %d: claimed=%t err=%v", reminderID, claimed, err)
 	}
 }
 

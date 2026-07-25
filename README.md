@@ -130,12 +130,13 @@ go run ./cmd/sova nest-seed-topics
 | `go run ./cmd/sova workspace seed-document-indexes` | Создаёт или обновляет active indexes; `--type quote` затрагивает только закреплённый индекс цитат в `Опыт`. |
 | `go run ./cmd/sova workspace cleanup-test-tasks --execute` | Удаляет bot-created тестовые task cards/backlog и помечает найденные проверочные задачи отменёнными. |
 | `go run ./cmd/sova workspace search-index --full-scan` | Строит semantic index нового InSync, старого InSync и Sova.Nest перед включением `/search`. |
-| `/quote` | Запускает из Inbox мастер цитаты для «Опыт» с нативным Telegram blockquote и динамическим индексом. |
+| `/quote`, `/quote show`, `/quote edit` | Создают, показывают и безопасно изменяют из Inbox цитаты для «Опыт»; автор оформляется курсивом, индекс обновляется на месте. |
 | `/search <запрос>` | Ищет из Inbox одновременно по трём источникам и возвращает до 10 прямых ссылок. |
 | `go run ./cmd/sova version` | Показывает встроенные версию и git commit. |
 | `go run ./cmd/sova workspace announce-release` | Показывает dry-run релизного сообщения; `--execute` требует deployment receipt того же commit. |
 | `go run ./cmd/sova nest-seed-topics` | Отправляет стартовые сообщения в `Chat`, `Digest`, `Calendar`, `Status` для ручного закрепления. |
-| `go run ./cmd/sova retry-run --id RUN_ID` | Безопасно восстанавливает совместимый старый run, прервавшийся на этапе Codex или Qwen. |
+| `go run ./cmd/sova retry-run --id RUN_ID` | Без повторной синхронизации восстанавливает совместимый run после ошибки модели, Codex или подтверждённой ошибки публикации. |
+| `go run ./cmd/sova resolve-publication ...` | После ручной сверки разрешает неоднозначную доставку Nest как `sent` либо `retry`; автоматически неизвестный исход не пересылается. |
 | `go run ./cmd/sova model-smoke --all` | Проверяет доступность и структурированный ответ всех Google-моделей маршрута без сравнительного benchmark. |
 | `go run ./cmd/sova qwen-smoke` | Временная совместимая команда для локального Qwen tooling; production Nest её не использует. |
 | `go run ./cmd/sova qwen-calibrate --run-id RUN_ID` | Калибрует Qwen на сообщениях конкретного запуска без вывода текста. |

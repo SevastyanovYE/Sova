@@ -210,11 +210,27 @@ func WorkspaceCommandHelpDrafts(cfg config.Config) []SeedTopicPinItem {
 		{Topic: "Inbox", TopicID: cfg.Workspace.Topics.Inbox, Text: InboxHelpMessageText()},
 		{Topic: "Задачи", TopicID: cfg.Workspace.Topics.Tasks, Text: TaskHelpMessageText()},
 		{Topic: "Заметки", TopicID: cfg.Workspace.Topics.Notes, Text: WorkspaceDocumentHelpText("doc")},
-		{Topic: "Опыт", TopicID: cfg.Workspace.Topics.Experience, Text: ExperienceHelpMessageText()},
+		{Topic: "Опыт", TopicID: cfg.Workspace.Topics.Experience, Text: ExperienceQuoteCommandHelpText()},
 		{Topic: "Полезное", TopicID: cfg.Workspace.Topics.Useful, Text: UsefulHelpMessageText()},
 		{Topic: "Заготовки", TopicID: cfg.Workspace.Topics.Templates, Text: WorkspaceDocumentHelpText("template")},
 		{Topic: "Коллекции", TopicID: cfg.Workspace.Topics.Collections, Text: WorkspaceDocumentHelpText("collection")},
 	}
+}
+
+func ExperienceQuoteCommandHelpText() string {
+	return strings.TrimSpace(`🌱 <b>Опыт</b>
+
+Сюда попадают подтверждённые цитаты. Все команды запускаются из <b>Inbox</b>; итоговое сообщение и динамический индекс обновляются на месте.
+
+<b>Команды цитат</b>
+• <code>/quote</code> — добавить цитату через мастер text → author → title → preview.
+• <code>/quote new</code> — явный вариант команды создания.
+• <code>/quote show</code> — показать индекс цитат.
+• <code>/quote show ID|ссылка</code> — показать одну цитату и её статус.
+• <code>/quote edit ID|ссылка</code> — изменить title, text или author через preview; title и author можно очистить.
+• <code>/quote help</code> — краткая справка.
+
+Если Telegram не подтвердил edit, бот не повторяет его автоматически. После ручной сверки доступны <code>/quote edit retry ID|ссылка</code> и <code>/quote edit accept ID|ссылка</code>.`)
 }
 
 func ResetWorkspaceTopicPins(ctx context.Context, cfg config.Config, opts SeedTopicPinsOptions) (SeedTopicPinsResult, error) {

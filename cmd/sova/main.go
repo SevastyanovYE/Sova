@@ -60,6 +60,8 @@ func run(ctx context.Context, args []string) error {
 		return runOverview(ctx, cfg, args[1:])
 	case "retry-run":
 		return retryOverview(ctx, cfg, args[1:])
+	case "resolve-publication":
+		return resolveOverviewPublication(ctx, cfg, args[1:])
 	case "status":
 		return printStatus(ctx, cfg)
 	case "index":
@@ -163,6 +165,54 @@ func retryOverview(ctx context.Context, cfg config.Config, args []string) error 
 	return nil
 }
 
+func resolveOverviewPublication(ctx context.Context, cfg config.Config, args []string) error {
+	flags := flag.NewFlagSet("resolve-publication", flag.ContinueOnError)
+	runID := flags.Int64("run-id", 0, "failed overview run ID")
+	kind := flags.String("kind", "", "digest or calendar")
+	position := flags.Int("position", 0, "0 for digest; candidate ID for calendar")
+	outcome := flags.String("outcome", "", "sent after finding the message, or retry after confirming it is absent")
+	messageID := flags.Int("message-id", 0, "existing Telegram message ID when outcome=sent")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *runID <= 0 {
+		return fmt.Errorf("--run-id must be positive")
+	}
+	if *kind != "digest" && *kind != "calendar" {
+		return fmt.Errorf("--kind must be digest or calendar")
+	}
+	if *position < 0 || (*kind == "digest" && *position != 0) || (*kind == "calendar" && *position == 0) {
+		return fmt.Errorf("--position must be 0 for digest or a positive candidate ID for calendar")
+	}
+	if *outcome != "sent" && *outcome != "retry" {
+		return fmt.Errorf("--outcome must be sent or retry")
+	}
+	if (*outcome == "sent") != (*messageID > 0) {
+		return fmt.Errorf("--message-id is required only when --outcome=sent")
+	}
+	store, err := sqlitestore.Open(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	runRecord, ok, err := store.RunByID(ctx, *runID)
+	if err != nil {
+		return err
+	}
+	if !ok || runRecord.Status != "failed" {
+		return fmt.Errorf("overview run %d is not failed", *runID)
+	}
+	topicID := cfg.NestTopics.Digest
+	if *kind == "calendar" {
+		topicID = cfg.NestTopics.Calendar
+	}
+	if err := store.ResolveUnknownOverviewPublication(ctx, *runID, *kind, *position, *outcome, cfg.NestChatID, topicID, *messageID, time.Now().UTC()); err != nil {
+		return err
+	}
+	fmt.Printf("overview publication %d/%s/%d resolved as %s\n", *runID, *kind, *position, *outcome)
+	return nil
+}
+
 func printStatus(ctx context.Context, cfg config.Config) error {
 	store, err := sqlitestore.Open(cfg.DatabasePath)
 	if err != nil {
@@ -180,6 +230,15 @@ func printStatus(ctx context.Context, cfg config.Config) error {
 	fmt.Printf("run=%d trigger=%s status=%s started=%s summary=%q\n",
 		runRecord.ID, runRecord.Trigger, runRecord.Status,
 		runRecord.StartedAt.In(mustLocation(cfg.Timezone)).Format(time.RFC3339), runRecord.Summary)
+	publications, err := store.OverviewPublicationsByRun(ctx, runRecord.ID)
+	if err != nil {
+		return err
+	}
+	for _, publication := range publications {
+		fmt.Printf("publication=%s:%d status=%s attempts=%d message_id=%d error=%q\n",
+			publication.Kind, publication.Position, publication.Status, publication.Attempts,
+			publication.MessageID, publication.Error)
+	}
 	return nil
 }
 
@@ -1813,6 +1872,7 @@ Usage:
   sova doctor [--strict]
   sova run [--trigger manual|scheduled|nest_button]
   sova retry-run --id RUN_ID
+  sova resolve-publication --run-id RUN_ID --kind digest|calendar --position N --outcome sent|retry [--message-id ID]
   sova status
   sova index
   sova serve

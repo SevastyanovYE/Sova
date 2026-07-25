@@ -17,12 +17,32 @@ An overview run has:
 
 All triggers reserve a run through the same SQLite transaction. A new run is
 rejected when another run is active or the latest run started less than 15
-minutes ago.
+minutes ago. A `running` record older than the two-hour process lease is closed
+as failed before a new run starts, so a crashed worker cannot block Nest
+forever.
 
 If final Codex generation is unavailable, a new run publishes a compact
 provenance-preserving fallback digest and records the degraded mode in its
 summary. Legacy runs that failed specifically at the Codex step may be retried
 from their saved compact bundle without repeating Telegram sync.
+
+The user-facing digest is a single bounded plain-text summary rather than a
+message-by-message dump. Related messages are synthesized into at most six
+bullet lines and at most five unique Telegram sources. Bullets refer to compact
+numbered provenance markers (`[1]`, `[1, 2]`); each source URL appears exactly
+once in the final `ИСТОЧНИКИ` section. Generated output is rejected in favor of
+the bounded fallback when it exceeds 3600 Telegram UTF-16 units, repeats or
+invents a URL, leaves a reference unresolved, or scatters source URLs through
+the body.
+
+`overview_publications` is the durable Nest delivery outbox for the one-message
+digest and each Calendar candidate card. A content hash makes repeated recovery
+deterministic. Delivery is claimed as `sending` before the Bot API call;
+confirmed rejection becomes retryable, while a transport/read/5xx ambiguity or
+process interruption becomes `unknown` and is never sent again automatically.
+After manually checking Telegram, an operator must explicitly resolve an
+unknown row as the existing `sent` message or as safe to `retry`; `retry-run`
+then skips already sent items.
 
 Nest classification and calendar extraction use the ordered Google model route
 documented in `docs/model_routing.md`. An incomplete, malformed, timed out, or
@@ -94,6 +114,12 @@ Candidate statuses:
 
 Google Calendar events are created only after approval and use reminders at
 10080, 4320, 1440, and 60 minutes before the event.
+
+Approval reserves a deterministic Google-compatible event ID in SQLite before
+the provider request. Provider reconciliation reads that exact ID after an
+ambiguous create response, so retries converge on one external event. Reject
+and date-edit use compare-and-set rules and cannot overwrite an in-flight
+approved reservation.
 
 Before approval, a pending candidate date may be edited from the Calendar topic
 with the formats `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`. Date-only edits preserve

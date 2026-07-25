@@ -60,6 +60,8 @@ type WorkspaceTask struct {
 	CardChatID         int64
 	CardTopicID        int
 	CardMessageID      int
+	CardDeliveryStatus string
+	CardDeliveryError  string
 	Text               string
 	Emoji              string
 	Status             string
@@ -406,6 +408,13 @@ func (s *Store) CreateWorkspaceTask(ctx context.Context, task WorkspaceTask, now
 	if task.Status != "open" && task.Status != "deferred" {
 		return WorkspaceTask{}, fmt.Errorf("new task status must be open or deferred")
 	}
+	if task.CardDeliveryStatus == "" {
+		if task.CardMessageID != 0 {
+			task.CardDeliveryStatus = "sent"
+		} else {
+			task.CardDeliveryStatus = "pending"
+		}
+	}
 	var deferred any
 	deferredGeneration := 0
 	if task.DeferredUntil != nil && !task.DeferredUntil.IsZero() {
@@ -415,13 +424,14 @@ func (s *Store) CreateWorkspaceTask(ctx context.Context, task WorkspaceTask, now
 		deferredGeneration = 1
 	}
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO workspace_tasks(
-    source_chat_id, source_message_id, source_link, source_cluster_id,
-    card_chat_id, card_topic_id, card_message_id, text, emoji, status,
-    deferred_until, deferred_generation, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	INSERT INTO workspace_tasks(
+	    source_chat_id, source_message_id, source_link, source_cluster_id,
+	    card_chat_id, card_topic_id, card_message_id, card_delivery_status, card_delivery_error,
+	    text, emoji, status,
+	    deferred_until, deferred_generation, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.SourceChatID, task.SourceMessageID, task.SourceLink, task.SourceClusterID,
-		task.CardChatID, task.CardTopicID, task.CardMessageID, task.Text, task.Emoji,
+		task.CardChatID, task.CardTopicID, task.CardMessageID, task.CardDeliveryStatus, strings.TrimSpace(task.CardDeliveryError), task.Text, task.Emoji,
 		task.Status, deferred, deferredGeneration, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return WorkspaceTask{}, err
@@ -439,13 +449,105 @@ func (s *Store) SetWorkspaceTaskCard(ctx context.Context, id int64, chatID int64
 	}
 	result, err := s.db.ExecContext(ctx, `
 UPDATE workspace_tasks
-SET card_chat_id = ?, card_topic_id = ?, card_message_id = ?, updated_at = ?
+SET card_chat_id = ?, card_topic_id = ?, card_message_id = ?,
+    card_delivery_status = 'sent', card_delivery_error = '', updated_at = ?
 WHERE id = ?`,
 		chatID, topicID, messageID, now.UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
 		return err
 	}
 	return requireOneRow(result, "workspace task %d not found", id)
+}
+
+func (s *Store) ClaimWorkspaceTaskCardSend(ctx context.Context, id int64, now time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workspace_tasks
+SET card_delivery_status = 'sending', card_delivery_error = '', updated_at = ?
+WHERE id = ? AND card_message_id = 0 AND card_delivery_status = 'pending'`,
+		now.UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected == 1, err
+}
+
+func (s *Store) MarkWorkspaceTaskCardRetryable(ctx context.Context, id int64, sendErr string, now time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workspace_tasks
+SET card_delivery_status = 'pending', card_delivery_error = ?, updated_at = ?
+WHERE id = ? AND card_message_id = 0 AND card_delivery_status = 'sending'`,
+		compactReleaseError(sendErr), now.UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(result, "sending workspace task card %d not found", id)
+}
+
+func (s *Store) MarkWorkspaceTaskCardUnknown(ctx context.Context, id int64, sendErr string, now time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workspace_tasks
+SET card_delivery_status = 'unknown', card_delivery_error = ?, updated_at = ?
+WHERE id = ? AND card_message_id = 0 AND card_delivery_status = 'sending'`,
+		compactReleaseError(sendErr), now.UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(result, "sending workspace task card %d not found", id)
+}
+
+func (s *Store) RecoverInterruptedWorkspaceTaskCardSends(ctx context.Context, now time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workspace_tasks
+SET card_delivery_status = 'unknown',
+    card_delivery_error = 'delivery interrupted with an unknown Telegram result', updated_at = ?
+WHERE card_message_id = 0 AND card_delivery_status = 'sending'`, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (s *Store) FinalizeWorkspaceTaskCard(ctx context.Context, id int64, chatID int64, topicID int, messageID int, now time.Time) error {
+	if id <= 0 || chatID == 0 || messageID == 0 {
+		return fmt.Errorf("invalid task card identity")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+UPDATE workspace_tasks
+SET card_chat_id = ?, card_topic_id = ?, card_message_id = ?,
+    card_delivery_status = 'sent', card_delivery_error = '', updated_at = ?
+WHERE id = ? AND card_message_id = 0 AND card_delivery_status = 'sending'`,
+		chatID, topicID, messageID, now.UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(result, "sending workspace task card %d not found", id); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO workspace_derived_messages(
+    source_chat_id, source_message_id, source_cluster_id, derived_type,
+    derived_chat_id, derived_topic_id, derived_message_id, status, created_at, updated_at
+)
+SELECT source_chat_id, source_message_id, source_cluster_id, 'task_card', ?, ?, ?, 'active', ?, ?
+FROM workspace_tasks WHERE id = ?
+ON CONFLICT(derived_chat_id, derived_message_id, derived_type) DO UPDATE SET
+    source_chat_id = excluded.source_chat_id,
+    source_message_id = excluded.source_message_id,
+    source_cluster_id = excluded.source_cluster_id,
+    derived_topic_id = excluded.derived_topic_id,
+    status = excluded.status,
+    updated_at = excluded.updated_at`,
+		chatID, topicID, messageID, now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) WorkspaceTaskByID(ctx context.Context, id int64) (WorkspaceTask, error) {
@@ -949,7 +1051,8 @@ func scanWorkspaceClusterTail(scanner interface{ Scan(dest ...any) error }) (Wor
 
 func workspaceTaskSelect() string {
 	return `SELECT id, source_chat_id, source_message_id, source_link, source_cluster_id,
-       card_chat_id, card_topic_id, card_message_id, text, emoji, status,
+	       card_chat_id, card_topic_id, card_message_id, card_delivery_status, card_delivery_error,
+	       text, emoji, status,
        deferred_until, deferred_generation, created_at, updated_at, completed_at, cancelled_at
 FROM workspace_tasks`
 }
@@ -961,7 +1064,8 @@ func scanWorkspaceTask(scanner interface{ Scan(dest ...any) error }) (WorkspaceT
 	if err := scanner.Scan(
 		&task.ID, &task.SourceChatID, &task.SourceMessageID, &task.SourceLink,
 		&task.SourceClusterID, &task.CardChatID, &task.CardTopicID,
-		&task.CardMessageID, &task.Text, &task.Emoji, &task.Status,
+		&task.CardMessageID, &task.CardDeliveryStatus, &task.CardDeliveryError,
+		&task.Text, &task.Emoji, &task.Status,
 		&deferredRaw, &task.DeferredGeneration, &createdRaw, &updatedRaw, &completedRaw, &cancelledRaw,
 	); err != nil {
 		return WorkspaceTask{}, err

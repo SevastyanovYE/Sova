@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -28,6 +30,7 @@ const calendarEventsScope = "https://www.googleapis.com/auth/calendar.events"
 const oauthCallbackTimeout = 5 * time.Minute
 
 type Event struct {
+	ID          string
 	Title       string
 	StartAt     time.Time
 	EndAt       time.Time
@@ -187,18 +190,81 @@ func CreateEvent(ctx context.Context, cfg config.Config, event Event) (CreatedEv
 		_ = saveToken(cfg.GoogleToken, refreshed)
 	}
 	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(refreshed))
+	endpoint := "https://www.googleapis.com/calendar/v3/calendars/" + url.PathEscape(cfg.GoogleCalendarID) + "/events"
+	return createEventWithClient(ctx, client, endpoint, event)
+}
+
+// EventIDForCandidate returns a stable Google Calendar event ID. Google event
+// IDs use base32hex characters, so retries can safely reconcile a prior insert
+// even when the original HTTP response was lost.
+func EventIDForCandidate(candidateID int64) string {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("sova-calendar-candidate:%d", candidateID)))
+	encoded := base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(digest[:])
+	return "sova" + strings.ToLower(encoded)
+}
+
+func createEventWithClient(ctx context.Context, client *http.Client, endpoint string, event Event) (CreatedEvent, error) {
+	if client == nil {
+		return CreatedEvent{}, fmt.Errorf("Google Calendar HTTP client is required")
+	}
+	if strings.TrimSpace(event.ID) == "" {
+		return CreatedEvent{}, fmt.Errorf("calendar event id is required")
+	}
 
 	payload := googleEventPayload(event)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return CreatedEvent{}, err
 	}
-	endpoint := "https://www.googleapis.com/calendar/v3/calendars/" + url.PathEscape(cfg.GoogleCalendarID) + "/events"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return CreatedEvent{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		if recovered, recoveryErr := fetchEvent(ctx, client, endpoint, event.ID); recoveryErr == nil {
+			return recovered, nil
+		}
+		return CreatedEvent{}, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		if recovered, recoveryErr := fetchEvent(ctx, client, endpoint, event.ID); recoveryErr == nil {
+			return recovered, nil
+		}
+		return CreatedEvent{}, err
+	}
+	if resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return CreatedEvent{}, fmt.Errorf("Google Calendar is unauthorized; run `sova google-login`")
+		}
+		if resp.StatusCode == http.StatusConflict || resp.StatusCode >= http.StatusInternalServerError {
+			if recovered, recoveryErr := fetchEvent(ctx, client, endpoint, event.ID); recoveryErr == nil {
+				return recovered, nil
+			}
+		}
+		return CreatedEvent{}, fmt.Errorf("Google Calendar create event returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	created, err := decodeCreatedEvent(data)
+	if err != nil {
+		if recovered, recoveryErr := fetchEvent(ctx, client, endpoint, event.ID); recoveryErr == nil {
+			return recovered, nil
+		}
+		return CreatedEvent{}, fmt.Errorf("parse Google Calendar create event response: %w", err)
+	}
+	if created.ID != event.ID {
+		return CreatedEvent{}, fmt.Errorf("Google Calendar create event returned unexpected id %q", created.ID)
+	}
+	return created, nil
+}
+
+func fetchEvent(ctx context.Context, client *http.Client, endpoint, eventID string) (CreatedEvent, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+"/"+url.PathEscape(eventID), nil)
+	if err != nil {
+		return CreatedEvent{}, err
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return CreatedEvent{}, err
@@ -209,22 +275,27 @@ func CreateEvent(ctx context.Context, cfg config.Config, event Event) (CreatedEv
 		return CreatedEvent{}, err
 	}
 	if resp.StatusCode >= 300 {
-		if resp.StatusCode == http.StatusUnauthorized {
-			return CreatedEvent{}, fmt.Errorf("Google Calendar is unauthorized; run `sova google-login`")
-		}
-		return CreatedEvent{}, fmt.Errorf("Google Calendar create event returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
+		return CreatedEvent{}, fmt.Errorf("Google Calendar get event returned %s", resp.Status)
 	}
-	var created struct {
-		ID       string `json:"id"`
-		HTMLLink string `json:"htmlLink"`
+	created, err := decodeCreatedEvent(data)
+	if err != nil {
+		return CreatedEvent{}, err
 	}
+	if created.ID != eventID {
+		return CreatedEvent{}, fmt.Errorf("Google Calendar get event returned unexpected id %q", created.ID)
+	}
+	return created, nil
+}
+
+func decodeCreatedEvent(data []byte) (CreatedEvent, error) {
+	var created CreatedEvent
 	if err := json.Unmarshal(data, &created); err != nil {
-		return CreatedEvent{}, fmt.Errorf("parse Google Calendar create event response: %w", err)
+		return CreatedEvent{}, err
 	}
-	if created.ID == "" {
-		return CreatedEvent{}, fmt.Errorf("Google Calendar create event response has empty id")
+	if strings.TrimSpace(created.ID) == "" {
+		return CreatedEvent{}, fmt.Errorf("Google Calendar event response has empty id")
 	}
-	return CreatedEvent{ID: created.ID, HTMLLink: created.HTMLLink}, nil
+	return created, nil
 }
 
 func loadOAuthConfig(cfg config.Config) (*oauth2.Config, error) {
@@ -274,6 +345,7 @@ func googleEventPayload(event Event) map[string]any {
 		timezone = "Europe/Moscow"
 	}
 	return map[string]any{
+		"id":          event.ID,
 		"summary":     event.Title,
 		"location":    event.Location,
 		"description": event.Description,

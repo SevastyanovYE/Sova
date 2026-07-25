@@ -128,9 +128,15 @@ entered time or use the date-only default.
 minutes and then hourly. Ambiguous delivery becomes `unknown` and is not sent
 again automatically. A confirmed send is finalized by reopening the task,
 editing its card, and removing it from the deferred backlog.
+Each worker first atomically claims a ready row as `sending`; a restart changes
+an interrupted claim to `unknown` rather than silently sending it twice.
 If a completed/cancelled/unknown schedule is explicitly assigned again at the
 same instant, the row is rearmed only when the task's persisted deferral
 generation is newer than the generation already recorded by the outbox row.
+
+Initial task-card delivery has the same explicit `pending` → `sending` →
+`sent`/`unknown` claim. The card message ID and source-derived mapping are
+committed together; a transport ambiguity is not retried automatically.
 
 `workspace_derived_messages` maps source messages/clusters to bot-created
 derived messages. Published derived messages can be marked `needs_review` when
@@ -150,12 +156,18 @@ stay visible as individual cards.
 - durable wizard user/stage and `draft`/`sending`/`sent`/`unknown` delivery
   state, so restart restores an unfinished wizard and an ambiguous send is
   never repeated automatically;
+- a separate durable edit proposal and delivery state. `/quote edit ID|ссылка`
+  changes exactly one selected field through preview and confirmation; an
+  ambiguous Telegram edit is never repeated automatically and requires an
+  explicit `retry` or `accept` recovery command after manual comparison;
 - creation, update, and publication timestamps.
 
-The final Telegram message uses a native `<blockquote>`. Quote links are kept
-in the tracked `experience_quotes` topic index. A source edit changes only the
-quote status and index marker and produces an Inbox review notice; it never
-silently edits the published quote.
+The final Telegram message uses a native `<blockquote>` and wraps the optional
+author in `<i>`. Quote links are kept in the tracked `experience_quotes` topic
+index. A source edit changes only the quote status and index marker and produces
+an Inbox review notice; it never silently edits the published quote. Quote
+create/show/edit/help and explicit edit-recovery commands are Inbox-only and
+are documented in the tracked Experience command-help pin.
 
 `workspace_documents`, `workspace_document_parts`, and
 `workspace_document_types` store Stage 6 note/template/collection metadata:

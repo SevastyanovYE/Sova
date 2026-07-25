@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/SevastyanovYE/Sova/internal/config"
 )
@@ -474,17 +475,28 @@ func SplitMessageText(text string, limit int) []string {
 		limit = safeMessageLimit
 	}
 	runes := []rune(text)
-	if len(runes) <= limit {
+	if TelegramTextUTF16Len(text) <= limit {
 		return []string{text}
 	}
 	var parts []string
 	for len(runes) > 0 {
-		end := limit
-		if end > len(runes) {
-			end = len(runes)
+		end := 0
+		units := 0
+		for end < len(runes) {
+			next := utf16.RuneLen(runes[end])
+			if units+next > limit {
+				break
+			}
+			units += next
+			end++
+		}
+		if end == 0 {
+			end = 1
 		}
 		split := end
-		for i := end - 1; i > 0 && end-i < 600; i-- {
+		searchedUnits := 0
+		for i := end - 1; i > 0 && searchedUnits < 600; i-- {
+			searchedUnits += utf16.RuneLen(runes[i])
 			if runes[i] == '\n' {
 				split = i + 1
 				break
@@ -500,6 +512,12 @@ func SplitMessageText(text string, limit int) []string {
 		return []string{""}
 	}
 	return parts
+}
+
+// TelegramTextUTF16Len returns the unit count used by Telegram's message
+// limits. Non-BMP runes consume two UTF-16 code units.
+func TelegramTextUTF16Len(text string) int {
+	return len(utf16.Encode([]rune(text)))
 }
 
 func CheckTopics(cfg config.Config) error {

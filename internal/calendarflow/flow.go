@@ -2,6 +2,8 @@ package calendarflow
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"html"
 	"strconv"
@@ -21,9 +23,12 @@ const (
 	actionEditDate = "editdate"
 )
 
-func PublishCandidates(ctx context.Context, cfg config.Config, candidates []sqlitestore.CalendarCandidate) error {
+func PublishCandidates(ctx context.Context, cfg config.Config, store *sqlitestore.Store, runID int64, candidates []sqlitestore.CalendarCandidate) error {
 	if len(candidates) == 0 {
 		return nil
+	}
+	if store == nil || runID <= 0 {
+		return fmt.Errorf("calendar publication requires store and run id")
 	}
 	if !cfg.NestReady() {
 		return fmt.Errorf("Nest is not fully configured")
@@ -31,9 +36,16 @@ func PublishCandidates(ctx context.Context, cfg config.Config, candidates []sqli
 	if err := nest.CheckTopics(cfg); err != nil {
 		return err
 	}
-	client := nest.New(cfg.NestBotToken)
+	return publishCandidatesWithClient(ctx, cfg, store, runID, candidates, nest.New(cfg.NestBotToken))
+}
+
+type calendarPublicationTelegram interface {
+	SendMessageResult(context.Context, nest.SendMessageRequest) (nest.Message, error)
+}
+
+func publishCandidatesWithClient(ctx context.Context, cfg config.Config, store *sqlitestore.Store, runID int64, candidates []sqlitestore.CalendarCandidate, client calendarPublicationTelegram) error {
 	for _, candidate := range candidates {
-		if err := client.SendMessage(ctx, nest.SendMessageRequest{
+		request := nest.SendMessageRequest{
 			ChatID:          cfg.NestChatID,
 			MessageThreadID: cfg.NestTopics.Calendar,
 			Text:            CandidateMessage(candidate, cfg.Timezone),
@@ -47,11 +59,62 @@ func PublishCandidates(ctx context.Context, cfg config.Config, candidates []sqli
 					{Text: "Изменить дату", CallbackData: CallbackData(actionEditDate, candidate.ID)},
 				},
 			}},
-		}); err != nil {
+		}
+		publication, err := store.EnsureOverviewPublication(ctx, runID, "calendar", int(candidate.ID), calendarPublicationHash(request), time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		switch publication.Status {
+		case "sent":
+			continue
+		case "unknown", "sending":
+			return fmt.Errorf("calendar candidate #%d Telegram delivery is %s; reconcile it manually before retry", candidate.ID, publication.Status)
+		}
+		publication, claimed, err := store.ClaimOverviewPublication(ctx, publication.ID, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			if publication.Status == "sent" {
+				continue
+			}
+			return fmt.Errorf("calendar candidate #%d Telegram delivery is %s; not sending", candidate.ID, publication.Status)
+		}
+		message, err := client.SendMessageResult(ctx, request)
+		if err != nil {
+			persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			if calendarSendIsAmbiguous(err) {
+				_ = store.MarkOverviewPublicationUnknown(persistCtx, publication.ID, err.Error(), time.Now().UTC())
+			} else {
+				_ = store.MarkOverviewPublicationRetry(persistCtx, publication.ID, err.Error(), time.Now().UTC())
+			}
+			cancel()
+			return err
+		}
+		if err := store.MarkOverviewPublicationSent(ctx, publication.ID, request.ChatID, request.MessageThreadID, message.MessageID, time.Now().UTC()); err != nil {
+			persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			_ = store.MarkOverviewPublicationUnknown(persistCtx, publication.ID, "Telegram send succeeded but publication commit failed: "+err.Error(), time.Now().UTC())
+			cancel()
 			return err
 		}
 	}
 	return nil
+}
+
+func calendarPublicationHash(request nest.SendMessageRequest) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d\n%d\n%s\n%v", request.ChatID, request.MessageThreadID, request.Text, request.ReplyMarkup)))
+	return hex.EncodeToString(sum[:])
+}
+
+func calendarSendIsAmbiguous(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "bot api sendmessage failed:") || strings.Contains(message, "bot api sendmessage returned 4") {
+		return false
+	}
+	return true
 }
 
 func HandleCallback(ctx context.Context, cfg config.Config, data string) (string, error) {
@@ -70,10 +133,18 @@ func HandleCallback(ctx context.Context, cfg config.Config, data string) (string
 	}
 	switch action {
 	case actionReject:
-		if err := store.UpdateCalendarCandidateStatus(ctx, candidate.ID, "rejected", candidate.CalendarEventID, "", time.Now().UTC()); err != nil {
+		current, rejected, err := store.RejectCalendarCandidate(ctx, candidate.ID, time.Now().UTC())
+		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("<b>Отклонено</b>\n\nКандидат <code>#%d</code>: %s", candidate.ID, html.EscapeString(candidate.Title)), nil
+		if current.Status == "rejected" {
+			verb := "Отклонено"
+			if !rejected {
+				verb = "Уже отклонено"
+			}
+			return fmt.Sprintf("<b>%s</b>\n\nКандидат <code>#%d</code>: %s", verb, current.ID, html.EscapeString(current.Title)), nil
+		}
+		return fmt.Sprintf("<b>Отклонение недоступно</b>\n\nКандидат <code>#%d</code> уже имеет статус <code>%s</code>.", current.ID, html.EscapeString(current.Status)), nil
 	case actionApprove:
 		return approveCandidate(ctx, cfg, store, candidate)
 	case actionEditDate:
@@ -93,7 +164,7 @@ func CandidateForDateEdit(ctx context.Context, cfg config.Config, id int64) (sql
 	if err != nil {
 		return sqlitestore.CalendarCandidate{}, err
 	}
-	if candidate.Status == "created" || candidate.Status == "rejected" {
+	if candidate.Status == "approved" || candidate.Status == "created" || candidate.Status == "rejected" {
 		return sqlitestore.CalendarCandidate{}, fmt.Errorf("candidate #%d is %s and cannot be edited", candidate.ID, candidate.Status)
 	}
 	return candidate, nil
@@ -116,7 +187,7 @@ func UpdateCandidateDate(ctx context.Context, cfg config.Config, id int64, input
 	if err != nil {
 		return sqlitestore.CalendarCandidate{}, "", err
 	}
-	if candidate.Status == "created" || candidate.Status == "rejected" {
+	if candidate.Status == "approved" || candidate.Status == "created" || candidate.Status == "rejected" {
 		return sqlitestore.CalendarCandidate{}, "", fmt.Errorf("candidate #%d is %s and cannot be edited", candidate.ID, candidate.Status)
 	}
 	start, end, err := shiftedCandidateTime(candidate, input, cfg.Timezone)
@@ -163,26 +234,55 @@ func shiftedCandidateTime(candidate sqlitestore.CalendarCandidate, input string,
 }
 
 func approveCandidate(ctx context.Context, cfg config.Config, store *sqlitestore.Store, candidate sqlitestore.CalendarCandidate) (string, error) {
+	return approveCandidateWithCreate(ctx, cfg, store, candidate, gcalendar.CreateEvent)
+}
+
+type calendarEventCreator func(context.Context, config.Config, gcalendar.Event) (gcalendar.CreatedEvent, error)
+
+func approveCandidateWithCreate(ctx context.Context, cfg config.Config, store *sqlitestore.Store, candidate sqlitestore.CalendarCandidate, create calendarEventCreator) (string, error) {
 	if candidate.Status == "created" {
 		return fmt.Sprintf("<b>Событие уже создано</b>\n\nКандидат <code>#%d</code>\nGoogle event: <code>%s</code>", candidate.ID, html.EscapeString(candidate.CalendarEventID)), nil
 	}
 	if candidate.Status == "rejected" {
 		return fmt.Sprintf("<b>Кандидат уже отклонён</b>\n\nКандидат <code>#%d</code> больше нельзя approve.", candidate.ID), nil
 	}
-	event, err := gcalendar.CreateEvent(ctx, cfg, gcalendar.Event{
-		Title:       candidate.Title,
-		StartAt:     candidate.StartAt,
-		EndAt:       candidate.EndAt,
-		Timezone:    candidate.Timezone,
-		Location:    candidate.Location,
-		Description: calendarDescription(candidate),
-	})
+	eventID := gcalendar.EventIDForCandidate(candidate.ID)
+	reserved, _, err := store.ReserveCalendarCandidateApproval(ctx, candidate.ID, eventID, time.Now().UTC())
 	if err != nil {
-		_ = store.UpdateCalendarCandidateStatus(ctx, candidate.ID, "failed", "", err.Error(), time.Now().UTC())
 		return "", err
 	}
-	if err := store.UpdateCalendarCandidateStatus(ctx, candidate.ID, "created", event.ID, "", time.Now().UTC()); err != nil {
+	if reserved.Status == "created" {
+		return fmt.Sprintf("<b>Событие уже создано</b>\n\nКандидат <code>#%d</code>\nGoogle event: <code>%s</code>", reserved.ID, html.EscapeString(reserved.CalendarEventID)), nil
+	}
+	if reserved.Status == "rejected" {
+		return fmt.Sprintf("<b>Кандидат уже отклонён</b>\n\nКандидат <code>#%d</code> больше нельзя approve.", reserved.ID), nil
+	}
+	if reserved.Status != "approved" {
+		return "", fmt.Errorf("candidate #%d cannot be approved from status %s", reserved.ID, reserved.Status)
+	}
+	event, err := create(ctx, cfg, gcalendar.Event{
+		ID:          eventID,
+		Title:       reserved.Title,
+		StartAt:     reserved.StartAt,
+		EndAt:       reserved.EndAt,
+		Timezone:    reserved.Timezone,
+		Location:    reserved.Location,
+		Description: calendarDescription(reserved),
+	})
+	if err != nil {
+		_ = store.FailCalendarCandidateApproval(context.WithoutCancel(ctx), candidate.ID, eventID, err.Error(), time.Now().UTC())
 		return "", err
+	}
+	if event.ID != eventID {
+		err := fmt.Errorf("Google Calendar returned unexpected event id %q", event.ID)
+		_ = store.FailCalendarCandidateApproval(context.WithoutCancel(ctx), candidate.ID, eventID, err.Error(), time.Now().UTC())
+		return "", err
+	}
+	if err := store.CompleteCalendarCandidateApproval(ctx, candidate.ID, eventID, time.Now().UTC()); err != nil {
+		current, loadErr := store.CalendarCandidateByID(context.WithoutCancel(ctx), candidate.ID)
+		if loadErr != nil || current.Status != "created" || current.CalendarEventID != eventID {
+			return "", err
+		}
 	}
 	if event.HTMLLink != "" {
 		return fmt.Sprintf("<b>Событие создано</b> ✅\n\nКандидат <code>#%d</code>: <b>%s</b>\n%s", candidate.ID, html.EscapeString(candidate.Title), html.EscapeString(event.HTMLLink)), nil

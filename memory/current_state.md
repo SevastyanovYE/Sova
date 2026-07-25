@@ -13,31 +13,36 @@
   Templates `502`, and Collections `503`. No replacement command-help messages
   were sent. Experience has one new pinned, tracked quote index at message
   `1061`.
-- The production semantic-search corpus full scan is complete for current
-  InSync (916 active text messages, IDs `9..1063`), old InSync (2166,
-  IDs `3..2464`), and Sova.Nest (74, IDs `3..95`). MTProto outer-page
+- The production semantic-search corpus full scan is complete and ready for
+  `/search`: the completed checkpoint had current InSync 948 ready documents,
+  old InSync 2166, and Sova.Nest 78; incremental sync continues to grow the
+  corpus (already above 3190, with no pending embeddings). MTProto outer-page
   continuation now uses `offset_id`; the server validated pagination beyond
   both the 100-message API page and the 500-message checkpoint page.
 - Search uses the official synchronous `batchEmbedContents` endpoint in
   sequential batches of 20 and the same `gemini-embedding-2`/768-dimensional
-  space for both keys. Production currently has 1973 ready vectors out of 3156;
-  the primary and fallback projects reached their observed quota near 1000
-  embeddings each. The remaining durable queue will resume automatically from
-  the Workspace five-minute loop after the provider quota window resets.
-  `/search` returns the index-building response until `IndexReady` succeeds.
+  space for both keys. The fallback setting is a second Gemini key/project, not
+  a second embedding model, so all vectors remain compatible.
 - Production Google Calendar OAuth client and token files are installed with
-  mode `0600`. General strict doctor remains blocked by absent Go, ffmpeg,
-  tesseract, and Codex CLI; Workspace strict doctor remains blocked only by the
-  incomplete embedding queue. Codex credentials were not copied or repurposed.
-- Workspace has an Inbox-only `/quote` wizard. Quotes are rendered as native
-  Telegram blockquotes, stored in `workspace_quotes`, linked from a dynamic
-  `Опыт` index, and moved to `needs_review` when their source message changes.
-  Wizard progress after text entry survives restart, and ambiguous Telegram
-  delivery is not automatically repeated.
+  mode `0600`. Workspace strict doctor passes. General strict doctor remains
+  blocked by absent Go, ffmpeg, tesseract, and Codex CLI; Codex credentials were
+  not copied or repurposed.
+- Workspace has Inbox-only `/quote`, `/quote show`, and `/quote edit` flows.
+  Quotes are rendered as native Telegram blockquotes with an italic optional
+  author, stored in `workspace_quotes`, linked from a dynamic `Опыт` index, and
+  moved to `needs_review` when their source message changes. Wizard/edit state
+  survives restart; ambiguous Telegram delivery/edit is not repeated without
+  an explicit reconciliation command. Existing published quote messages are
+  restyled in place by a versioned renderer migration.
 - Deferred tasks have a durable reminder outbox and a startup/minute worker.
   Each schedule generation sends at most one reminder, retries confirmed
   failures, never blindly retries ambiguous sends, reopens the task, and
   refreshes its card and backlog.
+- Initial task cards, Nest digests, and Nest Calendar candidate cards also use
+  durable send claims. Confirmed Bot API rejection can retry; ambiguous send
+  outcomes become `unknown` and require manual reconciliation, preventing a
+  blind duplicate after restart. Overview runs older than the two-hour worker
+  lease no longer block every future run.
 - Publish now uses the shared redacted Google REST client, source-part coverage,
   safe Telegram HTML validation/splitting, a freer explicitly trusted revision
   field, and durable preview/final outboxes that resume without duplicate sends.
@@ -89,8 +94,9 @@
 - Codex CLI discovery supports both `PATH` and the standard macOS Codex app
   location. A Codex failure degrades to a fallback digest instead of losing
   synced messages; `sova retry-run --id` can recover older Codex/Qwen failures.
-- Nest digests use Telegram-friendly plain text with compact headings, bullets,
-  direct provenance URLs, and at most two relevant emoji.
+- Nest digests use Telegram-friendly plain text with compact headings, at most
+  six synthesized bullets, and at most five deduplicated URLs collected once
+  in a numbered `ИСТОЧНИКИ` footer.
 - Overview run 5 was recovered from 42 stored messages and published
   successfully after its original empty Qwen response.
 - Compact indexes exist for Telegram recent content, overview runs, and calendar
@@ -108,6 +114,9 @@
   Calendar topic candidates with approve/reject/date-edit buttons, and approve
   creates a real Google Calendar event with 7d/3d/1d/1h reminders after
   browser-based `sova google-login` with a temporary localhost OAuth callback.
+  Approval reserves a deterministic external event ID before the provider call;
+  retries reconcile that ID, and stale reject/date-edit callbacks cannot race
+  an in-flight approval.
 - The target Google Calendar ID, OAuth Desktop credentials, and local Google
   OAuth token are configured per user report after successful
   `sova google-login`.

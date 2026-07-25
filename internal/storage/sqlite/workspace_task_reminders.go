@@ -97,12 +97,49 @@ WHERE r.task_id = ? AND r.scheduled_for = ?`, taskID, scheduledFor.UTC().Format(
 	return reminder, true, nil
 }
 
+// ClaimWorkspaceTaskReminderForSend durably records that the next action is a
+// Telegram send. The compare-and-swap makes concurrent workers harmless and
+// leaves an interrupted request distinguishable from one that was never sent.
+func (s *Store) ClaimWorkspaceTaskReminderForSend(ctx context.Context, id int64, now time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workspace_task_reminders
+SET status = 'sending', updated_at = ?
+WHERE id = ?
+  AND status IN ('pending', 'retry')
+  AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday(?))`,
+		now.UTC().Format(time.RFC3339Nano), id, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+// RecoverInterruptedWorkspaceTaskReminders converts sends whose process died
+// before recording Telegram's result into terminal unknown rows. They are never
+// selected for automatic delivery again, which avoids duplicate reminders.
+func (s *Store) RecoverInterruptedWorkspaceTaskReminders(ctx context.Context, now time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workspace_task_reminders
+SET status = 'unknown', attempts = attempts + 1, next_attempt_at = NULL,
+    last_error = 'delivery interrupted with an unknown Telegram result',
+    updated_at = ?
+WHERE status = 'sending'`, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *Store) MarkWorkspaceTaskReminderRetry(ctx context.Context, id int64, next time.Time, lastError string, now time.Time) error {
 	result, err := s.db.ExecContext(ctx, `
 UPDATE workspace_task_reminders
 SET status = 'retry', attempts = attempts + 1, next_attempt_at = ?,
     last_error = ?, updated_at = ?
-WHERE id = ? AND status IN ('pending', 'retry')`,
+WHERE id = ? AND status = 'sending'`,
 		next.UTC().Format(time.RFC3339Nano), compactReminderError(lastError),
 		now.UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
@@ -116,7 +153,7 @@ func (s *Store) MarkWorkspaceTaskReminderUnknown(ctx context.Context, id int64, 
 UPDATE workspace_task_reminders
 SET status = 'unknown', attempts = attempts + 1, next_attempt_at = NULL,
     last_error = ?, updated_at = ?
-WHERE id = ? AND status IN ('pending', 'retry')`,
+WHERE id = ? AND status = 'sending'`,
 		compactReminderError(lastError), now.UTC().Format(time.RFC3339Nano), id)
 	if err != nil {
 		return err
@@ -133,7 +170,7 @@ UPDATE workspace_task_reminders
 SET status = 'sent', attempts = attempts + 1, next_attempt_at = NULL,
     last_error = '', reminder_chat_id = ?, reminder_topic_id = ?,
     reminder_message_id = ?, sent_at = ?, updated_at = ?
-WHERE id = ? AND status IN ('pending', 'retry')`,
+WHERE id = ? AND status = 'sending'`,
 		chatID, topicID, messageID, now.UTC().Format(time.RFC3339Nano),
 		now.UTC().Format(time.RFC3339Nano), id)
 	if err != nil {

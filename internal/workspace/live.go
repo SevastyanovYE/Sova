@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/SevastyanovYE/Sova/internal/config"
 	"github.com/SevastyanovYE/Sova/internal/nest"
@@ -89,6 +91,19 @@ func Serve(ctx context.Context, cfg config.Config, store *sqlitestore.Store) err
 		return fmt.Errorf("store is required")
 	}
 	client := nest.New(cfg.Workspace.BotToken)
+	if updated, err := refreshPublishedWorkspaceQuoteFormat(ctx, store, client, time.Now().UTC()); err != nil {
+		fmt.Printf("workspace quote format refresh incomplete after %d update(s): %v\n", updated, err)
+	} else if updated > 0 {
+		fmt.Printf("workspace quote format refreshed in place for %d message(s)\n", updated)
+	}
+	if recovered, err := store.RecoverInterruptedWorkspaceTaskCardSends(ctx, time.Now().UTC()); err != nil {
+		fmt.Printf("workspace task-card recovery unavailable: %v\n", err)
+	} else if recovered > 0 {
+		_ = client.SendMessage(ctx, nest.SendMessageRequest{
+			ChatID: cfg.Workspace.ChatID, MessageThreadID: cfg.Workspace.Topics.Inbox,
+			Text: fmt.Sprintf("⚠️ У %d карточек задач исход отправки неизвестен после перезапуска. Автоматически повторять их не буду, чтобы не создать дубли.", recovered),
+		})
+	}
 	offset := 0
 	pollFailures := 0
 	pendingTaskDates := map[pendingTaskDateKey]int64{}
@@ -187,7 +202,7 @@ func handleWorkspaceMessage(ctx context.Context, cfg config.Config, store *sqlit
 		return
 	}
 	if !edited && command == "quote" {
-		if err := startQuoteWizard(ctx, cfg, client, pendingInputs, message, threadID); err != nil {
+		if err := startQuoteWizard(ctx, cfg, store, client, pendingInputs, message, threadID); err != nil {
 			sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось запустить мастер цитаты", err)
 		}
 		return
@@ -356,35 +371,59 @@ func createWorkspaceTaskCard(ctx context.Context, cfg config.Config, store *sqli
 	return sendAndStoreWorkspaceTaskCard(ctx, cfg, store, client, source, clusterID, task, now)
 }
 
-func sendAndStoreWorkspaceTaskCard(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, source sqlitestore.WorkspaceMessage, clusterID int64, task sqlitestore.WorkspaceTask, now time.Time) error {
-	card, err := sendWorkspaceMessageResultWithRetry(ctx, client, nest.SendMessageRequest{
-		ChatID:          cfg.Workspace.ChatID,
-		MessageThreadID: cfg.Workspace.Topics.Tasks,
-		Text:            FormatTaskCardIn(task, mustLocation(cfg.Timezone)),
-		ParseMode:       "HTML",
-		ReplyMarkup:     TaskActionMarkup(task.ID),
-	})
-	if err != nil {
-		return err
+type taskCardTelegram interface {
+	SendMessageResult(context.Context, nest.SendMessageRequest) (nest.Message, error)
+}
+
+func sendAndStoreWorkspaceTaskCard(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client taskCardTelegram, _ sqlitestore.WorkspaceMessage, _ int64, task sqlitestore.WorkspaceTask, now time.Time) error {
+	request := nest.SendMessageRequest{
+		ChatID: cfg.Workspace.ChatID, MessageThreadID: cfg.Workspace.Topics.Tasks,
+		Text: FormatTaskCardIn(task, mustLocation(cfg.Timezone)), ParseMode: "HTML", ReplyMarkup: TaskActionMarkup(task.ID),
 	}
-	if err := store.SetWorkspaceTaskCard(ctx, task.ID, cfg.Workspace.ChatID, cfg.Workspace.Topics.Tasks, card.MessageID, now); err != nil {
-		return err
+	for attempt := 0; attempt < 2; attempt++ {
+		claimed, err := store.ClaimWorkspaceTaskCardSend(ctx, task.ID, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			current, loadErr := store.WorkspaceTaskByID(ctx, task.ID)
+			if loadErr != nil {
+				return loadErr
+			}
+			if current.CardDeliveryStatus == "sent" && current.CardMessageID != 0 {
+				return nil
+			}
+			return fmt.Errorf("task card %d delivery is %s; manual reconciliation is required", task.ID, current.CardDeliveryStatus)
+		}
+		card, err := client.SendMessageResult(ctx, request)
+		if err != nil {
+			if isDefinitiveTaskCardSendFailure(err) {
+				_ = store.MarkWorkspaceTaskCardRetryable(context.WithoutCancel(ctx), task.ID, err.Error(), time.Now().UTC())
+				if attempt == 0 {
+					workspaceSleepOrDone(ctx, time.Second)
+					continue
+				}
+				return err
+			}
+			_ = store.MarkWorkspaceTaskCardUnknown(context.WithoutCancel(ctx), task.ID, err.Error(), time.Now().UTC())
+			return err
+		}
+		if err := store.FinalizeWorkspaceTaskCard(ctx, task.ID, cfg.Workspace.ChatID, cfg.Workspace.Topics.Tasks, card.MessageID, now); err != nil {
+			_ = store.MarkWorkspaceTaskCardUnknown(context.WithoutCancel(ctx), task.ID, "Telegram send succeeded but task-card commit failed: "+err.Error(), time.Now().UTC())
+			return err
+		}
+		return nil
 	}
-	return store.UpsertWorkspaceDerivedMessage(ctx, sqlitestore.WorkspaceDerivedMessage{
-		SourceChatID:     source.ChatID,
-		SourceMessageID:  source.MessageID,
-		SourceClusterID:  clusterID,
-		DerivedType:      "task_card",
-		DerivedChatID:    cfg.Workspace.ChatID,
-		DerivedTopicID:   cfg.Workspace.Topics.Tasks,
-		DerivedMessageID: card.MessageID,
-		Status:           "active",
-	}, now)
+	return fmt.Errorf("task card %d delivery attempts exhausted", task.ID)
+}
+
+func isDefinitiveTaskCardSendFailure(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Bot API sendMessage failed:")
 }
 
 func handleWorkspaceCallback(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingTaskDates map[pendingTaskDateKey]int64, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, publishDrafts map[int64]publishPreviewDraft, callback nest.CallbackQuery) {
-	if action, ok := ParseQuoteCallback(callback.Data); ok {
-		handleQuoteCallback(ctx, cfg, store, client, pendingInputs, callback, action)
+	if action, quoteID, ok := ParseQuoteCallback(callback.Data); ok {
+		handleQuoteCallback(ctx, cfg, store, client, pendingInputs, callback, action, quoteID)
 		return
 	}
 	if action, index, ok := ParseDocumentInputCallback(callback.Data); ok {
@@ -3675,14 +3714,14 @@ func ExtractTaskTexts(text string) []string {
 	if text == "" {
 		return nil
 	}
-	lower := strings.ToLower(text)
-	if strings.Contains(lower, "#tasks") {
-		return extractMultiTaskTexts(text)
-	}
-	if !strings.Contains(lower, "#task") {
+	tag, ok := findTaskTag(text)
+	if !ok {
 		return nil
 	}
-	cleaned := cleanupTaskText(strings.ReplaceAll(strings.ReplaceAll(text, "#task", ""), "#Task", ""))
+	if tag.plural {
+		return extractMultiTaskTexts(text[tag.end:])
+	}
+	cleaned := cleanupTaskText(text[:tag.start] + text[tag.end:])
 	if cleaned == "" {
 		return nil
 	}
@@ -3691,21 +3730,9 @@ func ExtractTaskTexts(text string) []string {
 
 func extractMultiTaskTexts(text string) []string {
 	lines := strings.Split(text, "\n")
-	started := false
 	var out []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if !started {
-			index := strings.Index(strings.ToLower(trimmed), "#tasks")
-			if index < 0 {
-				continue
-			}
-			started = true
-			trimmed = strings.TrimSpace(trimmed[index+len("#tasks"):])
-			if trimmed == "" {
-				continue
-			}
-		}
 		cleaned := cleanupTaskText(trimmed)
 		if cleaned != "" {
 			out = append(out, cleaned)
@@ -3724,9 +3751,58 @@ func cleanupTaskText(value string) string {
 			value = strings.TrimSpace(value[dot+2:])
 		}
 	}
-	value = strings.ReplaceAll(value, "#task", "")
-	value = strings.ReplaceAll(value, "#tasks", "")
+	value = removeTaskTags(value)
 	return strings.TrimSpace(value)
+}
+
+type taskTagMatch struct {
+	start  int
+	end    int
+	plural bool
+}
+
+func findTaskTag(value string) (taskTagMatch, bool) {
+	lower := strings.ToLower(value)
+	for offset := 0; offset < len(lower); {
+		relative := strings.Index(lower[offset:], "#task")
+		if relative < 0 {
+			return taskTagMatch{}, false
+		}
+		start := offset + relative
+		end := start + len("#task")
+		plural := strings.HasPrefix(lower[start:], "#tasks")
+		if plural {
+			end++
+		}
+		beforeOK := start == 0
+		if !beforeOK {
+			r, _ := utf8.DecodeLastRuneInString(value[:start])
+			beforeOK = !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_'
+		}
+		afterOK := end == len(value)
+		if !afterOK {
+			r, _ := utf8.DecodeRuneInString(value[end:])
+			afterOK = !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_'
+		}
+		if beforeOK && afterOK {
+			return taskTagMatch{start: start, end: end, plural: plural}, true
+		}
+		offset = start + 1
+	}
+	return taskTagMatch{}, false
+}
+
+func removeTaskTags(value string) string {
+	var result strings.Builder
+	for {
+		tag, ok := findTaskTag(value)
+		if !ok {
+			result.WriteString(value)
+			return result.String()
+		}
+		result.WriteString(value[:tag.start])
+		value = value[tag.end:]
+	}
 }
 
 func FormatTaskCard(task sqlitestore.WorkspaceTask) string {
@@ -3824,13 +3900,21 @@ func ParseDeferredTaskDate(value string, now time.Time, location *time.Location)
 			continue
 		}
 		if candidate.noYear {
-			parsed = time.Date(now.Year(), parsed.Month(), parsed.Day(), parsed.Hour(), parsed.Minute(), 0, 0, location)
+			hour, minute := parsed.Hour(), parsed.Minute()
+			if candidate.dateOnly {
+				hour = 9
+			}
+			for year := now.In(location).Year(); year <= now.In(location).Year()+8; year++ {
+				resolved := time.Date(year, parsed.Month(), parsed.Day(), hour, minute, 0, 0, location)
+				if resolved.Month() != parsed.Month() || resolved.Day() != parsed.Day() || !resolved.After(now.In(location)) {
+					continue
+				}
+				return resolved, nil
+			}
+			continue
 		}
 		if candidate.dateOnly {
 			parsed = time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 9, 0, 0, 0, location)
-		}
-		if candidate.noYear && !parsed.After(now) {
-			parsed = parsed.AddDate(1, 0, 0)
 		}
 		return parsed, nil
 	}
@@ -4101,38 +4185,54 @@ func formatTaskBacklog(tasks []sqlitestore.WorkspaceTask, location *time.Locatio
 	var b strings.Builder
 	b.WriteString("<b>Отложенные задачи</b>\n\n")
 	written := 0
+	deferredCount := 0
+	for _, task := range tasks {
+		if task.Status == "deferred" {
+			deferredCount++
+		}
+	}
 	for _, task := range tasks {
 		if task.Status != "deferred" {
 			continue
 		}
-		b.WriteString("• ")
+		var line strings.Builder
+		line.WriteString("• ")
 		taskText := html.EscapeString(task.Text)
 		if task.Emoji != "" {
 			taskText += " " + html.EscapeString(task.Emoji)
 		}
 		if link := taskCardLink(task); link != "" {
-			b.WriteString("<a href=\"")
-			b.WriteString(html.EscapeString(link))
-			b.WriteString("\">")
-			b.WriteString(taskText)
-			b.WriteString("</a>")
+			line.WriteString("<a href=\"")
+			line.WriteString(html.EscapeString(link))
+			line.WriteString("\">")
+			line.WriteString(taskText)
+			line.WriteString("</a>")
 		} else {
-			b.WriteString(taskText)
+			line.WriteString(taskText)
 		}
 		if task.Status == "deferred" {
 			if task.DeferredUntil != nil {
-				b.WriteString(" - <i>")
-				b.WriteString(html.EscapeString(formatTaskDateRelative(task.DeferredUntil.In(location), now)))
-				b.WriteString("</i>")
+				line.WriteString(" - <i>")
+				line.WriteString(html.EscapeString(formatTaskDateRelative(task.DeferredUntil.In(location), now)))
+				line.WriteString("</i>")
 			} else {
-				b.WriteString(" - <i>без даты</i>")
+				line.WriteString(" - <i>без даты</i>")
 			}
 		}
-		b.WriteString("\n")
+		line.WriteString("\n")
+		if !telegramHTMLFits(b.String()+line.String(), workspaceTelegramSafeTextLimit) {
+			break
+		}
+		b.WriteString(line.String())
 		written++
 	}
 	if written == 0 {
 		b.WriteString("<i>Пока пусто.</i>")
+	} else if written < deferredCount {
+		note := fmt.Sprintf("\n<i>Показаны %d из %d отложенных задач.</i>", written, deferredCount)
+		if telegramHTMLFits(b.String()+note, workspaceTelegramSafeTextLimit) {
+			b.WriteString(note)
+		}
 	}
 	return b.String()
 }
@@ -4208,15 +4308,6 @@ func pleasantDocumentEmoji(id int64) string {
 		return emojis[0]
 	}
 	return emojis[int(id-1)%len(emojis)]
-}
-
-func sendWorkspaceMessageResultWithRetry(ctx context.Context, client *nest.Client, request nest.SendMessageRequest) (nest.Message, error) {
-	message, err := client.SendMessageResult(ctx, request)
-	if err == nil {
-		return message, nil
-	}
-	workspaceSleepOrDone(ctx, time.Second)
-	return client.SendMessageResult(ctx, request)
 }
 
 func isTelegramMessageNotModified(err error) bool {

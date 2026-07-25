@@ -12,12 +12,28 @@ func TestSplitMessageText(t *testing.T) {
 		t.Fatalf("parts = %d: %#v", len(parts), parts)
 	}
 	for _, part := range parts {
-		if len([]rune(part)) > 15 {
+		if TelegramTextUTF16Len(part) > 15 {
 			t.Fatalf("part too long: %q", part)
 		}
 	}
 	if strings.Join(parts, "") == "" {
 		t.Fatal("split produced empty content")
+	}
+}
+
+func TestSplitMessageTextUsesTelegramUTF16Units(t *testing.T) {
+	text := strings.Repeat("🙂", 3000)
+	parts := SplitMessageText(text, safeMessageLimit)
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d", len(parts))
+	}
+	for _, part := range parts {
+		if units := TelegramTextUTF16Len(part); units > safeMessageLimit {
+			t.Fatalf("part has %d UTF-16 units", units)
+		}
+	}
+	if got := strings.Join(parts, ""); got != text {
+		t.Fatalf("split changed content: got %d runes, want %d", len([]rune(got)), len([]rune(text)))
 	}
 }
 

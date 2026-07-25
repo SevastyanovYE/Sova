@@ -1,15 +1,91 @@
 package overview
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/SevastyanovYE/Sova/internal/config"
 	"github.com/SevastyanovYE/Sova/internal/model"
+	"github.com/SevastyanovYE/Sova/internal/nest"
 	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
 	"github.com/SevastyanovYE/Sova/internal/telegrammt"
 )
+
+type fakeDigestPublicationTelegram struct {
+	sends int
+	err   error
+	next  int
+}
+
+func (f *fakeDigestPublicationTelegram) SendMessageResult(_ context.Context, _ nest.SendMessageRequest) (nest.Message, error) {
+	f.sends++
+	if f.err != nil {
+		return nest.Message{}, f.err
+	}
+	if f.next == 0 {
+		f.next = 100
+	}
+	return nest.Message{MessageID: f.next}, nil
+}
+
+func TestPublishDigestUsesDurableSingleMessageClaim(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
+	run, err := store.TryStartOverview(ctx, "manual", now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{NestChatID: -1001, NestTopics: config.TopicIDs{Digest: 2, Calendar: 3, Status: 4, Chat: 5}}
+	fake := &fakeDigestPublicationTelegram{}
+	if err := publishDigestWithClient(ctx, cfg, store, run.ID, "короткий обзор", fake); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishDigestWithClient(ctx, cfg, store, run.ID, "короткий обзор", fake); err != nil {
+		t.Fatal(err)
+	}
+	if fake.sends != 1 {
+		t.Fatalf("Telegram sends = %d", fake.sends)
+	}
+	publications, err := store.OverviewPublicationsByRun(ctx, run.ID)
+	if err != nil || len(publications) != 1 || publications[0].Status != "sent" {
+		t.Fatalf("publications=%+v err=%v", publications, err)
+	}
+}
+
+func TestPublishDigestDoesNotRetryAmbiguousDelivery(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	run, err := store.TryStartOverview(ctx, "manual", time.Now().UTC(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{NestChatID: -1001, NestTopics: config.TopicIDs{Digest: 2, Calendar: 3, Status: 4, Chat: 5}}
+	failing := &fakeDigestPublicationTelegram{err: errors.New("Bot API sendMessage request failed: unexpected EOF")}
+	if err := publishDigestWithClient(ctx, cfg, store, run.ID, "обзор", failing); err == nil {
+		t.Fatal("ambiguous send unexpectedly succeeded")
+	}
+	good := &fakeDigestPublicationTelegram{}
+	if err := publishDigestWithClient(ctx, cfg, store, run.ID, "обзор", good); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("second publish err=%v", err)
+	}
+	if failing.sends != 1 || good.sends != 0 {
+		t.Fatalf("failing sends=%d retry sends=%d", failing.sends, good.sends)
+	}
+}
 
 func TestSyncedMessagesFromRecentPreservesSender(t *testing.T) {
 	messages := syncedMessagesFromRecent([]sqlitestore.TelegramRecentMessage{{
@@ -116,6 +192,22 @@ func TestLocalKeepAllDoesNotCreateEvents(t *testing.T) {
 	}
 }
 
+func TestModelStageBudgetExpiryDoesNotMasqueradeAsOuterCancellation(t *testing.T) {
+	parent := context.Background()
+	stage, cancel := context.WithDeadline(parent, time.Now().Add(-time.Second))
+	defer cancel()
+	if !modelStageBudgetExpired(parent, stage) {
+		t.Fatal("internal stage deadline was not detected")
+	}
+	cancelledParent, cancelParent := context.WithCancel(context.Background())
+	cancelParent()
+	cancelledStage, cancelStage := context.WithCancel(cancelledParent)
+	defer cancelStage()
+	if modelStageBudgetExpired(cancelledParent, cancelledStage) {
+		t.Fatal("outer cancellation was treated as a degradable stage timeout")
+	}
+}
+
 func TestEventInputsIncludeLocalDateHintAndTwoSameSourceContextMessages(t *testing.T) {
 	base := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
 	classified := []classifiedMessage{
@@ -152,10 +244,13 @@ func TestCompactPromptTextKeepsHeadAndTail(t *testing.T) {
 
 func TestCodexPromptUsesTelegramPlainTextFormat(t *testing.T) {
 	prompt := buildCodexPrompt("bundle")
-	for _, want := range []string{"🦉 ОБЗОР SOVA", "📅 КАЛЕНДАРЬ", "Источник: URL", "Do not use Markdown"} {
+	for _, want := range []string{"🦉 ОБЗОР SOVA", "📅 КАЛЕНДАРЬ", "ИСТОЧНИКИ", "no more than 5 unique source URLs", "under 3600 Unicode characters", "Do not use Markdown"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q", want)
 		}
+	}
+	if strings.Contains(prompt, "every concrete item must include the original source URL on a separate") {
+		t.Fatalf("prompt retained the old link-per-item policy: %s", prompt)
 	}
 }
 
@@ -164,13 +259,102 @@ func TestFallbackDigestUsesTelegramPlainTextFormat(t *testing.T) {
 		Message:  telegrammt.SyncedMessage{Text: "Экзамен завтра", SourceLink: "https://t.me/c/100/1"},
 		Decision: model.MessageDecision{Keep: true, Importance: 3},
 	}})
-	for _, want := range []string{"🦉 ОБЗОР SOVA", "ГЛАВНОЕ", "• Экзамен завтра", "Источник: https://t.me/c/100/1"} {
+	for _, want := range []string{"🦉 ОБЗОР SOVA", "ГЛАВНОЕ", "• Экзамен завтра [1]", "ИСТОЧНИКИ", "[1] https://t.me/c/100/1"} {
 		if !strings.Contains(digest, want) {
 			t.Fatalf("digest missing %q:\n%s", want, digest)
 		}
 	}
 	if strings.Contains(digest, "#") || strings.Contains(digest, "- ") {
 		t.Fatalf("digest contains Markdown markers:\n%s", digest)
+	}
+}
+
+func TestFallbackDigestCapsAndDeduplicatesLinks(t *testing.T) {
+	classified := make([]classifiedMessage, 0, 8)
+	for index := 0; index < 7; index++ {
+		classified = append(classified, classifiedMessage{
+			Message: telegrammt.SyncedMessage{
+				Text:       fmt.Sprintf("Полезный материал %d https://external.example/%d", index, index),
+				SourceLink: fmt.Sprintf("https://t.me/c/100/%d", index+1),
+			},
+			Decision: model.MessageDecision{Keep: true, Importance: index % 4},
+		})
+	}
+	classified = append(classified, classifiedMessage{
+		Message:  telegrammt.SyncedMessage{Text: "Полезный материал 3", SourceLink: "https://t.me/c/100/99"},
+		Decision: model.MessageDecision{Keep: true, Importance: 3},
+	})
+	digest := fallbackDigest(8, classified)
+	if got := strings.Count(digest, "https://t.me/"); got != fallbackDigestMaxItems {
+		t.Fatalf("source link count = %d, want %d:\n%s", got, fallbackDigestMaxItems, digest)
+	}
+	if strings.Contains(digest, "external.example") {
+		t.Fatalf("message-body URL leaked into digest item:\n%s", digest)
+	}
+	for index := 1; index <= fallbackDigestMaxItems; index++ {
+		link := fmt.Sprintf("https://t.me/c/100/%d", index)
+		if strings.Count(digest, link) > 1 {
+			t.Fatalf("source link repeated: %s\n%s", link, digest)
+		}
+	}
+}
+
+func TestFallbackDigestSeparatesCalendarAndHandlesURLOnlyText(t *testing.T) {
+	digest := fallbackDigest(9, []classifiedMessage{
+		{Message: telegrammt.SyncedMessage{Text: "https://example.com/course", SourceLink: "https://t.me/c/100/1"}, Decision: model.MessageDecision{Keep: true, Importance: 2}},
+		{Message: telegrammt.SyncedMessage{Text: "Экзамен завтра в 10:00", SourceLink: "https://t.me/c/100/2"}, Decision: model.MessageDecision{Keep: true, Importance: 3, HasEvent: true}},
+	})
+	for _, want := range []string{"Материал без текстового описания", "📅 КАЛЕНДАРЬ", "Экзамен завтра в 10:00", "ИСТОЧНИКИ"} {
+		if !strings.Contains(digest, want) {
+			t.Fatalf("digest missing %q:\n%s", want, digest)
+		}
+	}
+}
+
+func TestFallbackDigestUsesStableIdentityWhenLinkUnavailable(t *testing.T) {
+	digest := fallbackDigest(10, []classifiedMessage{{
+		Message:  telegrammt.SyncedMessage{ChatID: 42, MessageID: 7, Text: "Важное сообщение"},
+		Decision: model.MessageDecision{Keep: true, Importance: 3},
+	}})
+	if !strings.Contains(digest, "• Важное сообщение [1]") || !strings.Contains(digest, "[1] telegram:42:7 — ссылка недоступна") {
+		t.Fatalf("missing stable fallback provenance:\n%s", digest)
+	}
+}
+
+func TestValidateGeneratedDigestEnforcesCompactProvenance(t *testing.T) {
+	bundle := "link=https://t.me/c/100/1\nlink=https://t.me/c/100/2\n"
+	valid := "🦉 ОБЗОР SOVA\n\nГЛАВНОЕ\n• Пункт [1]\n\nИСТОЧНИКИ\n[1] https://t.me/c/100/1"
+	if err := validateGeneratedDigest(valid, bundle); err != nil {
+		t.Fatalf("valid digest rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		digest string
+	}{
+		{name: "duplicate", digest: valid + "\n[2] https://t.me/c/100/1"},
+		{name: "untrusted", digest: "ИСТОЧНИКИ\n[1] https://evil.example/x"},
+		{name: "scattered", digest: "ГЛАВНОЕ\n• Пункт https://t.me/c/100/1"},
+		{name: "source before section", digest: "[1] https://t.me/c/100/1\nГЛАВНОЕ\n• Пункт [1]\nИСТОЧНИКИ"},
+		{name: "content after sources", digest: "ГЛАВНОЕ\n• Пункт [1]\nИСТОЧНИКИ\n[1] https://t.me/c/100/1\nПРИМЕЧАНИЯ"},
+		{name: "duplicate source section", digest: "ГЛАВНОЕ\n• Пункт [1]\nИСТОЧНИКИ\n[1] https://t.me/c/100/1\nИСТОЧНИКИ"},
+		{name: "bullet without reference", digest: "ГЛАВНОЕ\n• Пункт\nИСТОЧНИКИ\n[1] https://t.me/c/100/1"},
+		{name: "dangling reference", digest: "ГЛАВНОЕ\n• Пункт [2]\nИСТОЧНИКИ\n[1] https://t.me/c/100/1"},
+		{name: "non sequential", digest: "ГЛАВНОЕ\n• Пункт [2]\nИСТОЧНИКИ\n[2] https://t.me/c/100/1"},
+		{name: "too many bullets", digest: "ГЛАВНОЕ\n" + strings.Repeat("• Пункт\n", generatedDigestMaxBullets+1)},
+		{name: "too long", digest: strings.Repeat("д", generatedDigestMaxUTF16+1)},
+		{name: "too many emoji units", digest: strings.Repeat("🙂", generatedDigestMaxUTF16/2+1)},
+		{name: "too many", digest: "ИСТОЧНИКИ\n" + strings.Join([]string{
+			"https://t.me/c/100/1", "https://t.me/c/100/2", "https://t.me/c/100/3",
+			"https://t.me/c/100/4", "https://t.me/c/100/5", "https://t.me/c/100/6",
+		}, "\n")},
+	}
+	largeBundle := bundle + "link=https://t.me/c/100/3\nlink=https://t.me/c/100/4\nlink=https://t.me/c/100/5\nlink=https://t.me/c/100/6\n"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateGeneratedDigest(tt.digest, largeBundle); err == nil {
+				t.Fatalf("invalid digest accepted: %s", tt.digest)
+			}
+		})
 	}
 }
 

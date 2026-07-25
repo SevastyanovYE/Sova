@@ -35,6 +35,15 @@ func TestExtractTaskTexts(t *testing.T) {
 	if got := ExtractTaskTexts("просто заметка"); len(got) != 0 {
 		t.Fatalf("unexpected tasks = %#v", got)
 	}
+	upper := ExtractTaskTexts("#TASK Проверить регистр")
+	if len(upper) != 1 || upper[0] != "Проверить регистр" {
+		t.Fatalf("uppercase tag = %#v", upper)
+	}
+	for _, value := range []string{"#taskmaster", "#tasksome", "prefix#task", "#task_legacy"} {
+		if got := ExtractTaskTexts(value); len(got) != 0 {
+			t.Fatalf("substring tag %q created tasks %#v", value, got)
+		}
+	}
 }
 
 func TestParseDeferredTaskDate(t *testing.T) {
@@ -61,6 +70,13 @@ func TestParseDeferredTaskDate(t *testing.T) {
 	}
 	if _, err := ParseDeferredTaskDate("послезавтра", now, location); err == nil {
 		t.Fatal("expected unsupported date to fail")
+	}
+	leap, err := ParseDeferredTaskDate("29.02", now, location)
+	if err != nil || !leap.Equal(time.Date(2028, 2, 29, 9, 0, 0, 0, location)) {
+		t.Fatalf("next leap date = %v, err=%v", leap, err)
+	}
+	if _, err := ParseDeferredTaskDate("31.04", now, location); err == nil {
+		t.Fatal("normalized impossible date was accepted")
 	}
 }
 
@@ -112,6 +128,29 @@ func TestTaskBacklogShowsOnlyDeferredTasks(t *testing.T) {
 	}
 }
 
+func TestTaskBacklogStaysWithinTelegramUTF16Limit(t *testing.T) {
+	location := time.FixedZone("MSK", 3*60*60)
+	deferred := time.Date(2026, 7, 30, 9, 0, 0, 0, location)
+	tasks := make([]sqlitestore.WorkspaceTask, 0, 100)
+	for index := 0; index < 100; index++ {
+		tasks = append(tasks, sqlitestore.WorkspaceTask{
+			Text: strings.Repeat("🙂", 90), Status: "deferred", DeferredUntil: &deferred,
+			CardChatID: -1004301779750, CardTopicID: 10, CardMessageID: 1000 + index,
+		})
+	}
+	text := formatTaskBacklog(tasks, location, time.Date(2026, 7, 25, 12, 0, 0, 0, location))
+	units, err := telegramHTMLUTF16Len(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if units > workspaceTelegramSafeTextLimit {
+		t.Fatalf("backlog has %d UTF-16 units", units)
+	}
+	if !strings.Contains(text, "Показаны") {
+		t.Fatalf("bounded backlog omitted truncation notice: %s", text)
+	}
+}
+
 func TestTaskCallbacksAndRendering(t *testing.T) {
 	data := TaskCallbackData("defer_custom", 42)
 	action, id, ok := ParseTaskCallback(data)
@@ -139,6 +178,86 @@ func TestTaskCallbacksAndRendering(t *testing.T) {
 	if deferMarkup == nil || len(deferMarkup.InlineKeyboard) != 2 {
 		t.Fatalf("defer markup = %+v", deferMarkup)
 	}
+}
+
+func TestWorkspaceTaskCardAmbiguousSendIsNotRetried(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 25, 8, 0, 0, 0, time.UTC)
+	task, err := store.CreateWorkspaceTask(ctx, sqlitestore.WorkspaceTask{
+		SourceChatID: -1001, SourceMessageID: 88, Text: "Не задублировать", Status: "open",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testWorkspaceLiveConfig()
+	fake := &fakeTaskCardTelegram{err: errors.New("connection reset after request write")}
+	if err := sendAndStoreWorkspaceTaskCard(ctx, cfg, store, fake, sqlitestore.WorkspaceMessage{}, 0, task, now); err == nil {
+		t.Fatal("ambiguous task-card send unexpectedly succeeded")
+	}
+	if fake.calls != 1 {
+		t.Fatalf("ambiguous send calls = %d", fake.calls)
+	}
+	persisted, err := store.WorkspaceTaskByID(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.CardDeliveryStatus != "unknown" || persisted.CardMessageID != 0 {
+		t.Fatalf("ambiguous task card = %+v", persisted)
+	}
+	if err := sendAndStoreWorkspaceTaskCard(ctx, cfg, store, fake, sqlitestore.WorkspaceMessage{}, 0, persisted, now.Add(time.Minute)); err == nil {
+		t.Fatal("unknown task-card send was automatically retried")
+	}
+	if fake.calls != 1 {
+		t.Fatalf("unknown send was retried: calls=%d", fake.calls)
+	}
+}
+
+func TestWorkspaceTaskCardSuccessFinalizesMappingAtomically(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 25, 8, 0, 0, 0, time.UTC)
+	task, err := store.CreateWorkspaceTask(ctx, sqlitestore.WorkspaceTask{
+		SourceChatID: -1001, SourceMessageID: 89, SourceClusterID: 7, Text: "Сохранить", Status: "open",
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testWorkspaceLiveConfig()
+	fake := &fakeTaskCardTelegram{messageID: 777}
+	if err := sendAndStoreWorkspaceTaskCard(ctx, cfg, store, fake, sqlitestore.WorkspaceMessage{}, 0, task, now); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := store.WorkspaceTaskByID(ctx, task.ID)
+	if err != nil || persisted.CardDeliveryStatus != "sent" || persisted.CardMessageID != 777 {
+		t.Fatalf("persisted=%+v err=%v", persisted, err)
+	}
+	derived, err := store.WorkspaceDerivedMessagesBySource(ctx, task.SourceChatID, task.SourceMessageID, "task_card", []string{"active"}, 10)
+	if err != nil || len(derived) != 1 || derived[0].DerivedMessageID != 777 {
+		t.Fatalf("derived=%+v err=%v", derived, err)
+	}
+}
+
+type fakeTaskCardTelegram struct {
+	calls     int
+	messageID int
+	err       error
+}
+
+func (fake *fakeTaskCardTelegram) SendMessageResult(context.Context, nest.SendMessageRequest) (nest.Message, error) {
+	fake.calls++
+	if fake.err != nil {
+		return nest.Message{}, fake.err
+	}
+	return nest.Message{MessageID: fake.messageID}, nil
 }
 
 func TestPublishCallbacksAndMockPreview(t *testing.T) {

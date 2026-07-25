@@ -34,6 +34,9 @@ func runWorkspaceTaskReminderLoopWithClock(ctx context.Context, cfg config.Confi
 	if now == nil {
 		now = time.Now
 	}
+	if _, err := store.RecoverInterruptedWorkspaceTaskReminders(ctx, now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Printf("workspace task reminder recovery unavailable: %v\n", err)
+	}
 	process := func() {
 		if err := processWorkspaceTaskReminders(ctx, cfg, store, client, now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Printf("workspace task reminders unavailable: %v\n", err)
@@ -78,6 +81,13 @@ func processWorkspaceTaskReminder(ctx context.Context, cfg config.Config, store 
 	if reminder.Status != "sent" {
 		if !reminderMatchesDeferredTask(reminder) {
 			return store.CancelWorkspaceTaskReminder(ctx, reminder.ID, "task changed before reminder delivery", now)
+		}
+		claimed, err := store.ClaimWorkspaceTaskReminderForSend(ctx, reminder.ID, now)
+		if err != nil {
+			return fmt.Errorf("claim task reminder for send: %w", err)
+		}
+		if !claimed {
+			return nil
 		}
 		link := taskCardLink(reminder.Task)
 		if link == "" {
