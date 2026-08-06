@@ -6,9 +6,10 @@
 
 ## Goal
 
-Keep local `qwen3:14b` useful without letting it dominate the whole overview
-run. For MVP, Qwen performs bounded classification and event extraction only;
-Codex writes the final digest from a compact bundle.
+This historical calibration kept local `qwen3:14b` from dominating the whole
+overview run. In that MVP, Qwen performed bounded classification/event
+extraction and Codex wrote the final digest. Current production uses the Google
+route and Gemini described in `docs/model_routing.md`.
 
 The target is not maximum model accuracy at any cost. The target is:
 

@@ -11,8 +11,9 @@ sequentially. The default order is:
 4. `gemma-4-26b-a4b-it`
 
 This is a configured product order based on published model characteristics,
-not a local benchmark. `qwen-*` commands and `SOVA_OLLAMA_*` remain for one
-transition release, but the production overview runtime does not call Ollama.
+not a local benchmark. Historical `qwen-*` commands and their optional local
+configuration remain for reproducibility, but the production overview runtime
+does not call Ollama.
 The cross-family ranking is an explicit product judgment for compact
 classification and structured extraction, based on Google's published
 [latest-model guidance](https://ai.google.dev/gemini-api/docs/latest-model),
@@ -38,6 +39,11 @@ links.
 
 Both stages use temperature zero. Gemini models request minimal thinking. Model
 responses must cover every opaque input id exactly once.
+
+The final digest is a separate structured Google API stage. It tries
+`SOVA_GEMINI_MODEL`, then the configured Gemini fallback models, validates the
+bounded Telegram digest contract, and records `model_digest` telemetry. It does
+not invoke Codex CLI.
 
 ## Failure handling
 

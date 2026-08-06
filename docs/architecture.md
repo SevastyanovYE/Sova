@@ -1,31 +1,46 @@
 # MVP Architecture
 
-`sova serve` is a lightweight local controller. It keeps Bot API long polling
-active, enqueue the daily overview, accepts text commands from the Nest `Status`
-service topic, and accepts the pinned run button from the Nest `Chat` study
-topic. One worker executes overview jobs serially.
+`sova serve-all` is the memory-conscious production entry point. It runs the
+Nest and Workspace long-polling controllers in one foreground process while
+keeping their existing Bot API clients and SQLite handles. If either controller
+stops unexpectedly, the shared context cancels the other and the service exits
+for its supervisor to restart. `sova serve` and `sova workspace serve` remain
+available as separate compatibility entry points.
 
 ```text
-launchd
-  -> sova serve
-       -> Bot API controller
+alwaysdata Service / local supervisor
+  -> sova serve-all
+       -> Nest Bot API controller
        -> daily scheduler
        -> Status progress updater
        -> SQLite job/run state
        -> single overview worker
             -> MTProto incremental sync
-            -> media extractors
-            -> qwen3:14b bounded structured classification
+            -> media metadata/placeholders
+            -> bounded Google API classification/event route
             -> compact model-call metrics
             -> compact run bundle
-            -> codex exec structured digest
+            -> Gemini structured digest
             -> Nest publication
             -> calendar approval
             -> Google Calendar API
+       -> Workspace Bot API controller
+            -> reminders, documents, publish, optional search
 ```
 
 The controller and worker share a 15-minute run cooldown. Telegram Desktop
 sessions are outside the architecture.
+
+The alwaysdata launcher uses a statically linked `linux/amd64` binary, embedded
+timezone data, `SIGHUP`/`SIGTERM`/`SIGINT` cancellation, a fresh heartbeat, and
+a read-only SQLite `quick_check`. No production serve mode starts Ollama, a
+local model, Codex CLI, Docker, systemd, or a GUI.
+
+The daily scheduler is enabled by default for compatibility. Its on/off state
+is stored in SQLite and can be changed from the Nest `Status` topic with
+`/daily on|off|status`. The scheduler reads the durable state before enqueueing
+each daily job and fails closed if that state cannot be read. This switch does
+not affect manual CLI runs, `/run`, or the pinned `Chat` button.
 
 ## Workspace branch
 

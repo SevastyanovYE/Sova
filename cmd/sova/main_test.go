@@ -43,6 +43,9 @@ func TestNestTopicIntroRequests(t *testing.T) {
 	if requests[0].ReplyMarkup == nil || !strings.Contains(requests[0].Text, "/run") {
 		t.Fatalf("chat intro = %+v", requests[0])
 	}
+	if !strings.Contains(requests[3].Text, "/daily on|off|status") {
+		t.Fatalf("status intro missing daily schedule help: %+v", requests[3])
+	}
 	for i, request := range requests {
 		if request.ParseMode != "HTML" {
 			t.Fatalf("request[%d] parse mode = %q", i, request.ParseMode)

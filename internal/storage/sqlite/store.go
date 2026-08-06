@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,12 +208,21 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
 	store := &Store{db: db}
+	journalMode, err := sqliteJournalMode(os.Getenv("SOVA_SQLITE_JOURNAL_MODE"))
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec("PRAGMA journal_mode = " + journalMode); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("configure SQLite journal mode %s: %w", journalMode, err)
+	}
 	if err := store.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -220,14 +230,86 @@ func Open(path string) (*Store, error) {
 	return store, nil
 }
 
+func sqliteDSN(path string, readOnly bool) string {
+	value := url.URL{Scheme: "file", Path: path}
+	query := value.Query()
+	query.Add("_pragma", "busy_timeout(5000)")
+	if readOnly {
+		query.Set("mode", "ro")
+	} else {
+		query.Add("_pragma", "foreign_keys(1)")
+	}
+	value.RawQuery = query.Encode()
+	return value.String()
+}
+
+func sqliteJournalMode(value string) (string, error) {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if value == "" {
+		return "WAL", nil
+	}
+	switch value {
+	case "WAL", "DELETE", "TRUNCATE":
+		return value, nil
+	default:
+		return "", fmt.Errorf("SOVA_SQLITE_JOURNAL_MODE must be WAL, DELETE, or TRUNCATE")
+	}
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// QuickCheck verifies the logical integrity of the database without exposing
+// stored content. It is safe for health checks and migration gates.
+func (s *Store) QuickCheck(ctx context.Context) error {
+	return quickCheck(ctx, s.db)
+}
+
+// QuickCheckFile opens an existing database read-only and does not run schema
+// migrations. It is intended for frequent service monitoring.
+func QuickCheckFile(ctx context.Context, path string) error {
+	db, err := sql.Open("sqlite", sqliteDSN(path, true))
+	if err != nil {
+		return fmt.Errorf("open SQLite read-only: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	return quickCheck(ctx, db)
+}
+
+func quickCheck(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, "PRAGMA quick_check")
+	if err != nil {
+		return fmt.Errorf("SQLite quick_check: %w", err)
+	}
+	defer rows.Close()
+	var findings []string
+	results := 0
+	for rows.Next() {
+		results++
+		var finding string
+		if err := rows.Scan(&finding); err != nil {
+			return fmt.Errorf("SQLite quick_check result: %w", err)
+		}
+		if strings.TrimSpace(finding) != "ok" {
+			findings = append(findings, strings.TrimSpace(finding))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("SQLite quick_check rows: %w", err)
+	}
+	if results == 0 {
+		return fmt.Errorf("SQLite quick_check returned no result")
+	}
+	if len(findings) > 0 {
+		return fmt.Errorf("SQLite quick_check failed: %s", strings.Join(findings, "; "))
+	}
+	return nil
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	const schema = `
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS overview_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trigger TEXT NOT NULL CHECK (trigger IN ('scheduled', 'nest_button', 'manual')),
@@ -241,6 +323,11 @@ CREATE INDEX IF NOT EXISTS idx_overview_runs_started_at
     ON overview_runs(started_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_running_overview
     ON overview_runs(status) WHERE status = 'running';
+CREATE TABLE IF NOT EXISTS nest_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS telegram_sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ref TEXT NOT NULL UNIQUE,

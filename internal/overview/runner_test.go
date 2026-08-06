@@ -10,11 +10,24 @@ import (
 	"time"
 
 	"github.com/SevastyanovYE/Sova/internal/config"
+	"github.com/SevastyanovYE/Sova/internal/googleai"
 	"github.com/SevastyanovYE/Sova/internal/model"
 	"github.com/SevastyanovYE/Sova/internal/nest"
 	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
 	"github.com/SevastyanovYE/Sova/internal/telegrammt"
 )
+
+type stubGeminiDigestGenerator struct {
+	responses []googleai.GenerateResponse
+	errors    []error
+	requests  []googleai.GenerateRequest
+}
+
+func (stub *stubGeminiDigestGenerator) GenerateContent(_ context.Context, request googleai.GenerateRequest) (googleai.GenerateResponse, error) {
+	stub.requests = append(stub.requests, request)
+	index := len(stub.requests) - 1
+	return stub.responses[index], stub.errors[index]
+}
 
 type fakeDigestPublicationTelegram struct {
 	sends int
@@ -242,8 +255,8 @@ func TestCompactPromptTextKeepsHeadAndTail(t *testing.T) {
 	}
 }
 
-func TestCodexPromptUsesTelegramPlainTextFormat(t *testing.T) {
-	prompt := buildCodexPrompt("bundle")
+func TestDigestPromptUsesTelegramPlainTextFormat(t *testing.T) {
+	prompt := buildDigestPrompt("bundle")
 	for _, want := range []string{"🦉 ОБЗОР SOVA", "📅 КАЛЕНДАРЬ", "ИСТОЧНИКИ", "no more than 5 unique source URLs", "under 3600 Unicode characters", "Do not use Markdown"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q", want)
@@ -251,6 +264,51 @@ func TestCodexPromptUsesTelegramPlainTextFormat(t *testing.T) {
 	}
 	if strings.Contains(prompt, "every concrete item must include the original source URL on a separate") {
 		t.Fatalf("prompt retained the old link-per-item policy: %s", prompt)
+	}
+}
+
+func TestParseGeminiDigestPayload(t *testing.T) {
+	got, err := parseGeminiDigestPayload("```json\n{\"digest\":\"  обзор  \"}\n```")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "обзор" {
+		t.Fatalf("digest = %q", got)
+	}
+}
+
+func TestDigestGeminiModelsDeduplicatesConfiguredRoute(t *testing.T) {
+	cfg := config.Config{Gemini: config.GeminiConfig{Model: "primary", FallbackModels: []string{"fallback", "PRIMARY"}}}
+	models := digestGeminiModels(cfg)
+	if len(models) != 2 || models[0] != "primary" || models[1] != "fallback" {
+		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestGenerateGeminiDigestFallsBackAndRecordsTelemetry(t *testing.T) {
+	bundle := "- id=`m1` link=https://t.me/c/100/1\n  text: Дедлайн завтра.\n"
+	client := &stubGeminiDigestGenerator{
+		responses: []googleai.GenerateResponse{{}, {
+			Text:  `{"digest":"🦉 ОБЗОР SOVA\n\nГЛАВНОЕ\n• Дедлайн завтра [1]\n\nИСТОЧНИКИ\n[1] https://t.me/c/100/1"}`,
+			Model: "fallback", PromptTokens: 10, OutputTokens: 20, TotalTokens: 30, FinishReason: "STOP",
+		}},
+		errors: []error{&googleai.APIError{StatusCode: 503, Status: "UNAVAILABLE"}, nil},
+	}
+	var calls []sqlitestore.ModelCall
+	digest, modelName, err := generateGeminiDigestTextWithClient(context.Background(), client, []string{"primary", "fallback"}, bundle, func(call sqlitestore.ModelCall) {
+		calls = append(calls, call)
+	}, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modelName != "fallback" || !strings.Contains(digest, "Дедлайн завтра") {
+		t.Fatalf("model=%q digest=%q", modelName, digest)
+	}
+	if len(client.requests) != 2 || client.requests[0].Model != "primary" || client.requests[1].Model != "fallback" {
+		t.Fatalf("requests = %#v", client.requests)
+	}
+	if len(calls) != 2 || calls[0].Success || calls[0].ErrorClass != string(googleai.ErrorServer) || !calls[1].Success || calls[1].RunID != 42 {
+		t.Fatalf("telemetry = %#v", calls)
 	}
 }
 

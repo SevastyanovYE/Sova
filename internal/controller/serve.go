@@ -43,6 +43,15 @@ type pendingDateEdit struct {
 	ExpiresAt   time.Time
 }
 
+type dailyOverviewSettings interface {
+	DailyOverviewEnabled(context.Context) (bool, error)
+	SetDailyOverviewEnabled(context.Context, bool, time.Time) error
+}
+
+type nestBotIdentity interface {
+	GetMe(context.Context) (nest.User, error)
+}
+
 func Serve(ctx context.Context, cfg config.Config) error {
 	if !cfg.NestReady() {
 		return fmt.Errorf("Nest is not fully configured")
@@ -50,7 +59,23 @@ func Serve(ctx context.Context, cfg config.Config) error {
 	if err := nest.CheckTopics(cfg); err != nil {
 		return err
 	}
+	settingsStore, err := sqlitestore.Open(cfg.DatabasePath)
+	if err != nil {
+		return fmt.Errorf("open Nest settings: %w", err)
+	}
+	defer settingsStore.Close()
+	dailyState := "unknown"
+	dailyEnabled, err := settingsStore.DailyOverviewEnabled(ctx)
+	if err != nil {
+		fmt.Printf("sova serve: cannot read daily overview setting; scheduled runs will fail closed until it is repaired: %v\n", err)
+	} else {
+		dailyState = strconv.FormatBool(dailyEnabled)
+	}
 	client := nest.New(cfg.NestBotToken)
+	botUsername, err := waitForNestBotUsername(ctx, client, pollRetryDelay)
+	if err != nil {
+		return err
+	}
 	jobs := make(chan overviewJob, 1)
 	var busy atomic.Bool
 	submit := func(job overviewJob) bool {
@@ -66,11 +91,23 @@ func Serve(ctx context.Context, cfg config.Config) error {
 		}
 	}
 
-	go overviewWorker(ctx, cfg, client, jobs, &busy)
-	go dailyScheduler(ctx, cfg, client, submit)
+	overviewWorkerDone := make(chan struct{})
+	go func() {
+		defer close(overviewWorkerDone)
+		overviewWorker(ctx, cfg, client, jobs, &busy)
+	}()
+	dailySchedulerDone := make(chan struct{})
+	go func() {
+		defer close(dailySchedulerDone)
+		dailyScheduler(ctx, cfg, client, settingsStore, submit)
+	}()
+	defer func() {
+		<-overviewWorkerDone
+		<-dailySchedulerDone
+	}()
 
-	fmt.Printf("sova serve: polling Nest chat %d command topic %d; daily run at %s %s\n",
-		cfg.NestChatID, cfg.NestTopics.Status, cfg.DailyRunTime, cfg.Timezone)
+	fmt.Printf("sova serve: polling Nest chat %d command topic %d; daily run at %s %s (enabled=%s)\n",
+		cfg.NestChatID, cfg.NestTopics.Status, cfg.DailyRunTime, cfg.Timezone, dailyState)
 
 	offset := 0
 	pollFailures := 0
@@ -102,7 +139,7 @@ func Serve(ctx context.Context, cfg config.Config) error {
 			if update.UpdateID >= offset {
 				offset = update.UpdateID + 1
 			}
-			handleUpdate(ctx, cfg, client, submit, pendingEdits, update)
+			handleUpdate(ctx, cfg, client, botUsername, settingsStore, submit, pendingEdits, update)
 		}
 	}
 }
@@ -123,6 +160,27 @@ func pollRetryDelay(failures int) time.Duration {
 
 func shouldLogPollFailure(failures int) bool {
 	return failures <= 3 || failures%5 == 0
+}
+
+func waitForNestBotUsername(ctx context.Context, client nestBotIdentity, retryDelay func(int) time.Duration) (string, error) {
+	for failures := 1; ; failures++ {
+		botUser, err := client.GetMe(ctx)
+		username := strings.TrimSpace(botUser.Username)
+		if err == nil && username != "" {
+			return username, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("Bot API returned an empty username")
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		delay := retryDelay(failures)
+		if shouldLogPollFailure(failures) {
+			fmt.Printf("cannot identify Nest bot (attempt %d; retrying in %s): %v\n", failures, delay, err)
+		}
+		sleepOrDone(ctx, delay)
+	}
 }
 
 func overviewWorker(ctx context.Context, cfg config.Config, client *nest.Client, jobs <-chan overviewJob, busy *atomic.Bool) {
@@ -158,9 +216,9 @@ func overviewWorker(ctx context.Context, cfg config.Config, client *nest.Client,
 	}
 }
 
-func handleUpdate(ctx context.Context, cfg config.Config, client *nest.Client, submit func(overviewJob) bool, pendingEdits map[dateEditKey]pendingDateEdit, update nest.Update) {
+func handleUpdate(ctx context.Context, cfg config.Config, client *nest.Client, botUsername string, settings dailyOverviewSettings, submit func(overviewJob) bool, pendingEdits map[dateEditKey]pendingDateEdit, update nest.Update) {
 	if update.Message != nil {
-		handleMessage(ctx, cfg, client, submit, pendingEdits, *update.Message)
+		handleMessage(ctx, cfg, client, botUsername, settings, submit, pendingEdits, *update.Message)
 		return
 	}
 	if update.CallbackQuery != nil {
@@ -168,7 +226,7 @@ func handleUpdate(ctx context.Context, cfg config.Config, client *nest.Client, s
 	}
 }
 
-func handleMessage(ctx context.Context, cfg config.Config, client *nest.Client, submit func(overviewJob) bool, pendingEdits map[dateEditKey]pendingDateEdit, message nest.Message) {
+func handleMessage(ctx context.Context, cfg config.Config, client *nest.Client, botUsername string, settings dailyOverviewSettings, submit func(overviewJob) bool, pendingEdits map[dateEditKey]pendingDateEdit, message nest.Message) {
 	if isCalendarTopicMessage(cfg, message) {
 		handleCalendarDateEditMessage(ctx, cfg, client, pendingEdits, message)
 		return
@@ -176,7 +234,7 @@ func handleMessage(ctx context.Context, cfg config.Config, client *nest.Client, 
 	if !isCommandTopicMessage(cfg, message) {
 		return
 	}
-	command := commandName(message.Text)
+	command := commandName(message.Text, botUsername)
 	switch command {
 	case "run":
 		if submit(overviewJob{trigger: "nest_button", chatReply: true}) {
@@ -194,9 +252,51 @@ func handleMessage(ctx context.Context, cfg config.Config, client *nest.Client, 
 			Text:            "<b>Обзор уже в работе</b>\n\nЯ не запускаю второй параллельно. Ход текущего обзора видно в <b>Status</b>.",
 			ParseMode:       "HTML",
 		})
+	case "daily":
+		handleDailyOverviewCommand(ctx, cfg, client, settings, message.Text)
 	case "start", "help", "button":
 		_ = SendControlMessage(ctx, cfg, client)
 	}
+}
+
+func handleDailyOverviewCommand(ctx context.Context, cfg config.Config, client *nest.Client, settings dailyOverviewSettings, text string) {
+	action, valid := dailyOverviewAction(text)
+	if !valid {
+		_ = client.SendMessage(ctx, nest.SendMessageRequest{
+			ChatID:          cfg.NestChatID,
+			MessageThreadID: cfg.NestTopics.Status,
+			Text:            dailyOverviewUsageText(),
+			ParseMode:       "HTML",
+		})
+		return
+	}
+	if action == "on" || action == "off" {
+		if err := settings.SetDailyOverviewEnabled(ctx, action == "on", time.Now().UTC()); err != nil {
+			_ = client.SendLongMessage(ctx, nest.SendMessageRequest{
+				ChatID:          cfg.NestChatID,
+				MessageThreadID: cfg.NestTopics.Status,
+				Text:            "<b>Не удалось изменить ежедневный запуск</b>\n\n<blockquote>" + html.EscapeString(compactLine(err.Error(), 300)) + "</blockquote>\n\nНастройка не изменена.",
+				ParseMode:       "HTML",
+			})
+			return
+		}
+	}
+	enabled, err := settings.DailyOverviewEnabled(ctx)
+	if err != nil {
+		_ = client.SendLongMessage(ctx, nest.SendMessageRequest{
+			ChatID:          cfg.NestChatID,
+			MessageThreadID: cfg.NestTopics.Status,
+			Text:            "<b>Не удалось прочитать настройку ежедневного запуска</b>\n\n<blockquote>" + html.EscapeString(compactLine(err.Error(), 300)) + "</blockquote>",
+			ParseMode:       "HTML",
+		})
+		return
+	}
+	_ = client.SendMessage(ctx, nest.SendMessageRequest{
+		ChatID:          cfg.NestChatID,
+		MessageThreadID: cfg.NestTopics.Status,
+		Text:            dailyOverviewStatusText(enabled, cfg, time.Now()),
+		ParseMode:       "HTML",
+	})
 }
 
 func handleCallback(ctx context.Context, cfg config.Config, client *nest.Client, submit func(overviewJob) bool, pendingEdits map[dateEditKey]pendingDateEdit, callback nest.CallbackQuery) {
@@ -329,7 +429,7 @@ func ControlMessageRequest(cfg config.Config) nest.SendMessageRequest {
 }
 
 func chatControlText() string {
-	return "<b>🦉 Sova chat</b>\n\nЭто живой учебный топик: сюда можно складывать задачи, заметки, фото, пересланные материалы и всё, что хочется держать рядом с учебой.\n\nНажми <b>Создать обзор</b>, когда нужен свежий дайджест по подключенным Telegram-источникам.\n\n<blockquote>Материалы из этого топика пока не входят в пайплайн. Текстовые команды <code>/run</code>, <code>/button</code> и <code>/help</code> живут в служебном топике.</blockquote>"
+	return "<b>🦉 Sova chat</b>\n\nЭто живой учебный топик: сюда можно складывать задачи, заметки, фото, пересланные материалы и всё, что хочется держать рядом с учебой.\n\nНажми <b>Создать обзор</b>, когда нужен свежий дайджест по подключенным Telegram-источникам.\n\n<blockquote>Материалы из этого топика пока не входят в пайплайн. Текстовые команды <code>/run</code>, <code>/daily</code>, <code>/button</code> и <code>/help</code> живут в служебном топике.</blockquote>"
 }
 
 func overviewStartedText() string {
@@ -354,7 +454,7 @@ func calendarCandidateMarkup(id int64) *nest.InlineKeyboardMarkup {
 	}}
 }
 
-func dailyScheduler(ctx context.Context, cfg config.Config, client *nest.Client, submit func(overviewJob) bool) {
+func dailyScheduler(ctx context.Context, cfg config.Config, client *nest.Client, settings dailyOverviewSettings, submit func(overviewJob) bool) {
 	location := mustLocation(cfg.Timezone)
 	for {
 		next := nextDailyRun(time.Now().In(location), cfg.DailyRunTime, location)
@@ -364,7 +464,19 @@ func dailyScheduler(ctx context.Context, cfg config.Config, client *nest.Client,
 			timer.Stop()
 			return
 		case <-timer.C:
-			if !submit(overviewJob{trigger: "scheduled", scheduledAt: next}) {
+			enabled, submitted, err := submitScheduledOverview(ctx, settings, next, submit)
+			if err != nil {
+				_ = client.SendLongMessage(ctx, nest.SendMessageRequest{
+					ChatID:          cfg.NestChatID,
+					MessageThreadID: cfg.NestTopics.Status,
+					Text:            "Scheduled Sova overview skipped: cannot read daily setting: " + compactLine(err.Error(), 500),
+				})
+				continue
+			}
+			if !enabled {
+				continue
+			}
+			if !submitted {
 				_ = client.SendMessage(ctx, nest.SendMessageRequest{
 					ChatID:          cfg.NestChatID,
 					MessageThreadID: cfg.NestTopics.Status,
@@ -373,6 +485,43 @@ func dailyScheduler(ctx context.Context, cfg config.Config, client *nest.Client,
 			}
 		}
 	}
+}
+
+func submitScheduledOverview(ctx context.Context, settings dailyOverviewSettings, scheduledAt time.Time, submit func(overviewJob) bool) (enabled, submitted bool, err error) {
+	enabled, err = settings.DailyOverviewEnabled(ctx)
+	if err != nil || !enabled {
+		return enabled, false, err
+	}
+	return true, submit(overviewJob{trigger: "scheduled", scheduledAt: scheduledAt}), nil
+}
+
+func dailyOverviewAction(text string) (string, bool) {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) <= 1 {
+		return "status", true
+	}
+	if len(fields) != 2 {
+		return "", false
+	}
+	action := strings.ToLower(fields[1])
+	switch action {
+	case "on", "off", "status":
+		return action, true
+	default:
+		return "", false
+	}
+}
+
+func dailyOverviewUsageText() string {
+	return "<b>Управление ежедневными обзорами</b>\n\nИспользуй <code>/daily on</code>, <code>/daily off</code> или <code>/daily status</code>."
+}
+
+func dailyOverviewStatusText(enabled bool, cfg config.Config, now time.Time) string {
+	if !enabled {
+		return "<b>Ежедневные обзоры выключены</b>\n\nАвтоматический запуск не будет создавать обзоры. <code>/run</code> и кнопка <b>Создать обзор</b> продолжают работать.\n\nВключить: <code>/daily on</code>."
+	}
+	next := nextDailyRun(now.In(mustLocation(cfg.Timezone)), cfg.DailyRunTime, mustLocation(cfg.Timezone))
+	return "<b>Ежедневные обзоры включены</b>\n\nСледующий автоматический запуск: <code>" + html.EscapeString(next.Format("02.01.2006 15:04 MST")) + "</code>.\n\nВыключить: <code>/daily off</code>."
 }
 
 func nextDailyRun(now time.Time, daily string, location *time.Location) time.Time {
@@ -496,7 +645,7 @@ func roundDuration(duration time.Duration) string {
 	return fmt.Sprintf("%d мин", minutes)
 }
 
-func commandName(text string) string {
+func commandName(text, botUsername string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
@@ -506,7 +655,10 @@ func commandName(text string) string {
 		return ""
 	}
 	first = strings.TrimPrefix(first, "/")
-	if name, _, ok := strings.Cut(first, "@"); ok {
+	if name, mention, ok := strings.Cut(first, "@"); ok {
+		if !strings.EqualFold(mention, strings.TrimPrefix(strings.TrimSpace(botUsername), "@")) {
+			return ""
+		}
 		first = name
 	}
 	return strings.ToLower(first)

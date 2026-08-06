@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/SevastyanovYE/Sova/internal/buildinfo"
 	"github.com/SevastyanovYE/Sova/internal/config"
@@ -22,13 +26,16 @@ import (
 	"github.com/SevastyanovYE/Sova/internal/nest"
 	"github.com/SevastyanovYE/Sova/internal/overview"
 	"github.com/SevastyanovYE/Sova/internal/qwen"
+	"github.com/SevastyanovYE/Sova/internal/service"
 	sqlitestore "github.com/SevastyanovYE/Sova/internal/storage/sqlite"
 	"github.com/SevastyanovYE/Sova/internal/telegrammt"
 	"github.com/SevastyanovYE/Sova/internal/workspace"
 )
 
 func main() {
-	if err := run(context.Background(), os.Args[1:]); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	if err := run(ctx, os.Args[1:]); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -68,6 +75,14 @@ func run(ctx context.Context, args []string) error {
 		return rebuildIndexes(ctx, cfg)
 	case "serve":
 		return controller.Serve(ctx, cfg)
+	case "serve-all":
+		return service.ServeAll(ctx, cfg)
+	case "healthcheck":
+		if err := service.HealthCheck(ctx, cfg, time.Now().UTC()); err != nil {
+			return err
+		}
+		fmt.Println("healthcheck ok")
+		return nil
 	case "workspace":
 		return workspaceCommand(ctx, cfg, args[1:])
 	case "nest-check":
@@ -112,7 +127,9 @@ func initState(cfg config.Config) error {
 		filepath.Join(cfg.StateDir, "logs"),
 		filepath.Join(cfg.StateDir, "index"),
 		filepath.Dir(cfg.TelegramSessionPath),
-		".secrets",
+		filepath.Dir(cfg.HeartbeatPath),
+		filepath.Dir(cfg.GoogleCredentials),
+		filepath.Dir(cfg.GoogleToken),
 	} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return err
@@ -323,7 +340,7 @@ func nestTopicIntroRequests(cfg config.Config) []nest.SendMessageRequest {
 		{
 			ChatID:          cfg.NestChatID,
 			MessageThreadID: cfg.NestTopics.Status,
-			Text:            "<b>🛠 Sova service</b>\n\nЭто служебный топик: здесь работают <code>/run</code>, <code>/button</code> и <code>/help</code>. Сюда же приходят прогресс обзора, ошибки, cooldown, fallback и health-сообщения.\n\nВо время обзора я обновляю одно сообщение: sync, батчи модели, календарь, Codex, публикация и примерное время до конца.\n\n<blockquote>Если кнопка в учебном чате не реагирует, первым делом смотри сюда и в консоль serve: без getUpdates бот не видит команды.</blockquote>",
+			Text:            "<b>🛠 Sova service</b>\n\nЭто служебный топик: здесь работают <code>/run</code>, <code>/daily on|off|status</code>, <code>/button</code> и <code>/help</code>. Сюда же приходят прогресс обзора, ошибки, cooldown, fallback и health-сообщения.\n\nВо время обзора я обновляю одно сообщение: sync, батчи Gemini, календарь, финальный дайджест, публикация и примерное время до конца.\n\n<blockquote>Если кнопка в учебном чате не реагирует, первым делом смотри сюда и в консоль serve: без getUpdates бот не видит команды.</blockquote>",
 			ParseMode:       "HTML",
 		},
 	}
@@ -1113,7 +1130,9 @@ func modelSmoke(ctx context.Context, cfg config.Config, args []string) error {
 		models = models[:1]
 	}
 	failed := 0
+	checked := 0
 	for _, modelName := range models {
+		checked++
 		router := model.NewGoogleRouter(cfg.Gemini.APIKey, []string{modelName})
 		output, err := router.Classify(ctx, "smoke", []model.MessageInput{
 			{ID: "m1", Time: time.Now(), Sender: "synthetic", Kind: "text", Text: "Экзамен завтра в 10:00."},
@@ -1143,8 +1162,34 @@ func modelSmoke(ctx context.Context, cfg config.Config, args []string) error {
 			classifyAttempt.OutputTokens+eventAttempt.OutputTokens,
 			classifyAttempt.FinishReason, eventAttempt.FinishReason)
 	}
+	digestModels := []string{cfg.Gemini.Model}
+	if *all {
+		digestModels = append(digestModels, cfg.Gemini.FallbackModels...)
+	}
+	seenDigestModels := map[string]struct{}{}
+	for _, modelName := range digestModels {
+		modelName = strings.TrimSpace(modelName)
+		key := strings.ToLower(modelName)
+		if modelName == "" {
+			failed++
+			checked++
+			fmt.Printf("stage=digest ok=false error=%q\n", "digest model is not configured")
+			continue
+		}
+		if _, exists := seenDigestModels[key]; exists {
+			continue
+		}
+		seenDigestModels[key] = struct{}{}
+		checked++
+		if digestErr := overview.SmokeGeminiDigest(ctx, cfg, modelName); digestErr != nil {
+			failed++
+			fmt.Printf("model=%s ok=false stage=digest error=%q\n", modelName, digestErr.Error())
+			continue
+		}
+		fmt.Printf("model=%s ok=true stage=digest\n", modelName)
+	}
 	if failed > 0 {
-		return fmt.Errorf("model smoke failed for %d/%d configured model(s)", failed, len(models))
+		return fmt.Errorf("model smoke failed for %d/%d configured stage/model check(s)", failed, checked)
 	}
 	return nil
 }
@@ -1876,6 +1921,8 @@ Usage:
   sova status
   sova index
   sova serve
+  sova serve-all
+  sova healthcheck
   sova workspace doctor [--strict]
   sova workspace discover [--dry-run] [--limit 100]
   sova workspace sync-legacy [--limit 100] [--dry-run] [--backfill|--full-scan] [--timeout 5m]

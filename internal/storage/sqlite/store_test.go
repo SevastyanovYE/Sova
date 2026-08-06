@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -33,6 +34,62 @@ func TestOverviewCooldownSharedAcrossTriggers(t *testing.T) {
 
 	if _, err := store.TryStartOverview(context.Background(), "manual", now.Add(15*time.Minute), 15*time.Minute); err != nil {
 		t.Fatalf("run at cooldown boundary: %v", err)
+	}
+}
+
+func TestOpenHonorsConfiguredJournalMode(t *testing.T) {
+	t.Setenv("SOVA_SQLITE_JOURNAL_MODE", "DELETE")
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var mode string
+	if err := store.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "delete" {
+		t.Fatalf("journal mode = %q", mode)
+	}
+}
+
+func TestQuickCheckFileDoesNotCreateMissingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.db")
+	if err := QuickCheckFile(context.Background(), path); err == nil {
+		t.Fatal("QuickCheckFile accepted a missing database")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only check created the database: %v", err)
+	}
+}
+
+func TestDeleteJournalSupportsTwoStoreHandles(t *testing.T) {
+	t.Setenv("SOVA_SQLITE_JOURNAL_MODE", "DELETE")
+	path := filepath.Join(t.TempDir(), "sova.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	now := time.Now().UTC()
+	if err := first.SetDailyOverviewEnabled(context.Background(), false, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.SetDailyOverviewEnabled(context.Background(), true, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := first.DailyOverviewEnabled(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !enabled {
+		t.Fatal("second handle write was not visible through first handle")
 	}
 }
 

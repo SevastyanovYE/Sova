@@ -1,10 +1,17 @@
 # Current State
 
-- Sova 0.1.0 is deployed to production from the final rollout commit; the
-  installed binary exposes its exact revision through `sova version`. Both
-  `sova-workspace.service` and `sova-nest.service` are active with zero restarts.
-  The release is not tagged or announced and has no deployment receipt because
-  the complete strict release gate has not passed.
+- Sova 0.1.0 remains on the old production server through two systemd units,
+  but that host is scheduled to be disabled on 2026-08-09. The local working
+  tree is the 0.2.0 alwaysdata Free migration candidate and has not been deployed,
+  tagged, announced, or given a deployment receipt.
+- Read-only verification on 2026-08-07 found both old units active with zero
+  restarts, exact commit `fe41b597d70f`, combined idle RSS about 44 MiB, SQLite
+  `quick_check=ok` in WAL mode, and roughly 51 MiB under `/var/lib/sova`.
+- The migration candidate adds a static `linux/amd64` package, one foreground
+  `serve-all` process, `SIGHUP`/`SIGTERM`/`SIGINT` shutdown, heartbeat plus
+  read-only DB healthcheck, `DELETE` journal-mode configuration, and verified
+  backup/restore tooling. Alwaysdata filesystem locking support and real 256 MB
+  peak RSS remain manual gates.
 - Production additive migrations and SQLite `quick_check` succeeded. A verified
   pre-deployment database, binary, and environment backup remain under
   `/var/backups/sova/` and `/opt/sova/`/`/etc/sova/` respectively.
@@ -24,9 +31,8 @@
   space for both keys. The fallback setting is a second Gemini key/project, not
   a second embedding model, so all vectors remain compatible.
 - Production Google Calendar OAuth client and token files are installed with
-  mode `0600`. Workspace strict doctor passes. General strict doctor remains
-  blocked by absent Go, ffmpeg, tesseract, and Codex CLI; Codex credentials were
-  not copied or repurposed.
+  mode `0600`. The migration-candidate production doctor no longer requires Go,
+  ffmpeg, tesseract, Ollama, or Codex CLI on the server.
 - Workspace has Inbox-only `/quote`, `/quote show`, and `/quote edit` flows.
   Quotes are rendered as native Telegram blockquotes with an italic optional
   author, stored in `workspace_quotes`, linked from a dynamic `Опыт` index, and
@@ -58,9 +64,13 @@
   lists `/quote` and `/search`; Experience has dedicated quote instructions.
 
 - Repository has a baseline commit and a working Go + SQLite MVP foundation.
-- Runtime: local Mac, Go, SQLite, one overview worker in `sova serve`.
+- Runtime: the legacy host uses two services; the alwaysdata target uses one Go
+  process in `sova serve-all` with the existing Nest and Workspace controllers.
 - Overview triggers: daily schedule, Nest service commands, pinned Chat button,
   and manual CLI.
+- The daily scheduled trigger can be persisted on/off from the Nest `Status`
+  topic with `/daily on|off|status`; manual `/run`, the pinned Chat button, and
+  CLI runs remain available while it is off.
 - Shared overview cooldown: 15 minutes across all triggers.
 - Nest topics: Digest, Calendar, Status, Chat. Automated digest/status output
   does not go to Chat.
@@ -69,15 +79,15 @@
   not part of the study digest allowlist.
 - Production Nest classification/event extraction uses the ordered Google route
   `gemini-3.5-flash-lite`, `gemma-4-31b-it`, `gemini-3.1-flash-lite`,
-  `gemma-4-26b-a4b-it` via `SOVA_GEMINI_API_KEY`. Ollama/Qwen commands remain
-  for one transition release but are not used by the production overview.
+  `gemma-4-26b-a4b-it` via `SOVA_GEMINI_API_KEY`. Historical Ollama/Qwen
+  commands remain for reproducibility but are not used by the production overview.
 - Telegram auth: dedicated MTProto project session only.
 - Telegram sync verified end-to-end for two Sova Nest study sources: dry-run
   writes nothing, sync stores 200 messages, repeat sync dedupes to zero new
   messages, media metadata and one service message are handled.
 - `sova run --trigger manual` now calls Telegram sync and completes successfully
   when there are no new messages.
-- Google classification, compact run bundle generation, Codex digest generation,
+- Google classification, compact run bundle generation, Gemini digest generation,
   and Nest Digest publication are wired. Classification and event extraction
   use separate bounded batches, exact structured-response validation,
   sequential model fallback, split retry, local keep-all/no-event terminal
@@ -91,9 +101,10 @@
   formatting; final digests stay plain text. Bot API polling uses the default
   TCP dialer with bounded exponential backoff for temporary Telegram network
   failures.
-- Codex CLI discovery supports both `PATH` and the standard macOS Codex app
-  location. A Codex failure degrades to a fallback digest instead of losing
-  synced messages; `sova retry-run --id` can recover older Codex/Qwen failures.
+- Codex CLI discovery remains only as historical tooling. Production generation
+  uses Gemini and degrades to a provenance-preserving fallback without losing
+  synced messages; `sova retry-run --id` can recover older Codex/Qwen failures
+  through the current Google route.
 - Nest digests use Telegram-friendly plain text with compact headings, at most
   six synthesized bullets, and at most five deduplicated URLs collected once
   in a numbered `ИСТОЧНИКИ` footer.

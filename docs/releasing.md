@@ -23,8 +23,9 @@ Documentation-only edits, unfinished work, and isolated refactors remain under
 4. Run feature-specific smoke tests without sending production messages.
 5. Back up the production SQLite database.
 6. Build the exact commit with embedded version and commit metadata.
-7. Deploy both `sova-workspace.service` and `sova-nest.service`.
-8. Run strict doctors, inspect both service journals, and complete manual smoke
+7. Deploy the configured production runtime: one alwaysdata `serve-all` Service,
+   or both legacy `sova-workspace.service` and `sova-nest.service` units.
+8. Run strict doctors, inspect the active service logs/journals, and complete manual smoke
    flows in Test Lab.
 9. Record a successful production deployment receipt for the exact commit.
 10. Tag that deployed commit, then dry-run and explicitly execute the Inbox
@@ -40,12 +41,12 @@ sova doctor --strict
 sova workspace doctor --strict
 sova workspace record-deployment --checks "tests, doctors, journals, smoke" --execute
 sova workspace announce-release
-git tag v0.1.0
+git tag "v$(tr -d '[:space:]' < VERSION)"
 sova workspace announce-release --execute
 ```
 
-Record the receipt only after both systemd units and their journals were
-checked on the server. The tag and `--execute` announcement must point at that
+Record the receipt only after every configured production Service and its logs
+were checked on the server. The tag and `--execute` announcement must point at that
 same embedded commit; neither command belongs in service startup.
 
 ## Build

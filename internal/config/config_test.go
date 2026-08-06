@@ -23,6 +23,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.Search.Enabled || cfg.Search.EmbeddingModel != "gemini-embedding-2" {
 		t.Fatalf("search defaults = %+v", cfg.Search)
 	}
+	if cfg.HeartbeatPath != filepath.Join(cfg.StateDir, "health", "heartbeat.json") {
+		t.Fatalf("heartbeat path = %q", cfg.HeartbeatPath)
+	}
 	wantModels := []string{"gemini-3.5-flash-lite", "gemma-4-31b-it", "gemini-3.1-flash-lite", "gemma-4-26b-a4b-it"}
 	if len(cfg.NestGoogleModels) != len(wantModels) {
 		t.Fatalf("Nest Google models = %#v", cfg.NestGoogleModels)

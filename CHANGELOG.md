@@ -7,13 +7,20 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-07
+
 ### Added
 
+- добавили управление ежедневным обзором из Nest через `/daily on|off|status` с сохранением настройки в SQLite
+- добавили единый foreground-режим `serve-all`, локальный heartbeat/healthcheck и переносимый static `linux/amd64` deployment kit для alwaysdata Free
+- добавили безопасные SQLite backup/restore-скрипты с `quick_check`, checksum и явным rollback
 - добавили Inbox-команды просмотра и безопасного изменения сохранённых цитат с preview, ручным подтверждением неоднозначного Telegram edit и восстановлением после перезапуска
 - добавили durable outbox публикации дайджеста Nest и календарных карточек с явной ручной сверкой неоднозначной доставки
 
 ### Changed
 
+- финальный production-дайджест перенесён с Codex CLI на структурированный Gemini API route; production doctor больше не требует локальные модели и build/media tools
+- серверный SQLite можно явно перевести в `DELETE` journal mode, а соединения получают busy timeout; alwaysdata запускается с ограниченным Go heap target
 - автор цитаты в «Опыт» теперь оформляется курсивом
 - обзоры Nest тематически сжимают связанные сообщения и показывают не более пяти дедуплицированных ссылок в одном блоке «ИСТОЧНИКИ»
 - справка в закрепе «Опыт» перечисляет команды создания, просмотра, изменения и восстановления цитат
@@ -49,5 +56,6 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - командные закрепы обновляются без дублей; отдельная справка по цитатам добавлена в «Опыт»
 - индекс цитат можно безопасно создать отдельно через `seed-document-indexes --type quote`, не трогая старые индексы
 
-[Unreleased]: https://github.com/SevastyanovYE/Sova/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/SevastyanovYE/Sova/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/SevastyanovYE/Sova/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/SevastyanovYE/Sova/compare/0b7c4b4cd10bbab9d764a327f0e39744413ace9d...v0.1.0

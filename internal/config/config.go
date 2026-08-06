@@ -16,6 +16,7 @@ const (
 	defaultCooldown        = 15 * time.Minute
 	defaultTimezone        = "Europe/Moscow"
 	defaultDailyRunTime    = "08:00"
+	defaultHeartbeatName   = "heartbeat.json"
 	defaultTelegramSession = ".sessions/sova-user.json"
 	defaultOllamaURL       = "http://127.0.0.1:11434"
 	defaultOllamaModel     = "qwen3:14b"
@@ -91,6 +92,7 @@ type Config struct {
 	DatabasePath             string
 	OverviewCooldown         time.Duration
 	DailyRunTime             string
+	HeartbeatPath            string
 	TelegramAppID            int
 	TelegramAppHash          string
 	TelegramPhone            string
@@ -232,6 +234,7 @@ func Load() (Config, error) {
 		DatabasePath:             valueOrDefault("SOVA_DATABASE_PATH", filepath.Join(stateDir, "sova.db")),
 		OverviewCooldown:         cooldown,
 		DailyRunTime:             valueOrDefault("SOVA_DAILY_RUN_TIME", defaultDailyRunTime),
+		HeartbeatPath:            valueOrDefault("SOVA_HEARTBEAT_PATH", filepath.Join(stateDir, "health", defaultHeartbeatName)),
 		TelegramAppID:            appID,
 		TelegramAppHash:          strings.TrimSpace(os.Getenv("SOVA_TELEGRAM_APP_HASH")),
 		TelegramPhone:            strings.TrimSpace(os.Getenv("SOVA_TELEGRAM_PHONE")),
@@ -356,6 +359,9 @@ func (c Config) ValidateFoundation() error {
 	}
 	if strings.TrimSpace(c.DatabasePath) == "" {
 		return fmt.Errorf("database path is required")
+	}
+	if strings.TrimSpace(c.HeartbeatPath) == "" {
+		return fmt.Errorf("heartbeat path is required")
 	}
 	if filepath.Clean(c.TelegramSessionPath) == "." {
 		return fmt.Errorf("Telegram session path is required")

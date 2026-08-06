@@ -1,5 +1,10 @@
 # Text MVP follow-ups
 
+> Historical snapshot: this document describes the earlier local Qwen/Codex
+> MVP. Current production routing uses the Google API for classification/event
+> extraction and Gemini for the final digest; see `docs/architecture.md` and
+> `docs/model_routing.md`.
+
 This document is scoped only to the current Sova text MVP branch:
 Sova Nest study sources from `SOVA_NEST_TELEGRAM_ALLOWED_CHATS` ->
 SQLite/local indexes -> Qwen classification -> Codex digest -> Sova Nest

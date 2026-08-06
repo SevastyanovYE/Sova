@@ -20,7 +20,7 @@ Nest** и помогает планировать события в Google Calen
 - хранит состояние приложения локально в SQLite и директории `.state/`;
 - классифицирует короткие сообщения и извлекает календарные события через
   последовательный маршрут Google-моделей с локальным безопасным fallback;
-- передает Codex компактный очищенный bundle, а не громоздкие raw dumps;
+- передает Gemini компактный очищенный bundle, а не громоздкие raw dumps;
 - публикует понятные обзоры в топике `Digest` группы Nest;
 - отправляет календарные кандидаты в `Calendar` с кнопками approve/reject и
   ручной правкой даты перед подтверждением;
@@ -36,6 +36,10 @@ Nest** и помогает планировать события в Google Calen
   при каждом перезапуске `serve`.
 - Все три триггера обзора (`manual`, `scheduled`, `nest_button`) используют
   общий cooldown 15 минут.
+- Ежедневный `scheduled`-запуск можно выключить и снова включить прямо в
+  `Status` командами `/daily off` и `/daily on`; `/daily status` показывает
+  текущее состояние. Настройка хранится в SQLite и переживает перезапуск, а
+  ручной `/run` и кнопка `Создать обзор` продолжают работать.
 - Telegram sync работает через выделенную MTProto session. Импорт Telegram
   Desktop `tdata` намеренно запрещен.
 - Сырые Telegram-записи сохраняются append-only. Все производные документы и
@@ -43,7 +47,7 @@ Nest** и помогает планировать события в Google Calen
 - Дайджесты публикуются только в `Digest`; команды, прогресс, статусы и ошибки
   уходят в `Status`; запросы на подтверждение календарных событий приходят в
   `Calendar`; `Chat` остается местом учебных материалов и ручного общения.
-- Если Codex или Google-модели работают медленно или временно недоступны, Sova не теряет
+- Если Gemini или другие Google-модели работают медленно или временно недоступны, Sova не теряет
   сообщения: включается conservative fallback, данные сохраняются, а
   предупреждение отправляется в `Status`.
 - Google OAuth login и Calendar approval flow уже поддержаны. Для созданных
@@ -94,9 +98,10 @@ go run ./cmd/sova sync
 go run ./cmd/sova serve
 ```
 
-После этого в служебном топике `Status` можно отправить `/run`, а в учебном
-топике `Chat` можно нажать закрепленную кнопку `Создать обзор`. Готовый
-результат будет отправлен в `Digest`, а не в `Chat`.
+После этого в служебном топике `Status` можно отправить `/run` или управлять
+ежедневным запуском через `/daily on|off|status`, а в учебном топике `Chat`
+можно нажать закрепленную кнопку `Создать обзор`. Готовый результат будет
+отправлен в `Digest`, а не в `Chat`.
 
 Чтобы отправить приветственные сообщения во все четыре топика Nest, выполните:
 
@@ -107,21 +112,24 @@ go run ./cmd/sova nest-seed-topics
 Эту команду достаточно выполнить один раз после настройки Nest. Закрепите
 управляющее сообщение в `Chat`: та же кнопка продолжит работать после
 перезапусков `serve`, пока активен long polling. Текстовые команды
-`/run`, `/button` и `/help` отправляйте в `Status`.
+`/run`, `/daily on|off|status`, `/button` и `/help` отправляйте в `Status`.
 
 ## Список основных команд
 
 | Команда | Описание |
 | --- | --- |
-| `go run ./cmd/sova doctor` | Проверяет Go, SQLite, Telegram session/config, Nest, Google model route, Codex и Google Calendar config. |
+| `go run ./cmd/sova doctor` | Проверяет SQLite, серверные пути, Telegram/Nest/Workspace, Google model route и Google Calendar config без требований к Go toolchain, Ollama или Codex CLI. |
 | `go run ./cmd/sova telegram-status` | Показывает, авторизована ли выделенная MTProto session. |
 | `go run ./cmd/sova telegram-login` | Запускает интерактивную авторизацию в Telegram по коду. |
 | `go run ./cmd/sova telegram-login-qr` | Запускает авторизацию в Telegram через QR. |
 | `go run ./cmd/sova sync --dry-run` | Проверяет учебный Nest allowlist и считает новые сообщения без записи в БД. |
 | `go run ./cmd/sova sync` | Записывает новые Telegram сообщения в SQLite/raw JSONL и обновляет индекс. |
 | `go run ./cmd/sova run --trigger manual` | Запускает один обзор вручную с проверкой общего cooldown. |
+| `/daily on`, `/daily off`, `/daily status` | Включает, выключает или показывает только ежедневный автозапуск; ручные триггеры не отключаются. |
 | `go run ./cmd/sova serve` | Запускает локальный Nest controller для команд в `Status`, кнопки в `Chat` и daily scheduler. |
 | `go run ./cmd/sova workspace serve` | Запускает отдельный Workspace bot для `InSync v1.0`: clusters, edit-sync, task cards и Stage 6 document commands. |
+| `go run ./cmd/sova serve-all` | Запускает Nest и Workspace в одном процессе; основной режим для alwaysdata Free. |
+| `go run ./cmd/sova healthcheck` | Проверяет свежий heartbeat живого `serve-all` и существующую SQLite DB без Gemini-запроса. |
 | `/doc new`, `/doc append`, `/doc publish` | Команды заметок: source берётся из `Заметки` или reply, preview публикации уходит в `Inbox`, approve публикует в `Полезное`. |
 | `/template new`, `/template append`, `/template type` | Команды заготовок: новый шаблон спрашивает тип, типы хранятся в индексе и могут быть переименованы/архивированы. |
 | `/collection new`, `/collection add`, `/collection show` | Команды коллекций: создают отдельную карточку коллекции и один общий индекс ссылок на коллекции. |
@@ -135,9 +143,9 @@ go run ./cmd/sova nest-seed-topics
 | `go run ./cmd/sova version` | Показывает встроенные версию и git commit. |
 | `go run ./cmd/sova workspace announce-release` | Показывает dry-run релизного сообщения; `--execute` требует deployment receipt того же commit. |
 | `go run ./cmd/sova nest-seed-topics` | Отправляет стартовые сообщения в `Chat`, `Digest`, `Calendar`, `Status` для ручного закрепления. |
-| `go run ./cmd/sova retry-run --id RUN_ID` | Без повторной синхронизации восстанавливает совместимый run после ошибки модели, Codex или подтверждённой ошибки публикации. |
+| `go run ./cmd/sova retry-run --id RUN_ID` | Без повторной синхронизации восстанавливает совместимый run после ошибки Google-модели, Gemini digest или подтверждённой ошибки публикации. |
 | `go run ./cmd/sova resolve-publication ...` | После ручной сверки разрешает неоднозначную доставку Nest как `sent` либо `retry`; автоматически неизвестный исход не пересылается. |
-| `go run ./cmd/sova model-smoke --all` | Проверяет доступность и структурированный ответ всех Google-моделей маршрута без сравнительного benchmark. |
+| `go run ./cmd/sova model-smoke --all` | Проверяет доступность и структурированный ответ всех Google-моделей маршрута, включая финальный Gemini digest, без сравнительного benchmark. |
 | `go run ./cmd/sova qwen-smoke` | Временная совместимая команда для локального Qwen tooling; production Nest её не использует. |
 | `go run ./cmd/sova qwen-calibrate --run-id RUN_ID` | Калибрует Qwen на сообщениях конкретного запуска без вывода текста. |
 | `go run ./cmd/sova qwen-calibrate --run-id RUN_ID --model qwen3:8b` | Калибрует альтернативную локальную Ollama-модель. |

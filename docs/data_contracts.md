@@ -21,10 +21,20 @@ minutes ago. A `running` record older than the two-hour process lease is closed
 as failed before a new run starts, so a crashed worker cannot block Nest
 forever.
 
-If final Codex generation is unavailable, a new run publishes a compact
+The `nest_settings` row `daily_overview_enabled` controls only whether the
+local scheduler may enqueue the `scheduled` trigger. A missing row means
+enabled, preserving behavior during upgrade. `/daily on|off|status` is accepted
+only in the Nest `Status` topic; changes are persisted before confirmation and
+survive controller restarts. Disabling the daily trigger does not cancel an
+already running overview and does not disable `manual` or `nest_button` runs.
+If the setting cannot be read at the scheduled time, that automatic run is
+skipped rather than guessed.
+
+If final Gemini generation is unavailable, a new run publishes a compact
 provenance-preserving fallback digest and records the degraded mode in its
-summary. Legacy runs that failed specifically at the Codex step may be retried
-from their saved compact bundle without repeating Telegram sync.
+summary. Legacy runs that failed specifically at the Codex step and current
+Gemini-digest failures may be retried from their saved compact bundle without
+repeating Telegram sync; recovery generation uses Gemini.
 
 The user-facing digest is a single bounded plain-text summary rather than a
 message-by-message dump. Related messages are synthesized into at most six

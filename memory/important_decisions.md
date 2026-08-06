@@ -5,7 +5,8 @@
 - Production Nest performs bounded structured classification and event
   extraction through the ordered Google-model route; Qwen remains transitional
   experiment tooling only.
-- Codex receives a compact run bundle and produces the final digest.
+- Gemini receives a compact run bundle and produces the final digest; Codex CLI
+  is not a production dependency.
 - No Telegram Desktop `tdata` fallback.
 - The Nest `Status` topic is the service topic for text commands and operations.
 - The Nest `Chat` topic is user-controlled for study materials, manual notes,
