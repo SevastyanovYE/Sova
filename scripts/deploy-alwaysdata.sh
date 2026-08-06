@@ -43,7 +43,7 @@ done
 [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) || { echo "error: invalid SSH port" >&2; exit 64; }
 case "$arch" in amd64|arm64) ;; *) echo "error: --arch must be amd64 or arm64" >&2; exit 64;; esac
 
-for command_name in ssh scp tar; do
+for command_name in ssh scp tar gzip; do
   command -v "$command_name" >/dev/null 2>&1 || { echo "error: missing command: $command_name" >&2; exit 69; }
 done
 
@@ -69,21 +69,32 @@ else
   archive_sha="$(shasum -a 256 "$package" | awk '{print $1}')"
 fi
 archive_bytes="$(wc -c < "$package" | tr -d '[:space:]')"
+payload_bytes="$(gzip -dc "$package" | wc -c | tr -d '[:space:]')"
+binary_bytes="$(tar -xOzf "$package" sova-alwaysdata/bin/sova | wc -c | tr -d '[:space:]')"
 remote_root="/home/$account/sova"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 incoming="$remote_root/.incoming/sova-$stamp.tar.gz"
 ssh_target="$account@$host"
 
 echo "Checking free space on $host..."
-ssh -p "$port" "$ssh_target" bash -s -- "$remote_root" "$archive_bytes" <<'REMOTE_PREFLIGHT'
+ssh -p "$port" "$ssh_target" bash -s -- \
+  "$remote_root" "$archive_bytes" "$payload_bytes" "$binary_bytes" <<'REMOTE_PREFLIGHT'
 set -euo pipefail
 root=$1
 archive_bytes=$2
+payload_bytes=$3
+binary_bytes=$4
 mkdir -p "$root/.incoming"
 free_kib=$(df -Pk "$root" | awk 'NR==2 {print $4}')
 [[ "$free_kib" =~ ^[0-9]+$ ]] || { echo "error: cannot determine remote free space" >&2; exit 1; }
-# Archive + extraction + atomic binary copy + 32 MiB operating headroom.
-required_kib=$((archive_bytes * 3 / 1024 + 32768))
+# Uploaded archive + full extraction + atomic binary copy + optional rollback
+# copy of the current binary + 32 MiB operating headroom.
+existing_binary_bytes=0
+if [[ -f "$root/bin/sova" ]]; then
+  existing_binary_bytes=$(wc -c < "$root/bin/sova" | tr -d '[:space:]')
+fi
+required_bytes=$((archive_bytes + payload_bytes + binary_bytes + existing_binary_bytes))
+required_kib=$(((required_bytes + 1023) / 1024 + 32768))
 if ((free_kib < required_kib)); then
   echo "error: insufficient remote space: ${free_kib} KiB free, ${required_kib} KiB required" >&2
   exit 1
