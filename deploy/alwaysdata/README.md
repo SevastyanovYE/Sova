@@ -146,10 +146,20 @@ sed -i 's#<account>#ВАШ_АККАУНТ#g' .env
 chmod 600 .env
 ```
 
-Заполнить `.env` непосредственно через SSH-редактор или безопасный SFTP. Не
-передавать значения токенов в аргументах команд и не присылать их в чат. Все
-пути в `.env` должны быть абсолютными и вести внутрь `/home/<account>/sova/data`.
-Ollama/Qwen/Codex переменных в server template нет.
+Для переноса существующего production env без печати секретов использовать
+локальный helper, затем загрузить результат через SFTP/SCP:
+
+```bash
+scripts/prepare-alwaysdata-env.sh \
+  --source .state/migration/sova.env.old \
+  --output .state/migration/sova.env.alwaysdata \
+  --account <account>
+```
+
+Либо заполнить `.env` непосредственно через SSH-редактор. Не передавать значения
+токенов в аргументах команд и не присылать их в чат. Все пути должны быть
+абсолютными и вести внутрь `/home/<account>/sova/data`. Ollama/Qwen/Codex
+переменных в server template нет.
 
 `GOMEMLIMIT` читается Go runtime до запуска `main`, поэтому задаётся в поле
 Environment variables alwaysdata и дублируется безопасным default в runner, а

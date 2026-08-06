@@ -14,6 +14,7 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - добавили управление ежедневным обзором из Nest через `/daily on|off|status` с сохранением настройки в SQLite
 - добавили единый foreground-режим `serve-all`, локальный heartbeat/healthcheck и переносимый static `linux/amd64` deployment kit для alwaysdata Free
 - добавили безопасные SQLite backup/restore-скрипты с `quick_check`, checksum и явным rollback
+- добавили безопасную локальную подготовку alwaysdata `.env` из старого production env без печати секретов
 - добавили Inbox-команды просмотра и безопасного изменения сохранённых цитат с preview, ручным подтверждением неоднозначного Telegram edit и восстановлением после перезапуска
 - добавили durable outbox публикации дайджеста Nest и календарных карточек с явной ручной сверкой неоднозначной доставки
 
