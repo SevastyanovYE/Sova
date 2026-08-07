@@ -1,29 +1,42 @@
 # Current State
 
-- Sova 0.2.0 commit `a921c333` is active on the old production server through
-  the existing two systemd units, but that host is scheduled to be disabled on
-  2026-08-09. It was installed atomically after the alwaysdata cutover rollback;
-  both units report active with zero restarts, the production SQLite database
-  reports `quick_check=ok` in WAL mode, and the `nest_settings` migration for
-  `/daily on|off|status` is present. The previous 0.1.0 binary and a verified
-  pre-upgrade SQLite backup are retained on the old host.
+- Production moved to a Google Cloud Compute Engine `e2-micro` in
+  `us-central1-a` on 2026-08-07. It uses Debian 12, a 10 GB `pd-standard` disk,
+  a custom dual-stack subnet with no external IPv4, external IPv6 restricted
+  to the administrator's `/128` for SSH, no VM service account, no scheduled
+  snapshots, no Ops Agent, and one enabled `sova.service` running
+  `sova serve-all`. The unit reports active, one process, zero restarts, a
+  healthy heartbeat, and about 23 MB current RSS after cutover.
+- The final old-host SQLite snapshot passed SHA-256, `quick_check`, WAL
+  checkpoint `0|0|0`, strict doctors, semantic row-count comparison, and real
+  Gemini smoke after restore on GCP. A separate post-cutover application backup
+  was downloaded to local `.state/migration`, checksum-verified, and
+  restore-tested. The old VPS units are stopped but retained for rollback until
+  the GCP deployment is accepted; alwaysdata remains paused and is not
+  production.
+- The daily overview setting survived the move as
+  `daily_overview_enabled=false`. `/daily on|off|status` remains available in
+  the Nest `Status` topic, while `/run` and the Chat button remain independent.
+- Sova 0.2.0 commit `a921c333` is active through the new single GCP systemd
+  unit. The old VPS, scheduled to be disabled on
+  2026-08-09, retains the previous two-unit deployment and verified rollback
+  backups, but both old units are stopped.
 - Sova 0.2.0 commit `a921c333` is staged at `/home/syway/sova` on alwaysdata
-  with protected configuration, session, Google OAuth files, final-state data,
-  and a checksum-verified SQLite snapshot restored in `DELETE` mode. The
-  production Service remains paused and must not be enabled without a fresh
-  post-stop snapshot because the old server resumed accepting writes.
+  with protected configuration, session, Google OAuth files, stale cutover
+  data, and a checksum-verified SQLite snapshot restored in `DELETE` mode. The
+  Service remains paused and must not be enabled from this state.
 - alwaysdata support replied that they were "pretty confident" their storage
   supports the requested SQLite locks, atomic rename, and `fsync`. Offline
   doctors and the restore/semantic-count checks passed, but Gemini model smoke
   returned HTTP 403 from both the alwaysdata SSH host and a temporary real
-  Service host. The same key/models pass from the old US VPS, so outbound Gemini
-  access is the current migration blocker. The temporary test Service and its
-  files were removed after the failure.
+  Service host. The same key/models pass from the old US VPS and the new GCP
+  VM, so alwaysdata outbound Gemini access remains unsuitable. The temporary
+  test Service and its files were removed after the failure.
 - The 0.2.0 migration build adds a static `linux/amd64` package, one foreground
   `serve-all` process, `SIGHUP`/`SIGTERM`/`SIGINT` shutdown, heartbeat plus
   read-only DB healthcheck, `DELETE` journal-mode configuration, and verified
-  backup/restore tooling. Any replacement target still needs a real service-host
-  model smoke and resource measurement before production activation.
+  backup/restore tooling. GCP passed the real service-host model smoke and
+  resource measurement before production activation.
 - Production additive migrations and SQLite `quick_check` succeeded. A verified
   pre-deployment database, binary, and environment backup remain under
   `/var/backups/sova/` and `/opt/sova/`/`/etc/sova/` respectively.

@@ -1,0 +1,27 @@
+[Unit]
+Description=Sova Nest and Workspace services
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=sova
+Group=sova
+WorkingDirectory=/opt/sova
+EnvironmentFile=/etc/sova/sova.env
+Environment=GOMEMLIMIT=700MiB
+Environment=GOGC=75
+ExecStart=/opt/sova/sova serve-all
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+MemoryMax=850M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

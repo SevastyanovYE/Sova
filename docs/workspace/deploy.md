@@ -1,6 +1,9 @@
 # Sova.Workspace Deploy
 
-This deploy path runs the Workspace bot as a Linux `systemd` service.
+This legacy deploy path runs Nest and Workspace as separate Linux `systemd`
+services. Low-memory production hosts should use the single
+`deploy/systemd/sova.service` unit documented in `deploy/gcp/README.md` so both
+controllers share one `sova serve-all` process.
 
 ## Server Layout
 
