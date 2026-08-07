@@ -11,20 +11,22 @@
   checkpoint `0|0|0`, strict doctors, semantic row-count comparison, and real
   Gemini smoke after restore on GCP. A separate post-cutover application backup
   was downloaded to local `.state/migration`, checksum-verified, and
-  restore-tested. The old VPS units are stopped but retained for rollback until
-  the GCP deployment is accepted; alwaysdata remains paused and is not
-  production.
+  restore-tested. After user acceptance, the old VPS runtime, data, backups,
+  service units, migration temporaries, and dedicated `sova` system account
+  were removed. The original server-access ZIP and the verified local migration
+  backups remain available off-server.
 - The daily overview setting survived the move as
   `daily_overview_enabled=false`. `/daily on|off|status` remains available in
   the Nest `Status` topic, while `/run` and the Chat button remain independent.
 - Sova 0.2.0 commit `a921c333` is active through the new single GCP systemd
-  unit. The old VPS, scheduled to be disabled on
-  2026-08-09, retains the previous two-unit deployment and verified rollback
-  backups, but both old units are stopped.
-- Sova 0.2.0 commit `a921c333` is staged at `/home/syway/sova` on alwaysdata
-  with protected configuration, session, Google OAuth files, stale cutover
-  data, and a checksum-verified SQLite snapshot restored in `DELETE` mode. The
-  Service remains paused and must not be enabled from this state.
+  unit. GCP keeps one checksum-verified post-cutover SQLite backup and its
+  checksum sidecar under `/var/backups/sova`; obsolete staging directories and
+  duplicate server-side migration backups were removed.
+- The alwaysdata staging tree and the dedicated temporary migration SSH key were
+  removed after GCP acceptance. Its paused Service registration still needs to
+  be deleted from the alwaysdata administration panel because the browser
+  session expired during cleanup; it cannot start because its command target no
+  longer exists.
 - alwaysdata support replied that they were "pretty confident" their storage
   supports the requested SQLite locks, atomic rename, and `fsync`. Offline
   doctors and the restore/semantic-count checks passed, but Gemini model smoke
@@ -38,8 +40,8 @@
   backup/restore tooling. GCP passed the real service-host model smoke and
   resource measurement before production activation.
 - Production additive migrations and SQLite `quick_check` succeeded. A verified
-  pre-deployment database, binary, and environment backup remain under
-  `/var/backups/sova/` and `/opt/sova/`/`/etc/sova/` respectively.
+  post-cutover SQLite backup remains under `/var/backups/sova/`; the production
+  binary and protected environment remain under `/opt/sova/` and `/etc/sova/`.
 - Existing Workspace command-help messages were registered and edited in place:
   Inbox `497`, Tasks `498`, Notes `499`, Experience `500`, Useful `501`,
   Templates `502`, and Collections `503`. No replacement command-help messages
