@@ -1,10 +1,12 @@
 # Current State
 
-- Sova 0.1.0 remains active on the old production server through two systemd
-  units, but that host is scheduled to be disabled on 2026-08-09. A cutover
-  attempt on 2026-08-07 was rolled back before the new target accepted any
-  Telegram writes; both old units restarted successfully and the production
-  SQLite database still reports `quick_check=ok` in WAL mode.
+- Sova 0.2.0 commit `a921c333` is active on the old production server through
+  the existing two systemd units, but that host is scheduled to be disabled on
+  2026-08-09. It was installed atomically after the alwaysdata cutover rollback;
+  both units report active with zero restarts, the production SQLite database
+  reports `quick_check=ok` in WAL mode, and the `nest_settings` migration for
+  `/daily on|off|status` is present. The previous 0.1.0 binary and a verified
+  pre-upgrade SQLite backup are retained on the old host.
 - Sova 0.2.0 commit `a921c333` is staged at `/home/syway/sova` on alwaysdata
   with protected configuration, session, Google OAuth files, final-state data,
   and a checksum-verified SQLite snapshot restored in `DELETE` mode. The
