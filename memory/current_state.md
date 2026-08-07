@@ -1,17 +1,27 @@
 # Current State
 
-- Sova 0.1.0 remains on the old production server through two systemd units,
-  but that host is scheduled to be disabled on 2026-08-09. The local working
-  tree is the 0.2.0 alwaysdata Free migration candidate and has not been deployed,
-  tagged, announced, or given a deployment receipt.
-- Read-only verification on 2026-08-07 found both old units active with zero
-  restarts, exact commit `fe41b597d70f`, combined idle RSS about 44 MiB, SQLite
-  `quick_check=ok` in WAL mode, and roughly 51 MiB under `/var/lib/sova`.
-- The migration candidate adds a static `linux/amd64` package, one foreground
+- Sova 0.1.0 remains active on the old production server through two systemd
+  units, but that host is scheduled to be disabled on 2026-08-09. A cutover
+  attempt on 2026-08-07 was rolled back before the new target accepted any
+  Telegram writes; both old units restarted successfully and the production
+  SQLite database still reports `quick_check=ok` in WAL mode.
+- Sova 0.2.0 commit `a921c333` is staged at `/home/syway/sova` on alwaysdata
+  with protected configuration, session, Google OAuth files, final-state data,
+  and a checksum-verified SQLite snapshot restored in `DELETE` mode. The
+  production Service remains paused and must not be enabled without a fresh
+  post-stop snapshot because the old server resumed accepting writes.
+- alwaysdata support replied that they were "pretty confident" their storage
+  supports the requested SQLite locks, atomic rename, and `fsync`. Offline
+  doctors and the restore/semantic-count checks passed, but Gemini model smoke
+  returned HTTP 403 from both the alwaysdata SSH host and a temporary real
+  Service host. The same key/models pass from the old US VPS, so outbound Gemini
+  access is the current migration blocker. The temporary test Service and its
+  files were removed after the failure.
+- The 0.2.0 migration build adds a static `linux/amd64` package, one foreground
   `serve-all` process, `SIGHUP`/`SIGTERM`/`SIGINT` shutdown, heartbeat plus
   read-only DB healthcheck, `DELETE` journal-mode configuration, and verified
-  backup/restore tooling. Alwaysdata filesystem locking support and real 256 MB
-  peak RSS remain manual gates.
+  backup/restore tooling. Any replacement target still needs a real service-host
+  model smoke and resource measurement before production activation.
 - Production additive migrations and SQLite `quick_check` succeeded. A verified
   pre-deployment database, binary, and environment backup remain under
   `/var/backups/sova/` and `/opt/sova/`/`/etc/sova/` respectively.
