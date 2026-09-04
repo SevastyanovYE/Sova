@@ -23,8 +23,9 @@ Documentation-only edits, unfinished work, and isolated refactors remain under
 4. Run feature-specific smoke tests without sending production messages.
 5. Back up the production SQLite database.
 6. Build the exact commit with embedded version and commit metadata.
-7. Deploy the configured production runtime: one alwaysdata `serve-all` Service,
-   or both legacy `sova-workspace.service` and `sova-nest.service` units.
+7. Deploy the configured production runtime: the current GCP production uses
+   one `sova.service` running `serve-all`; the two-unit systemd and alwaysdata
+   paths are legacy-only.
 8. Run strict doctors, inspect the active service logs/journals, and complete manual smoke
    flows in Test Lab.
 9. Record a successful production deployment receipt for the exact commit.

@@ -13,21 +13,24 @@ import (
 // approved Workspace note publication. Revision and message Text are durable
 // user content and must never be copied into compact operational indexes.
 type WorkspacePublishRun struct {
-	ID              int64
-	DocumentID      int64
-	Revision        string
-	Model           string
-	RouteSummary    string
-	Status          string
-	PreviewChatID   int64
-	PreviewTopicID  int
-	StatusMessageID int
-	LastError       string
-	ApprovedAt      *time.Time
-	CompletedAt     *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	Messages        []WorkspacePublishMessage
+	ID                     int64
+	DocumentID             int64
+	Revision               string
+	Model                  string
+	RouteSummary           string
+	Status                 string
+	PreviewChatID          int64
+	PreviewTopicID         int
+	StatusMessageID        int
+	ManualEditorUserID     int64
+	ManualInputMessageID   int
+	ManualReplacementRunID int64
+	LastError              string
+	ApprovedAt             *time.Time
+	CompletedAt            *time.Time
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	Messages               []WorkspacePublishMessage
 }
 
 type WorkspacePublishMessage struct {
@@ -235,6 +238,299 @@ ORDER BY r.id DESC LIMIT 1`, documentID, callbackMessageID)
 	return run, err == nil, err
 }
 
+func (s *Store) WorkspacePublishRunByFinalMessage(ctx context.Context, chatID int64, topicID, messageID int) (WorkspacePublishRun, bool, error) {
+	row := s.db.QueryRowContext(ctx, workspacePublishRunSelect()+`
+JOIN workspace_publish_messages m ON m.run_id = r.id
+WHERE m.kind = 'final' AND m.status = 'sent' AND m.chat_id = ?
+  AND m.topic_id = ? AND m.message_id = ?
+ORDER BY r.id DESC LIMIT 1`, chatID, topicID, messageID)
+	run, err := scanWorkspacePublishRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkspacePublishRun{}, false, nil
+	}
+	if err != nil {
+		return WorkspacePublishRun{}, false, err
+	}
+	run.Messages, err = s.WorkspacePublishMessages(ctx, run.ID, "")
+	return run, err == nil, err
+}
+
+func (s *Store) LatestPublishedWorkspacePublishRun(ctx context.Context, documentID int64) (WorkspacePublishRun, bool, error) {
+	run, err := scanWorkspacePublishRun(s.db.QueryRowContext(ctx, workspacePublishRunSelect()+`
+WHERE r.document_id = ? AND r.status IN ('finalizing', 'completed')
+ORDER BY r.id DESC LIMIT 1`, documentID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkspacePublishRun{}, false, nil
+	}
+	if err != nil {
+		return WorkspacePublishRun{}, false, err
+	}
+	run.Messages, err = s.WorkspacePublishMessages(ctx, run.ID, "final")
+	return run, err == nil, err
+}
+
+func (s *Store) WorkspaceUsefulLegacyMessageIDsForDocument(ctx context.Context, documentID int64, chatID int64, topicID int) ([]int, error) {
+	if documentID <= 0 || chatID == 0 || topicID <= 0 {
+		return nil, fmt.Errorf("legacy useful publication identity is incomplete")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT d.derived_message_id
+FROM workspace_document_parts p
+JOIN workspace_derived_messages d
+  ON d.source_chat_id = p.source_chat_id AND d.source_message_id = p.source_message_id
+WHERE p.document_id = ? AND d.derived_chat_id = ? AND d.derived_topic_id = ?
+  AND d.status IN ('published', 'needs_review')
+  AND d.derived_type LIKE 'legacy_migration_%'
+ORDER BY d.derived_message_id`, documentID, chatID, topicID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
+}
+
+func (s *Store) ArchiveWorkspaceUsefulPublication(ctx context.Context, documentID int64, chatID int64, topicID int, messageIDs []int, now time.Time) error {
+	if documentID <= 0 || chatID == 0 || topicID <= 0 || len(messageIDs) == 0 {
+		return fmt.Errorf("useful publication identity is incomplete")
+	}
+	seen := map[int]struct{}{}
+	ids := make([]int, 0, len(messageIDs))
+	for _, id := range messageIDs {
+		if id <= 0 {
+			return fmt.Errorf("useful publication message ID must be positive")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status string
+	var targetChatID int64
+	var targetTopicID int
+	if err := tx.QueryRowContext(ctx, `
+SELECT status, target_chat_id, target_topic_id FROM workspace_documents WHERE id = ?`, documentID).Scan(&status, &targetChatID, &targetTopicID); err != nil {
+		return err
+	}
+	if status != "published" && status != "needs_review" {
+		return fmt.Errorf("workspace document %d is %s, not published useful", documentID, status)
+	}
+	if targetChatID != chatID || targetTopicID != topicID {
+		return fmt.Errorf("workspace document %d is not in the configured Useful topic", documentID)
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+3)
+	for index, id := range ids {
+		placeholders[index] = "?"
+		args = append(args, id)
+	}
+	nowRaw := now.UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_documents SET status = 'archived', updated_at = ? WHERE id = ?`, nowRaw, documentID); err != nil {
+		return err
+	}
+	derivedArgs := append([]any{nowRaw, chatID, topicID}, args...)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_derived_messages SET status = 'closed', updated_at = ?
+WHERE derived_chat_id = ? AND derived_topic_id = ? AND derived_message_id IN (`+strings.Join(placeholders, ",")+`)`, derivedArgs...); err != nil {
+		return err
+	}
+	publishArgs := append([]any{nowRaw, chatID, topicID}, args...)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE workspace_publish_messages SET status = 'deleted', updated_at = ?
+WHERE kind = 'final' AND status = 'sent' AND chat_id = ? AND topic_id = ?
+  AND message_id IN (`+strings.Join(placeholders, ",")+`)`, publishArgs...); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `
+DELETE FROM search_embeddings WHERE document_id IN (
+  SELECT id FROM search_documents WHERE scope = 'workspace' AND message_id = ?
+)`, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE search_documents SET status = 'deleted', index_status = 'error', next_attempt_at = NULL,
+    last_error = 'source message deleted or excluded', updated_at = ?
+WHERE scope = 'workspace' AND message_id = ?`, nowRaw, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) BeginWorkspaceManualPublishEdit(ctx context.Context, runID, userID int64, now time.Time) error {
+	if runID <= 0 || userID <= 0 {
+		return fmt.Errorf("workspace publish run and editor are required")
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workspace_publish_runs
+SET manual_editor_user_id = ?, updated_at = ?
+WHERE id = ? AND status = 'awaiting_approval'
+  AND manual_input_message_id = 0 AND manual_replacement_run_id = 0
+  AND (manual_editor_user_id = 0 OR manual_editor_user_id = ?)`,
+		userID, now.UTC().Format(time.RFC3339Nano), runID, userID)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(result, "awaiting workspace publish run %d is not available for manual edit", runID)
+}
+
+func (s *Store) CancelWorkspaceManualPublishEdit(ctx context.Context, runID, userID int64, now time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workspace_publish_runs
+SET manual_editor_user_id = 0, manual_input_message_id = 0,
+    manual_replacement_run_id = 0, updated_at = ?
+WHERE id = ? AND status = 'awaiting_approval' AND manual_editor_user_id = ?
+  AND manual_replacement_run_id = 0`, now.UTC().Format(time.RFC3339Nano), runID, userID)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(result, "manual edit for workspace publish run %d is not awaiting input", runID)
+}
+
+func (s *Store) AwaitingWorkspaceManualPublishInputs(ctx context.Context, limit int) ([]WorkspacePublishRun, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, workspacePublishRunSelect()+`
+WHERE r.status = 'awaiting_approval' AND r.manual_editor_user_id != 0
+  AND r.manual_input_message_id = 0 AND r.manual_replacement_run_id = 0
+ORDER BY r.id LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []WorkspacePublishRun
+	for rows.Next() {
+		run, err := scanWorkspacePublishRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func (s *Store) CreateWorkspaceManualPublishPreview(ctx context.Context, baseRunID, editorUserID int64, inputMessageID int, texts []string, now time.Time) (WorkspacePublishRun, error) {
+	if baseRunID <= 0 || editorUserID <= 0 || inputMessageID <= 0 || len(texts) == 0 {
+		return WorkspacePublishRun{}, fmt.Errorf("manual workspace publish input is incomplete")
+	}
+	for _, text := range texts {
+		if strings.TrimSpace(text) == "" {
+			return WorkspacePublishRun{}, fmt.Errorf("manual workspace publish preview contains an empty message")
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return WorkspacePublishRun{}, err
+	}
+	defer tx.Rollback()
+	var documentID int64
+	var status string
+	var previewChatID int64
+	var previewTopicID int
+	var inputID int
+	var replacementID int64
+	if err := tx.QueryRowContext(ctx, `
+SELECT document_id, status, preview_chat_id, preview_topic_id,
+       manual_input_message_id, manual_replacement_run_id
+FROM workspace_publish_runs
+WHERE id = ? AND manual_editor_user_id = ?`, baseRunID, editorUserID).Scan(
+		&documentID, &status, &previewChatID, &previewTopicID, &inputID, &replacementID); err != nil {
+		return WorkspacePublishRun{}, err
+	}
+	if status != "awaiting_approval" {
+		return WorkspacePublishRun{}, fmt.Errorf("workspace publish preview is %s, not awaiting manual input", status)
+	}
+	if inputID == inputMessageID && replacementID > 0 {
+		if err := tx.Commit(); err != nil {
+			return WorkspacePublishRun{}, err
+		}
+		return s.WorkspacePublishRunByID(ctx, replacementID)
+	}
+	if inputID != 0 || replacementID != 0 {
+		return WorkspacePublishRun{}, fmt.Errorf("workspace publish preview already captured another manual input")
+	}
+	nowRaw := now.UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `
+INSERT INTO workspace_publish_runs(
+    document_id, revision, model, route_summary, status, preview_chat_id,
+    preview_topic_id, status_message_id, last_error, created_at, updated_at
+) VALUES(?, '', 'manual', 'manual final edit', 'preview_sending', ?, ?, 0, '', ?, ?)`,
+		documentID, previewChatID, previewTopicID, nowRaw, nowRaw)
+	if err != nil {
+		return WorkspacePublishRun{}, err
+	}
+	childID, err := result.LastInsertId()
+	if err != nil {
+		return WorkspacePublishRun{}, err
+	}
+	for index, text := range texts {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO workspace_publish_messages(
+    run_id, kind, position, text, status, created_at, updated_at
+) VALUES(?, 'preview', ?, ?, 'pending', ?, ?)`, childID, index+1, text, nowRaw, nowRaw); err != nil {
+			return WorkspacePublishRun{}, err
+		}
+	}
+	result, err = tx.ExecContext(ctx, `
+UPDATE workspace_publish_runs
+SET manual_input_message_id = ?, manual_replacement_run_id = ?, updated_at = ?
+WHERE id = ? AND status = 'awaiting_approval' AND manual_editor_user_id = ?
+  AND manual_input_message_id = 0 AND manual_replacement_run_id = 0`,
+		inputMessageID, childID, nowRaw, baseRunID, editorUserID)
+	if err != nil {
+		return WorkspacePublishRun{}, err
+	}
+	if err := requireOneRow(result, "manual input for workspace publish run %d was already captured", baseRunID); err != nil {
+		return WorkspacePublishRun{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return WorkspacePublishRun{}, err
+	}
+	return s.WorkspacePublishRunByID(ctx, childID)
+}
+
+func (s *Store) ResetWorkspaceManualPublishCapture(ctx context.Context, baseRunID, childRunID int64, now time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE workspace_publish_runs
+SET manual_input_message_id = 0, manual_replacement_run_id = 0, updated_at = ?
+WHERE id = ? AND status = 'awaiting_approval' AND manual_replacement_run_id = ?`,
+		now.UTC().Format(time.RFC3339Nano), baseRunID, childRunID)
+	if err != nil {
+		return err
+	}
+	return requireOneRow(result, "manual capture for workspace publish run %d not found", baseRunID)
+}
+
+func (s *Store) RecoverWorkspaceManualPublishInputs(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE workspace_publish_runs
+SET manual_input_message_id = 0, manual_replacement_run_id = 0, updated_at = ?
+WHERE status = 'awaiting_approval' AND manual_editor_user_id != 0
+  AND manual_replacement_run_id != 0
+  AND manual_replacement_run_id IN (
+      SELECT id FROM workspace_publish_runs WHERE status IN ('failed', 'cancelled')
+  )`, now.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
 func (s *Store) WorkspacePublishMessages(ctx context.Context, runID int64, kind string) ([]WorkspacePublishMessage, error) {
 	query := workspacePublishMessageSelect() + ` WHERE run_id = ?`
 	args := []any{runID}
@@ -438,10 +734,14 @@ func (s *Store) ApproveWorkspacePublishRun(ctx context.Context, runID int64, now
 	}
 	defer tx.Rollback()
 	var status string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM workspace_publish_runs WHERE id = ?`, runID).Scan(&status); err != nil {
+	var manualEditorUserID int64
+	if err := tx.QueryRowContext(ctx, `SELECT status, manual_editor_user_id FROM workspace_publish_runs WHERE id = ?`, runID).Scan(&status, &manualEditorUserID); err != nil {
 		return WorkspacePublishRun{}, err
 	}
 	if status == "awaiting_approval" {
+		if manualEditorUserID != 0 {
+			return WorkspacePublishRun{}, fmt.Errorf("workspace publish run %d is awaiting manual text", runID)
+		}
 		nowRaw := now.UTC().Format(time.RFC3339Nano)
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO workspace_publish_messages(run_id, kind, position, text, status, created_at, updated_at)
@@ -620,7 +920,8 @@ ORDER BY r.id DESC LIMIT ?`, limit)
 func workspacePublishRunSelect() string {
 	return `
 SELECT r.id, r.document_id, r.revision, r.model, r.route_summary, r.status, r.preview_chat_id,
-       r.preview_topic_id, r.status_message_id, r.last_error, r.approved_at,
+       r.preview_topic_id, r.status_message_id, r.manual_editor_user_id,
+       r.manual_input_message_id, r.manual_replacement_run_id, r.last_error, r.approved_at,
        r.completed_at, r.created_at, r.updated_at
 FROM workspace_publish_runs r `
 }
@@ -637,7 +938,8 @@ func scanWorkspacePublishRun(scanner interface{ Scan(...any) error }) (Workspace
 	var approvedRaw, completedRaw sql.NullString
 	var createdRaw, updatedRaw string
 	if err := scanner.Scan(&run.ID, &run.DocumentID, &run.Revision, &run.Model, &run.RouteSummary, &run.Status,
-		&run.PreviewChatID, &run.PreviewTopicID, &run.StatusMessageID, &run.LastError,
+		&run.PreviewChatID, &run.PreviewTopicID, &run.StatusMessageID,
+		&run.ManualEditorUserID, &run.ManualInputMessageID, &run.ManualReplacementRunID, &run.LastError,
 		&approvedRaw, &completedRaw, &createdRaw, &updatedRaw); err != nil {
 		return WorkspacePublishRun{}, err
 	}

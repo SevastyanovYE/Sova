@@ -30,13 +30,15 @@ func (stub *stubGeminiDigestGenerator) GenerateContent(_ context.Context, reques
 }
 
 type fakeDigestPublicationTelegram struct {
-	sends int
-	err   error
-	next  int
+	sends    int
+	err      error
+	next     int
+	requests []nest.SendMessageRequest
 }
 
-func (f *fakeDigestPublicationTelegram) SendMessageResult(_ context.Context, _ nest.SendMessageRequest) (nest.Message, error) {
+func (f *fakeDigestPublicationTelegram) SendMessageResult(_ context.Context, request nest.SendMessageRequest) (nest.Message, error) {
 	f.sends++
+	f.requests = append(f.requests, request)
 	if f.err != nil {
 		return nest.Message{}, f.err
 	}
@@ -44,6 +46,17 @@ func (f *fakeDigestPublicationTelegram) SendMessageResult(_ context.Context, _ n
 		f.next = 100
 	}
 	return nest.Message{MessageID: f.next}, nil
+}
+
+func TestDigestSendTypedClientErrorIsNotAmbiguous(t *testing.T) {
+	err := &nest.BotAPIError{
+		Method:      "sendMessage",
+		StatusCode:  400,
+		Description: "Bad Request",
+	}
+	if digestSendIsAmbiguous(err) {
+		t.Fatal("typed Bot API client error was classified as ambiguous")
+	}
 }
 
 func TestPublishDigestUsesDurableSingleMessageClaim(t *testing.T) {
@@ -68,6 +81,9 @@ func TestPublishDigestUsesDurableSingleMessageClaim(t *testing.T) {
 	}
 	if fake.sends != 1 {
 		t.Fatalf("Telegram sends = %d", fake.sends)
+	}
+	if fake.requests[0].ParseMode != "" {
+		t.Fatalf("legacy digest parse mode = %q", fake.requests[0].ParseMode)
 	}
 	publications, err := store.OverviewPublicationsByRun(ctx, run.ID)
 	if err != nil || len(publications) != 1 || publications[0].Status != "sent" {
@@ -97,6 +113,32 @@ func TestPublishDigestDoesNotRetryAmbiguousDelivery(t *testing.T) {
 	}
 	if failing.sends != 1 || good.sends != 0 {
 		t.Fatalf("failing sends=%d retry sends=%d", failing.sends, good.sends)
+	}
+}
+
+func TestPublishDigestRetriesDefinitelyUnsentDialFailureAndUsesHTML(t *testing.T) {
+	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	run, err := store.TryStartOverview(ctx, "manual", time.Now().UTC(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{NestChatID: -1001, NestTopics: config.TopicIDs{Digest: 2, Calendar: 3, Status: 4, Chat: 5}}
+	digest := "🦉 <b>ОБЗОР SOVA</b>\n<i>Краткий итог.</i>"
+	failing := &fakeDigestPublicationTelegram{err: &nest.DefinitelyUnsentError{}}
+	if err := publishDigestWithClient(ctx, cfg, store, run.ID, digest, failing); err == nil {
+		t.Fatal("definitely-unsent publish unexpectedly succeeded")
+	}
+	good := &fakeDigestPublicationTelegram{}
+	if err := publishDigestWithClient(ctx, cfg, store, run.ID, digest, good); err != nil {
+		t.Fatal(err)
+	}
+	if failing.sends != 1 || good.sends != 1 || good.requests[0].ParseMode != "HTML" {
+		t.Fatalf("failed sends=%d retry sends=%d request=%+v", failing.sends, good.sends, good.requests)
 	}
 }
 
@@ -255,25 +297,27 @@ func TestCompactPromptTextKeepsHeadAndTail(t *testing.T) {
 	}
 }
 
-func TestDigestPromptUsesTelegramPlainTextFormat(t *testing.T) {
+func TestDigestPromptUsesStructuredSummaryAndLinkedNotes(t *testing.T) {
 	prompt := buildDigestPrompt("bundle")
-	for _, want := range []string{"🦉 ОБЗОР SOVA", "📅 КАЛЕНДАРЬ", "ИСТОЧНИКИ", "no more than 5 unique source URLs", "under 3600 Unicode characters", "Do not use Markdown"} {
+	for _, want := range []string{"summary", "notes", "source_id", "exactly the first 2 or 3", "calendar candidates are published separately", "3600-character"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q", want)
 		}
 	}
-	if strings.Contains(prompt, "every concrete item must include the original source URL on a separate") {
-		t.Fatalf("prompt retained the old link-per-item policy: %s", prompt)
+	for _, unwanted := range []string{"ГЛАВНОЕ", "📅 КАЛЕНДАРЬ", "ИСТОЧНИКИ", "numbered plain-text references"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("prompt retained old digest section %q", unwanted)
+		}
 	}
 }
 
 func TestParseGeminiDigestPayload(t *testing.T) {
-	got, err := parseGeminiDigestPayload("```json\n{\"digest\":\"  обзор  \"}\n```")
+	got, err := parseGeminiDigestPayload("```json\n" + `{"summary":"  Главные   события  ","notes":[{"source_id":" m1 ","lead":" Нет   ясности ","details":" с расписанием "}]}` + "\n```")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "обзор" {
-		t.Fatalf("digest = %q", got)
+	if got.Summary != "Главные события" || len(got.Notes) != 1 || got.Notes[0].SourceID != "m1" || got.Notes[0].Lead != "Нет ясности" || got.Notes[0].Details != "с расписанием" {
+		t.Fatalf("payload = %+v", got)
 	}
 }
 
@@ -289,7 +333,7 @@ func TestGenerateGeminiDigestFallsBackAndRecordsTelemetry(t *testing.T) {
 	bundle := "- id=`m1` link=https://t.me/c/100/1\n  text: Дедлайн завтра.\n"
 	client := &stubGeminiDigestGenerator{
 		responses: []googleai.GenerateResponse{{}, {
-			Text:  `{"digest":"🦉 ОБЗОР SOVA\n\nГЛАВНОЕ\n• Дедлайн завтра [1]\n\nИСТОЧНИКИ\n[1] https://t.me/c/100/1"}`,
+			Text:  `{"summary":"Дедлайн перенесён на завтра.","notes":[{"source_id":"m1","lead":"Дедлайн перенесён","details":"на завтра для всей группы."}]}`,
 			Model: "fallback", PromptTokens: 10, OutputTokens: 20, TotalTokens: 30, FinishReason: "STOP",
 		}},
 		errors: []error{&googleai.APIError{StatusCode: 503, Status: "UNAVAILABLE"}, nil},
@@ -301,7 +345,7 @@ func TestGenerateGeminiDigestFallsBackAndRecordsTelemetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if modelName != "fallback" || !strings.Contains(digest, "Дедлайн завтра") {
+	if modelName != "fallback" || !strings.Contains(digest, `<a href="https://t.me/c/100/1">Дедлайн перенесён</a>`) {
 		t.Fatalf("model=%q digest=%q", modelName, digest)
 	}
 	if len(client.requests) != 2 || client.requests[0].Model != "primary" || client.requests[1].Model != "fallback" {
@@ -312,18 +356,20 @@ func TestGenerateGeminiDigestFallsBackAndRecordsTelemetry(t *testing.T) {
 	}
 }
 
-func TestFallbackDigestUsesTelegramPlainTextFormat(t *testing.T) {
+func TestFallbackDigestUsesTelegramHTMLFormat(t *testing.T) {
 	digest := fallbackDigest(7, []classifiedMessage{{
-		Message:  telegrammt.SyncedMessage{Text: "Экзамен завтра", SourceLink: "https://t.me/c/100/1"},
+		Message:  telegrammt.SyncedMessage{ChatID: 100, MessageID: 1, Text: "Экзамен завтра", SourceLink: "https://t.me/c/100/1"},
 		Decision: model.MessageDecision{Keep: true, Importance: 3},
 	}})
-	for _, want := range []string{"🦉 ОБЗОР SOVA", "ГЛАВНОЕ", "• Экзамен завтра [1]", "ИСТОЧНИКИ", "[1] https://t.me/c/100/1"} {
+	for _, want := range []string{"🦉 <b>ОБЗОР SOVA</b>", "<i>Экзамен завтра.</i>", "💾 ПРИМЕЧАНИЯ", `• <a href="https://t.me/c/100/1">Экзамен завтра</a> — важное сообщение из учебного чата.`} {
 		if !strings.Contains(digest, want) {
 			t.Fatalf("digest missing %q:\n%s", want, digest)
 		}
 	}
-	if strings.Contains(digest, "#") || strings.Contains(digest, "- ") {
-		t.Fatalf("digest contains Markdown markers:\n%s", digest)
+	for _, unwanted := range []string{"ГЛАВНОЕ", "КАЛЕНДАРЬ", "ИСТОЧНИКИ", "[1]"} {
+		if strings.Contains(digest, unwanted) {
+			t.Fatalf("digest retained old section %q:\n%s", unwanted, digest)
+		}
 	}
 }
 
@@ -332,6 +378,8 @@ func TestFallbackDigestCapsAndDeduplicatesLinks(t *testing.T) {
 	for index := 0; index < 7; index++ {
 		classified = append(classified, classifiedMessage{
 			Message: telegrammt.SyncedMessage{
+				ChatID:     100,
+				MessageID:  index + 1,
 				Text:       fmt.Sprintf("Полезный материал %d https://external.example/%d", index, index),
 				SourceLink: fmt.Sprintf("https://t.me/c/100/%d", index+1),
 			},
@@ -339,7 +387,7 @@ func TestFallbackDigestCapsAndDeduplicatesLinks(t *testing.T) {
 		})
 	}
 	classified = append(classified, classifiedMessage{
-		Message:  telegrammt.SyncedMessage{Text: "Полезный материал 3", SourceLink: "https://t.me/c/100/99"},
+		Message:  telegrammt.SyncedMessage{ChatID: 100, MessageID: 99, Text: "Полезный материал 3", SourceLink: "https://t.me/c/100/99"},
 		Decision: model.MessageDecision{Keep: true, Importance: 3},
 	})
 	digest := fallbackDigest(8, classified)
@@ -357,15 +405,18 @@ func TestFallbackDigestCapsAndDeduplicatesLinks(t *testing.T) {
 	}
 }
 
-func TestFallbackDigestSeparatesCalendarAndHandlesURLOnlyText(t *testing.T) {
+func TestFallbackDigestHasNoCalendarSectionAndHandlesURLOnlyText(t *testing.T) {
 	digest := fallbackDigest(9, []classifiedMessage{
-		{Message: telegrammt.SyncedMessage{Text: "https://example.com/course", SourceLink: "https://t.me/c/100/1"}, Decision: model.MessageDecision{Keep: true, Importance: 2}},
-		{Message: telegrammt.SyncedMessage{Text: "Экзамен завтра в 10:00", SourceLink: "https://t.me/c/100/2"}, Decision: model.MessageDecision{Keep: true, Importance: 3, HasEvent: true}},
+		{Message: telegrammt.SyncedMessage{ChatID: 100, MessageID: 1, Text: "https://example.com/course", SourceLink: "https://t.me/c/100/1"}, Decision: model.MessageDecision{Keep: true, Importance: 2}},
+		{Message: telegrammt.SyncedMessage{ChatID: 100, MessageID: 2, Text: "Экзамен завтра в 10:00", SourceLink: "https://t.me/c/100/2"}, Decision: model.MessageDecision{Keep: true, Importance: 3, HasEvent: true}},
 	})
-	for _, want := range []string{"Материал без текстового описания", "📅 КАЛЕНДАРЬ", "Экзамен завтра в 10:00", "ИСТОЧНИКИ"} {
+	for _, want := range []string{"Материал без текстового описания", "Экзамен завтра в 10:00", "💾 ПРИМЕЧАНИЯ"} {
 		if !strings.Contains(digest, want) {
 			t.Fatalf("digest missing %q:\n%s", want, digest)
 		}
+	}
+	if strings.Contains(digest, "КАЛЕНДАРЬ") || strings.Contains(digest, "ИСТОЧНИКИ") {
+		t.Fatalf("fallback retained removed sections:\n%s", digest)
 	}
 }
 
@@ -374,45 +425,59 @@ func TestFallbackDigestUsesStableIdentityWhenLinkUnavailable(t *testing.T) {
 		Message:  telegrammt.SyncedMessage{ChatID: 42, MessageID: 7, Text: "Важное сообщение"},
 		Decision: model.MessageDecision{Keep: true, Importance: 3},
 	}})
-	if !strings.Contains(digest, "• Важное сообщение [1]") || !strings.Contains(digest, "[1] telegram:42:7 — ссылка недоступна") {
+	if !strings.Contains(digest, "• Важное сообщение — важное сообщение из учебного чата. (источник telegram:42:7; ссылка недоступна).") {
 		t.Fatalf("missing stable fallback provenance:\n%s", digest)
 	}
 }
 
-func TestValidateGeneratedDigestEnforcesCompactProvenance(t *testing.T) {
-	bundle := "link=https://t.me/c/100/1\nlink=https://t.me/c/100/2\n"
-	valid := "🦉 ОБЗОР SOVA\n\nГЛАВНОЕ\n• Пункт [1]\n\nИСТОЧНИКИ\n[1] https://t.me/c/100/1"
+func TestValidateGeneratedDigestEnforcesLinkedNoteContract(t *testing.T) {
+	bundle := "- id=`m1` link=https://t.me/c/100/1\n- id=`m2` link=https://t.me/c/100/2\n- id=`missing-link` link=unavailable\n"
+	valid := geminiDigestPayload{Summary: "Опубликованы важные изменения.", Notes: []geminiDigestNote{{SourceID: "m1", Lead: "Нет ясности", Details: "с расписанием первой учебной недели."}}}
 	if err := validateGeneratedDigest(valid, bundle); err != nil {
 		t.Fatalf("valid digest rejected: %v", err)
 	}
-	tests := []struct {
-		name   string
-		digest string
-	}{
-		{name: "duplicate", digest: valid + "\n[2] https://t.me/c/100/1"},
-		{name: "untrusted", digest: "ИСТОЧНИКИ\n[1] https://evil.example/x"},
-		{name: "scattered", digest: "ГЛАВНОЕ\n• Пункт https://t.me/c/100/1"},
-		{name: "source before section", digest: "[1] https://t.me/c/100/1\nГЛАВНОЕ\n• Пункт [1]\nИСТОЧНИКИ"},
-		{name: "content after sources", digest: "ГЛАВНОЕ\n• Пункт [1]\nИСТОЧНИКИ\n[1] https://t.me/c/100/1\nПРИМЕЧАНИЯ"},
-		{name: "duplicate source section", digest: "ГЛАВНОЕ\n• Пункт [1]\nИСТОЧНИКИ\n[1] https://t.me/c/100/1\nИСТОЧНИКИ"},
-		{name: "bullet without reference", digest: "ГЛАВНОЕ\n• Пункт\nИСТОЧНИКИ\n[1] https://t.me/c/100/1"},
-		{name: "dangling reference", digest: "ГЛАВНОЕ\n• Пункт [2]\nИСТОЧНИКИ\n[1] https://t.me/c/100/1"},
-		{name: "non sequential", digest: "ГЛАВНОЕ\n• Пункт [2]\nИСТОЧНИКИ\n[2] https://t.me/c/100/1"},
-		{name: "too many bullets", digest: "ГЛАВНОЕ\n" + strings.Repeat("• Пункт\n", generatedDigestMaxBullets+1)},
-		{name: "too long", digest: strings.Repeat("д", generatedDigestMaxUTF16+1)},
-		{name: "too many emoji units", digest: strings.Repeat("🙂", generatedDigestMaxUTF16/2+1)},
-		{name: "too many", digest: "ИСТОЧНИКИ\n" + strings.Join([]string{
-			"https://t.me/c/100/1", "https://t.me/c/100/2", "https://t.me/c/100/3",
-			"https://t.me/c/100/4", "https://t.me/c/100/5", "https://t.me/c/100/6",
-		}, "\n")},
+	withAbbreviation := geminiDigestPayload{Summary: "Лекция пройдёт в ауд. 504. Расписание опубликовано."}
+	if err := validateGeneratedDigest(withAbbreviation, bundle); err != nil {
+		t.Fatalf("valid summary with abbreviation rejected: %v", err)
 	}
-	largeBundle := bundle + "link=https://t.me/c/100/3\nlink=https://t.me/c/100/4\nlink=https://t.me/c/100/5\nlink=https://t.me/c/100/6\n"
+	tests := []struct {
+		name    string
+		payload geminiDigestPayload
+	}{
+		{name: "empty summary", payload: geminiDigestPayload{}},
+		{name: "summary without text", payload: geminiDigestPayload{Summary: "..."}},
+		{name: "summary URL", payload: geminiDigestPayload{Summary: "Ссылка https://evil.example"}},
+		{name: "three summary sentences", payload: geminiDigestPayload{Summary: "Первое. Второе! Третье?"}},
+		{name: "unknown source", payload: geminiDigestPayload{Summary: "Итог.", Notes: []geminiDigestNote{{SourceID: "unknown", Lead: "Нет ясности", Details: "с расписанием."}}}},
+		{name: "unavailable source", payload: geminiDigestPayload{Summary: "Итог.", Notes: []geminiDigestNote{{SourceID: "missing-link", Lead: "Нет ясности", Details: "с расписанием."}}}},
+		{name: "duplicate source", payload: geminiDigestPayload{Summary: "Итог.", Notes: []geminiDigestNote{{SourceID: "m1", Lead: "Нет ясности", Details: "с расписанием."}, {SourceID: "m1", Lead: "Другие сведения", Details: "по занятиям."}}}},
+		{name: "one-word lead", payload: geminiDigestPayload{Summary: "Итог.", Notes: []geminiDigestNote{{SourceID: "m1", Lead: "Неясно", Details: "с расписанием."}}}},
+		{name: "four-word lead", payload: geminiDigestPayload{Summary: "Итог.", Notes: []geminiDigestNote{{SourceID: "m1", Lead: "Слишком много первых слов", Details: "в ссылке."}}}},
+		{name: "empty details", payload: geminiDigestPayload{Summary: "Итог.", Notes: []geminiDigestNote{{SourceID: "m1", Lead: "Нет ясности"}}}},
+		{name: "raw URL", payload: geminiDigestPayload{Summary: "Итог.", Notes: []geminiDigestNote{{SourceID: "m1", Lead: "Нет ясности", Details: "см. https://evil.example"}}}},
+		{name: "too long", payload: geminiDigestPayload{Summary: strings.Repeat("д", generatedSummaryMaxUTF16+1)}},
+		{name: "too many emoji units", payload: geminiDigestPayload{Summary: "д" + strings.Repeat("🙂", generatedSummaryMaxUTF16/2)}},
+		{name: "too many notes", payload: geminiDigestPayload{Summary: "Итог.", Notes: make([]geminiDigestNote, fallbackDigestMaxItems+1)}},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := validateGeneratedDigest(tt.digest, largeBundle); err == nil {
-				t.Fatalf("invalid digest accepted: %s", tt.digest)
+			if err := validateGeneratedDigest(tt.payload, bundle); err == nil {
+				t.Fatalf("invalid digest accepted: %+v", tt.payload)
 			}
 		})
+	}
+}
+
+func TestRenderDigestEscapesProseAndEmbedsSourceLink(t *testing.T) {
+	payload := geminiDigestPayload{
+		Summary: `Главное & важное <событие>.`,
+		Notes:   []geminiDigestNote{{SourceID: "m1", Lead: `Нет <ясности>`, Details: `с "первой" & второй парой.`}},
+	}
+	digest := renderDigest(payload, map[string]string{"m1": "https://t.me/c/100/1"})
+	want := "🦉 <b>ОБЗОР SOVA</b>\n<i>Главное &amp; важное &lt;событие&gt;.</i>\n\n💾 ПРИМЕЧАНИЯ\n" +
+		`• <a href="https://t.me/c/100/1">Нет &lt;ясности&gt;</a> с &#34;первой&#34; &amp; второй парой.`
+	if digest != want {
+		t.Fatalf("digest mismatch\nwant: %s\n got: %s", want, digest)
 	}
 }
 

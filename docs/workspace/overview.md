@@ -114,7 +114,7 @@ Workspace topic, including the Inbox command list and the quote instructions
 in `Опыт`. Later runs edit the tracked messages instead of creating duplicates.
 
 `seed-document-indexes` creates or updates the active Stage 6 index messages in
-`Заметки`, `Заготовки`, `Коллекции`, and `Полезное`. The live bot edits these
+`Задачи`, `Заметки`, `Заготовки`, `Коллекции`, and `Полезное`. The live bot edits these
 same messages after `/note`, `/template`, `/collection`, and publish commands.
 Use `--type quote` to create or update only the pinned quote index in `Опыт`
 without touching the existing indexes in other topics.
@@ -159,6 +159,8 @@ callbacks in `Задачи`, and accepts manual cluster/document commands:
 /collection show
 /quote
 /search <запрос>
+/useful archive <ID|ссылка|название>
+/useful delete <ID|ссылка|название>
 ```
 
 Cluster auto-attachment is intentionally narrow. Replies attach explicitly to
@@ -206,13 +208,27 @@ replying to a later part renames that part. `/id` in reply shows Telegram,
 cluster, document, and part IDs known to Workspace.
 
 `/doc publish` and reply `/publish` assemble the ordered note parts, send a
-preview to `Inbox`, and expose approve/cancel/edit buttons. With
+preview to `Inbox`, and expose approve/cancel/AI-edit/manual-edit buttons. AI
+edit accepts an instruction for the formatter. Manual edit durably waits for
+one complete plain-text replacement in Inbox, escapes it as literal Telegram
+text, creates a replacement preview, and still requires a final approve. With
 `SOVA_GEMINI_API_KEY` configured the preview is formatted through Gemini;
 without it the provider uses a local meaning-preserving mock formatter. The
 final approved material is posted to `Полезное`, source-to-derived mappings are
 persisted, the note leaves the active Notes index, and a Useful index message is
 updated. Later source edits mark the published document/derived rows
 `needs_review` instead of silently rewriting final material.
+
+`/useful archive` only removes a material from the Useful index. Inbox-only
+`/useful delete` first asks for the word `Удалить`, then deletes the
+owned bot publication from the configured Useful topic, closes its derived
+provenance, archives the document, and refreshes the index. User-authored source
+messages are never deleted.
+
+Dynamic pinned indexes use numbered entries in oldest-first order, so new
+entries are appended below existing ones. Note subparts retain their bracketed
+`[Часть …]` lines. Template type headings remain headings while the
+templates beneath them are numbered.
 
 `/quote` is an Inbox-only wizard. It asks for the required quote text, then an
 optional author and optional title, and shows a Save/Cancel preview. The final

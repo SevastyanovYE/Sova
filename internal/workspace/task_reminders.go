@@ -197,6 +197,12 @@ func workspaceTaskReminderSendIsAmbiguous(err error) bool {
 	if err == nil {
 		return false
 	}
+	if nest.IsDefinitelyUnsent(err) {
+		return false
+	}
+	if nest.IsBotAPIClientError(err) {
+		return false
+	}
 	message := strings.ToLower(err.Error())
 	// A Bot API JSON rejection or an explicit 4xx response confirms that no
 	// message result was returned. Transport, read, parse and 5xx failures can

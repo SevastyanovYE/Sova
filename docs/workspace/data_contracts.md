@@ -184,8 +184,10 @@ are documented in the tracked Experience command-help pin.
 
 The live bot maintains index messages for active notes in `Заметки`, templates
 in `Заготовки`, collection-card links in `Коллекции`, quotes in `Опыт`, and
-published Useful links in `Полезное`. Notes render as a bold first-part link plus bracketed
-part links. Template indexes render active type headings and bold prompt links.
+published Useful links in `Полезное`. Dynamic entries are numbered oldest-first;
+new entries appear below older entries. Notes render as a bold first-part link
+plus bracketed part links, whose `[Часть …]` shape is unchanged. Template
+indexes render active type headings and numbered bold prompt links.
 Collection indexes are one flat list of collection-card links; each collection
 card stores its own description and item links. Published material is not
 silently rewritten on source edit: published documents and derived rows are
@@ -202,8 +204,19 @@ Publish state machine and outbox:
   resent automatically because Telegram may already have accepted them;
 - a replacement preview becomes actionable only after all of its fragments
   have confirmed Telegram IDs, then the previous preview becomes stale;
+- manual editing stores the waiting editor and captured input/replacement IDs
+  on the base run. The base cannot be approved while it waits. The manual child
+  is created atomically in `preview_sending` with escaped plain text and model
+  `manual`, so restart recovery never mistakes it for a Gemini generation;
 - an approved run can resume final-fragment delivery and idempotent
   document/derived/index finalization after restart.
+
+`/useful delete` resolves only a published note owned by the configured Useful
+topic. After Telegram confirms deletion (or reports the already-owned message
+missing), one SQLite transaction archives the document, closes matching
+derived rows, marks matching final outbox rows deleted, and removes matching
+Workspace search embeddings. `/useful archive` remains the non-destructive
+index-only operation.
 
 `.state/index/workspace-runs.md` contains compact stage, model, counts, and
 redacted failure data. It deliberately excludes source text, preview HTML,

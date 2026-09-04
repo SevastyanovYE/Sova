@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,10 +19,86 @@ import (
 const telegramMessageLimit = 4096
 const safeMessageLimit = 3900
 const defaultHTTPTimeout = 75 * time.Second
+const defaultDialTimeout = 10 * time.Second
+const telegramDialMaxAttempts = 3
+const telegramDialInitialBackoff = 250 * time.Millisecond
+const telegramDialMaxBackoff = time.Second
 
 type Client struct {
-	token      string
-	httpClient *http.Client
+	token          string
+	httpClient     *http.Client
+	dialRetryDelay func(int) time.Duration
+}
+
+// DefinitelyUnsentError reports a failure that happened while establishing the
+// TCP connection, before an HTTP request could be sent. The stored message is
+// already redacted and intentionally does not unwrap the original URL error,
+// which may contain the Bot API token.
+type DefinitelyUnsentError struct {
+	message  string
+	attempts int
+	cause    error
+}
+
+type BotAPIError struct {
+	Method      string
+	StatusCode  int
+	Description string
+}
+
+func (e *BotAPIError) Error() string {
+	if e == nil {
+		return ""
+	}
+	description := strings.TrimSpace(e.Description)
+	if description == "" {
+		description = http.StatusText(e.StatusCode)
+	}
+	return fmt.Sprintf("Bot API %s returned HTTP %d: %s", e.Method, e.StatusCode, description)
+}
+
+func IsTelegramMessageNotFound(err error) bool {
+	var apiErr *BotAPIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusBadRequest &&
+			strings.Contains(strings.ToLower(apiErr.Description), "message to delete not found")
+	}
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "message to delete not found")
+}
+
+func IsBotAPIClientError(err error) bool {
+	var apiErr *BotAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500
+}
+
+func (e *DefinitelyUnsentError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+func (e *DefinitelyUnsentError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+// Attempts returns the number of TCP dial attempts made before the request was
+// abandoned.
+func (e *DefinitelyUnsentError) Attempts() int {
+	if e == nil {
+		return 0
+	}
+	return e.attempts
+}
+
+// IsDefinitelyUnsent lets durable publishers safely retry failures that are
+// known to have happened before Telegram could receive the HTTP request.
+func IsDefinitelyUnsent(err error) bool {
+	var target *DefinitelyUnsentError
+	return errors.As(err, &target)
 }
 
 type User struct {
@@ -181,16 +258,31 @@ type PinChatMessageRequest struct {
 
 func New(token string) *Client {
 	return &Client{
-		token:      strings.TrimSpace(token),
-		httpClient: &http.Client{Timeout: defaultHTTPTimeout, Transport: telegramTransport()},
+		token:          strings.TrimSpace(token),
+		httpClient:     &http.Client{Timeout: defaultHTTPTimeout, Transport: telegramTransport()},
+		dialRetryDelay: telegramDialRetryDelay,
 	}
 }
 
 func telegramTransport() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	dialer := &net.Dialer{Timeout: defaultDialTimeout, KeepAlive: 30 * time.Second}
 	transport.DialContext = dialer.DialContext
 	return transport
+}
+
+func telegramDialRetryDelay(failures int) time.Duration {
+	if failures <= 0 {
+		return 0
+	}
+	delay := telegramDialInitialBackoff
+	for attempt := 1; attempt < failures && delay < telegramDialMaxBackoff; attempt++ {
+		delay *= 2
+	}
+	if delay > telegramDialMaxBackoff {
+		return telegramDialMaxBackoff
+	}
+	return delay
 }
 
 func (c *Client) GetMe(ctx context.Context) (User, error) {
@@ -537,24 +629,44 @@ func (c *Client) call(ctx context.Context, method string, payload any, out any) 
 	if c.token == "" {
 		return fmt.Errorf("Bot API token is empty")
 	}
-	var body io.Reader
+	var encoded []byte
 	if payload != nil {
-		encoded, err := json.Marshal(payload)
+		var err error
+		encoded, err = json.Marshal(payload)
 		if err != nil {
 			return err
 		}
-		body = bytes.NewReader(encoded)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(method), body)
-	if err != nil {
-		return fmt.Errorf("build Bot API %s request: %s", method, redactBotToken(err.Error(), c.token))
-	}
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("Bot API %s request failed: %s", method, redactBotToken(err.Error(), c.token))
+	var resp *http.Response
+	for attempt := 1; attempt <= telegramDialMaxAttempts; attempt++ {
+		var body io.Reader
+		if payload != nil {
+			body = bytes.NewReader(encoded)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(method), body)
+		if err != nil {
+			return fmt.Errorf("build Bot API %s request: %s", method, redactBotToken(err.Error(), c.token))
+		}
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err = c.httpClient.Do(req)
+		if err == nil {
+			break
+		}
+		if !isTCPDialFailure(err) {
+			return fmt.Errorf("Bot API %s request failed: %s", method, redactBotToken(err.Error(), c.token))
+		}
+		if attempt == telegramDialMaxAttempts || ctx.Err() != nil {
+			return definitelyUnsentError(method, attempt, err, ctx.Err(), c.token)
+		}
+		delay := telegramDialRetryDelay(attempt)
+		if c.dialRetryDelay != nil {
+			delay = c.dialRetryDelay(attempt)
+		}
+		if err := waitForDialRetry(ctx, delay); err != nil {
+			return definitelyUnsentError(method, attempt, err, err, c.token)
+		}
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -562,12 +674,56 @@ func (c *Client) call(ctx context.Context, method string, payload any, out any) 
 		return err
 	}
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("Bot API %s returned %s: %s", method, resp.Status, strings.TrimSpace(string(data)))
+		var envelope struct {
+			Description string `json:"description"`
+		}
+		_ = json.Unmarshal(data, &envelope)
+		if strings.TrimSpace(envelope.Description) == "" {
+			envelope.Description = strings.TrimSpace(string(data))
+		}
+		envelope.Description = redactBotToken(envelope.Description, c.token)
+		return &BotAPIError{Method: method, StatusCode: resp.StatusCode, Description: envelope.Description}
 	}
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("parse Bot API %s response: %w", method, err)
 	}
 	return nil
+}
+
+func isTCPDialFailure(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial" && strings.HasPrefix(strings.ToLower(opErr.Net), "tcp")
+}
+
+func waitForDialRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func definitelyUnsentError(method string, attempts int, dialErr, cause error, token string) error {
+	detail := "TCP dial failed"
+	if dialErr != nil {
+		detail = redactBotToken(dialErr.Error(), token)
+	}
+	return &DefinitelyUnsentError{
+		message:  fmt.Sprintf("Bot API %s request definitely not sent after %d TCP dial attempt(s): %s", method, attempts, detail),
+		attempts: attempts,
+		cause:    cause,
+	}
 }
 
 func (c *Client) url(method string) string {

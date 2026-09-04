@@ -946,7 +946,7 @@ func workspaceSeedDocumentIndexes(ctx context.Context, cfg config.Config, store 
 	flags := flag.NewFlagSet("workspace seed-document-indexes", flag.ContinueOnError)
 	dryRun := flags.Bool("dry-run", false, "print planned document indexes without sending them")
 	reset := flags.Bool("reset", false, "send fresh pinned index messages and make future updates use them")
-	indexType := flags.String("type", "all", "limit the operation to all, note, template, collection, useful, or quote")
+	indexType := flags.String("type", "all", "limit the operation to all, task, note, template, collection, useful, or quote")
 	timeout := flags.Duration("timeout", 2*time.Minute, "maximum time for Bot API send/edit calls; 0 disables the deadline")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -1934,7 +1934,7 @@ Usage:
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
   sova workspace reset-topic-pins [--target workspace|control|all] [--execute] [--timeout 3m]
   sova workspace seed-command-help [--dry-run] [--timeout 2m]
-  sova workspace seed-document-indexes [--type all|note|template|collection|useful|quote] [--dry-run] [--reset] [--timeout 2m]
+  sova workspace seed-document-indexes [--type all|task|note|template|collection|useful|quote] [--dry-run] [--reset] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
   sova workspace search-index --full-scan [--limit 250000] [--timeout 2h]
   sova workspace record-deployment --checks "..." [--execute]
@@ -1971,7 +1971,7 @@ Usage:
   sova workspace seed-topic-pins [--target workspace|control|all] [--dry-run] [--timeout 2m]
   sova workspace reset-topic-pins [--target workspace|control|all] [--execute] [--timeout 3m]
   sova workspace seed-command-help [--dry-run] [--timeout 2m]
-  sova workspace seed-document-indexes [--type all|note|template|collection|useful|quote] [--dry-run] [--reset] [--timeout 2m]
+  sova workspace seed-document-indexes [--type all|task|note|template|collection|useful|quote] [--dry-run] [--reset] [--timeout 2m]
   sova workspace cleanup-test-tasks [--execute] [--contains "Провер,тест"] [--delete-backlog]
   sova workspace search-index --full-scan [--limit 250000] [--timeout 2h]
   sova workspace record-deployment --checks "..." [--execute]
@@ -1989,7 +1989,7 @@ Notes:
   seed-topic-pins sends human-friendly pin draft messages into Workspace and/or Control topics.
   reset-topic-pins unpins each configured forum topic, sends and pins the clean main message, then sends command help only in command topics.
   seed-command-help creates or updates one tracked pinned command reference in every Workspace topic.
-  seed-document-indexes creates or updates active note/template/collection/quote/useful index messages; --reset sends fresh pinned indexes and repoints future updates.
+  seed-document-indexes creates or updates task/note/template/collection/quote/useful index messages; --reset sends fresh pinned indexes and repoints future updates.
   cleanup-test-tasks deletes bot-created test task cards/backlog and marks matching tasks cancelled.
   search-index synchronizes new InSync, old InSync, and Sova.Nest, then builds a local exact-cosine index.
   record-deployment and announce-release are dry-run by default; live announcement requires the matching receipt.

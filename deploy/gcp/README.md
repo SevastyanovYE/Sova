@@ -93,6 +93,36 @@ sudo -u sova sh -lc '
 записи, сначала остановить GCP, снять свежий `.backup`, перенести и проверить
 его на старом сервере и только затем возобновлять старый polling.
 
+## Обновление приложения
+
+Собрать Linux-бинарник из проверенного commit локально, скопировать его в
+`/tmp/sova`, затем обновить остановленный единый service:
+
+```bash
+sudo systemctl stop sova.service
+sudo -u sova sqlite3 /var/lib/sova/sova.db ".backup '/var/backups/sova/sova-before-update.db'"
+sudo install -o root -g root -m 0755 /tmp/sova /opt/sova/sova
+sudo -u sova sh -lc 'set -a; . /etc/sova/sova.env; set +a; cd /opt/sova; /opt/sova/sova init'
+sudo systemctl start sova.service
+```
+
+После запуска проверить service, миграции и внешние интеграции, а затем
+обновить существующие закреплённые индексы на месте. `--reset` здесь не нужен:
+
+```bash
+sudo systemctl is-active sova.service
+sudo systemctl show sova.service -p NRestarts -p MemoryCurrent -p MemoryMax
+sudo -u sova sh -lc 'set -a; . /etc/sova/sova.env; set +a; cd /opt/sova; /opt/sova/sova doctor --strict'
+sudo -u sova sh -lc 'set -a; . /etc/sova/sova.env; set +a; cd /opt/sova; /opt/sova/sova workspace doctor --strict'
+sudo -u sova sh -lc 'set -a; . /etc/sova/sova.env; set +a; cd /opt/sova; /opt/sova/sova workspace seed-document-indexes --type all --dry-run'
+sudo -u sova sh -lc 'set -a; . /etc/sova/sova.env; set +a; cd /opt/sova; /opt/sova/sova workspace seed-document-indexes --type all'
+sudo journalctl -u sova.service -n 150 --no-pager
+```
+
+После успешного обновления сообщение из Полезного удаляется из Inbox командой
+`/useful delete https://t.me/c/4301779750/18/750`; бот показывает найденный
+материал и ждёт точный ответ `Удалить`.
+
 ## Ежедневный обзор
 
 Команды отправляются в учебный топик Nest `Status`:

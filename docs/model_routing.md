@@ -41,9 +41,13 @@ Both stages use temperature zero. Gemini models request minimal thinking. Model
 responses must cover every opaque input id exactly once.
 
 The final digest is a separate structured Google API stage. It tries
-`SOVA_GEMINI_MODEL`, then the configured Gemini fallback models, validates the
-bounded Telegram digest contract, and records `model_digest` telemetry. It does
-not invoke Codex CLI.
+`SOVA_GEMINI_MODEL`, then the configured Gemini fallback models, and returns a
+short main summary plus optional notes keyed by opaque source IDs. Sova resolves
+those IDs to saved Telegram links and deterministically renders escaped HTML:
+bold title, italic summary, and each note linked through its first two or three
+words. The stage validates the bounded Telegram digest contract, records
+`model_digest` telemetry, and does not invoke Codex CLI. Calendar candidates
+remain a separate publication flow.
 
 ## Failure handling
 

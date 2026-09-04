@@ -338,7 +338,8 @@ func TestWorkspaceDocumentIndexesRenderLinks(t *testing.T) {
 	templates := renderTemplatesIndex([]sqlitestore.WorkspaceDocumentType{{DocType: "template", Name: "Codex", Emoji: "🧩"}}, []sqlitestore.WorkspaceDocument{templateDoc}, map[int64][]sqlitestore.WorkspaceDocumentPart{2: {
 		{PartNo: 1, Title: "Project context", SourceLink: "https://t.me/c/4301779750/14/20"},
 	}})
-	if !strings.Contains(templates, "• <b>Codex</b> 🧩") ||
+	if !strings.Contains(templates, "<b>Codex</b> 🧩") ||
+		!strings.Contains(templates, "1. <b><a") ||
 		!strings.Contains(templates, `<b><a href="https://t.me/c/4301779750/14/20">Implementation prompt</a></b>`) {
 		t.Fatalf("templates index = %s", templates)
 	}
@@ -351,6 +352,64 @@ func TestWorkspaceDocumentIndexesRenderLinks(t *testing.T) {
 		!strings.Contains(collections, "Домашние рецепты") ||
 		!strings.Contains(collections, `href="https://t.me/c/4301779750/20/40"`) {
 		t.Fatalf("collections index = %s", collections)
+	}
+}
+
+func TestPinnedIndexesUseOldestFirstNumberingAndPreserveNoteParts(t *testing.T) {
+	old := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	newer := old.Add(time.Hour)
+	docs := []sqlitestore.WorkspaceDocument{
+		{ID: 2, Title: "Новая", CreatedAt: newer},
+		{ID: 1, Title: "Старая", CreatedAt: old},
+	}
+	parts := map[int64][]sqlitestore.WorkspaceDocumentPart{
+		1: {{PartNo: 1, SourceLink: "https://t.me/c/1/12/10"}, {PartNo: 2, Title: "Часть 2", SourceLink: "https://t.me/c/1/12/11"}},
+		2: {{PartNo: 1, SourceLink: "https://t.me/c/1/12/12"}},
+	}
+	text := renderNotesIndex(docs, parts)
+	if strings.Index(text, "1. ") > strings.Index(text, "Старая") || strings.Index(text, "Старая") > strings.Index(text, "2. ") || strings.Index(text, "2. ") > strings.Index(text, "Новая") {
+		t.Fatalf("notes are not numbered oldest-first:\n%s", text)
+	}
+	if !strings.Contains(text, `[<a href="https://t.me/c/1/12/11">Часть 2</a>]`) {
+		t.Fatalf("note part formatting changed:\n%s", text)
+	}
+}
+
+func TestManualPublishTextIsLiteralAndMarkupOffersBothEditModes(t *testing.T) {
+	messages, err := manualPublishMessages("<b>x</b> & y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0] != "&lt;b&gt;x&lt;/b&gt; &amp; y" {
+		t.Fatalf("manual messages = %#v", messages)
+	}
+	markup := PublishPreviewMarkup(42)
+	var labels []string
+	for _, row := range markup.InlineKeyboard {
+		for _, button := range row {
+			labels = append(labels, button.Text)
+		}
+	}
+	joined := strings.Join(labels, "|")
+	if !strings.Contains(joined, "✨ ИИ-правка") || !strings.Contains(joined, "📝 Вручную") {
+		t.Fatalf("publish buttons = %q", joined)
+	}
+}
+
+func TestUsefulLinkMustTargetConfiguredTopic(t *testing.T) {
+	cfg := testWorkspaceLiveConfig()
+	valid := "https://t.me/c/4301779750/18/750"
+	if id, err := usefulTelegramMessageIDFromArg(cfg, valid); err != nil || id != 750 {
+		t.Fatalf("valid useful link: id=%d err=%v", id, err)
+	}
+	for _, ref := range []string{
+		"https://t.me/c/4301779750/17/750",
+		"https://t.me/c/999/18/750",
+		"https://t.me/c/4301779750/18/750/extra",
+	} {
+		if _, err := usefulTelegramMessageIDFromArg(cfg, ref); err == nil {
+			t.Fatalf("unsafe useful link accepted: %s", ref)
+		}
 	}
 }
 

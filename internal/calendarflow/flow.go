@@ -110,6 +110,12 @@ func calendarSendIsAmbiguous(err error) bool {
 	if err == nil {
 		return false
 	}
+	if nest.IsDefinitelyUnsent(err) {
+		return false
+	}
+	if nest.IsBotAPIClientError(err) {
+		return false
+	}
 	message := strings.ToLower(err.Error())
 	if strings.Contains(message, "bot api sendmessage failed:") || strings.Contains(message, "bot api sendmessage returned 4") {
 		return false

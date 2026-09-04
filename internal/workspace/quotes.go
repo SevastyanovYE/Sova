@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -742,7 +743,7 @@ func persistWorkspaceQuoteDerivedMessage(ctx context.Context, store *sqlitestore
 }
 
 func isDefinitiveQuoteEditFailure(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "Bot API editMessageText failed:")
+	return err != nil && (nest.IsBotAPIClientError(err) || strings.Contains(err.Error(), "Bot API editMessageText failed:"))
 }
 
 func resolveWorkspaceQuote(ctx context.Context, cfg config.Config, store *sqlitestore.Store, ref string) (sqlitestore.WorkspaceQuote, error) {
@@ -1017,10 +1018,25 @@ func renderExperienceQuoteIndexFromQuotes(quotes []sqlitestore.WorkspaceQuote) s
 		b.WriteString("<i>Пока пусто. Добавить цитату можно командой /quote из Inbox.</i>")
 		return b.String()
 	}
+	quotes = append([]sqlitestore.WorkspaceQuote(nil), quotes...)
+	sort.SliceStable(quotes, func(i, j int) bool {
+		left := quotes[i].CreatedAt
+		right := quotes[j].CreatedAt
+		if quotes[i].PublishedAt != nil {
+			left = *quotes[i].PublishedAt
+		}
+		if quotes[j].PublishedAt != nil {
+			right = *quotes[j].PublishedAt
+		}
+		if !left.Equal(right) {
+			return left.Before(right)
+		}
+		return quotes[i].ID < quotes[j].ID
+	})
 	shown := 0
 	for _, quote := range quotes {
 		var line strings.Builder
-		line.WriteString("• ")
+		fmt.Fprintf(&line, "%d. ", shown+1)
 		link := workspaceMessageLink(quote.TargetChatID, quote.TargetTopicID, quote.TargetMessageID)
 		writeHTMLLinkOrText(&line, link, workspaceQuoteIndexLabel(quote))
 		if quote.Status == "needs_review" {
@@ -1034,7 +1050,7 @@ func renderExperienceQuoteIndexFromQuotes(quotes []sqlitestore.WorkspaceQuote) s
 		shown++
 	}
 	if shown < len(quotes) {
-		note := "\n<i>Показаны последние " + fmt.Sprintf("%d из %d", shown, len(quotes)) + " цитат.</i>"
+		note := "\n<i>Показаны " + fmt.Sprintf("%d из %d", shown, len(quotes)) + " цитат.</i>"
 		if telegramHTMLFits(b.String()+note, quoteIndexTextLimit) {
 			b.WriteString(note)
 		}

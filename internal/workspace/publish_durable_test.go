@@ -73,6 +73,7 @@ func TestSendDurablePublishMessageClassifiesRejectedAndAmbiguousFailures(t *test
 		wantStatus string
 	}{
 		{name: "known rejection remains retryable", sendErr: errors.New("Bot API sendMessage failed: Bad Request"), wantStatus: "pending"},
+		{name: "definitely unsent dial failure remains retryable", sendErr: &nest.DefinitelyUnsentError{}, wantStatus: "pending"},
 		{name: "ambiguous transport becomes unknown", sendErr: errors.New("read response: EOF"), wantStatus: "unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -36,20 +36,29 @@ summary. Legacy runs that failed specifically at the Codex step and current
 Gemini-digest failures may be retried from their saved compact bundle without
 repeating Telegram sync; recovery generation uses Gemini.
 
-The user-facing digest is a single bounded plain-text summary rather than a
-message-by-message dump. Related messages are synthesized into at most six
-bullet lines and at most five unique Telegram sources. Bullets refer to compact
-numbered provenance markers (`[1]`, `[1, 2]`); each source URL appears exactly
-once in the final `ИСТОЧНИКИ` section. Generated output is rejected in favor of
-the bounded fallback when it exceeds 3600 Telegram UTF-16 units, repeats or
-invents a URL, leaves a reference unresolved, or scatters source URLs through
-the body.
+The user-facing digest is one bounded Telegram HTML message rather than a
+message-by-message dump. Its bold title is followed by an italic one- or
+two-sentence synthesis of the main developments. An optional `ПРИМЕЧАНИЯ`
+section contains at most five concrete details; the first two or three words of
+each note are the clickable link to its Telegram source. There are no separate
+`ГЛАВНОЕ`, `КАЛЕНДАРЬ`, or `ИСТОЧНИКИ` sections: calendar candidates are
+published independently, and provenance is embedded in note text.
+
+Gemini returns structured summary/note fields and opaque source IDs, not final
+markup or URLs. Sova resolves each source ID against the compact run bundle,
+escapes all model prose, and renders the HTML deterministically. Generated
+output is rejected in favor of the bounded fallback when it exceeds 3600
+Telegram UTF-16 units, repeats or invents a source ID, uses an unavailable
+source link, puts a URL in prose, or does not provide exactly two or three lead
+words for a note.
 
 `overview_publications` is the durable Nest delivery outbox for the one-message
 digest and each Calendar candidate card. A content hash makes repeated recovery
 deterministic. Delivery is claimed as `sending` before the Bot API call;
-confirmed rejection becomes retryable, while a transport/read/5xx ambiguity or
-process interruption becomes `unknown` and is never sent again automatically.
+confirmed rejection and a TCP dial failure known to precede request delivery
+become retryable, while a post-connect transport/read/5xx ambiguity or process
+interruption becomes `unknown` and is never sent again automatically. Bot API
+TCP dialing uses three bounded attempts with context-aware backoff.
 After manually checking Telegram, an operator must explicitly resolve an
 unknown row as the existing `sent` message or as safe to `retry`; `retry-run`
 then skips already sent items.
@@ -71,8 +80,9 @@ or the local fallback route.
 
 Overview progress may be published to the Nest Status topic as one edited
 status message. Progress text is operational status, not prompt context. Short
-controlled bot messages may use Telegram HTML formatting; generated digests stay
-plain text so long messages can be split safely.
+controlled bot messages and generated digests use constrained Telegram HTML
+formatting. A digest is validated to fit one message before it is sent, so
+markup is never split between messages.
 
 ## Nest topics
 

@@ -72,6 +72,20 @@ ssh USER@HOST 'sudo systemctl start sova-workspace sova-nest'
 ssh USER@HOST 'sudo journalctl -u sova-workspace -u sova-nest -n 150 --no-pager'
 ```
 
+After the upgraded process is healthy, refresh all tracked dynamic indexes in
+place (including the task backlog) so existing pins receive the current
+numbering and oldest-first order:
+
+```bash
+ssh USER@HOST 'sudo -u sova sh -lc "set -a; . /etc/sova/sova.env; set +a; cd /opt/sova; /opt/sova/sova workspace seed-document-indexes --type all --dry-run"'
+ssh USER@HOST 'sudo -u sova sh -lc "set -a; . /etc/sova/sova.env; set +a; cd /opt/sova; /opt/sova/sova workspace seed-document-indexes --type all"'
+```
+
+Do not pass `--reset` for this update: the tracked pinned messages should be
+edited in place. Destructive Useful deletion remains an explicit Inbox flow:
+send `/useful delete <link>`, verify the displayed title, then answer
+`Удалить`.
+
 ## Health Check
 
 Before switching traffic to the server, run:

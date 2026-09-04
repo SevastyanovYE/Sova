@@ -124,17 +124,19 @@
   progress updates, Calendar date-edit callbacks, and the local daily scheduler.
   Control/button messages are created explicitly through `nest-seed-topics`,
   `/button`, `/start`, or `/help`; `serve` no longer sends a new Chat button on
-  every startup. Short service messages in Calendar/Status use Telegram HTML
-  formatting; final digests stay plain text. Bot API polling uses the default
-  TCP dialer with bounded exponential backoff for temporary Telegram network
-  failures.
+  every startup. Short service messages in Calendar/Status and final digests use
+  constrained Telegram HTML. Bot API TCP dialing uses three bounded attempts
+  with context-aware backoff; failures proven to happen before request delivery
+  remain safely retryable, while post-connect ambiguity is not resent blindly.
 - Codex CLI discovery remains only as historical tooling. Production generation
   uses Gemini and degrades to a provenance-preserving fallback without losing
   synced messages; `sova retry-run --id` can recover older Codex/Qwen failures
   through the current Google route.
-- Nest digests use Telegram-friendly plain text with compact headings, at most
-  six synthesized bullets, and at most five deduplicated URLs collected once
-  in a numbered `ИСТОЧНИКИ` footer.
+- Nest digests use a bold title, an italic one- or two-sentence synthesis of the
+  main developments, and an optional `ПРИМЕЧАНИЯ` section with at most five
+  concrete notes. Each note links its first two or three words directly to the
+  saved Telegram source; separate `ГЛАВНОЕ`, `КАЛЕНДАРЬ`, and `ИСТОЧНИКИ`
+  sections are omitted.
 - Overview run 5 was recovered from 42 stored messages and published
   successfully after its original empty Qwen response.
 - Compact indexes exist for Telegram recent content, overview runs, and calendar
@@ -294,6 +296,19 @@
   mappings, updates document target IDs, and updates a Useful index message.
   Repeat publish warns when a note already has a target unless `force` is
   passed.
+- Publish previews now separate `✨ ИИ-правка` from `📝 Вручную`. Manual
+  edit waits durably for one full plain-text replacement in Inbox, creates a
+  replacement preview without calling Gemini, blocks approval of the old
+  preview, survives restart, and still requires final approval.
+- `/useful archive` remains index-only. Inbox `/useful delete` now requires a
+  typed confirmation, deletes only an owned bot publication in the configured
+  Useful topic, archives its document, closes provenance/final rows, removes
+  matching search state, and refreshes the pinned index. The requested legacy
+  target `https://t.me/c/4301779750/18/750` resolves locally to document `#40`;
+  production deletion is intentionally deferred until deployment.
+- Dynamic Workspace indexes/backlogs now render numbered oldest-first entries.
+  Note subparts keep their bracketed `[Часть …]` lines; template type headings
+  remain unnumbered headings and their documents carry the sequence numbers.
 - Repeated edits of bot-maintained indexes/backlogs treat Telegram
   `message is not modified` as a no-op success instead of creating duplicate
   index messages. This was verified for document indexes `149`, `150`, `151`

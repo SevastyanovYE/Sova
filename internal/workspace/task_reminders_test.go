@@ -112,6 +112,21 @@ func TestProcessWorkspaceTaskRemindersRetriesConfirmedFailure(t *testing.T) {
 	}
 }
 
+func TestProcessWorkspaceTaskRemindersRetriesDefinitelyUnsentDialFailure(t *testing.T) {
+	store, task, dueAt, now := openReminderWorkspaceTest(t)
+	client := &fakeTaskReminderTelegram{sendError: &nest.DefinitelyUnsentError{}}
+	if err := processWorkspaceTaskReminders(context.Background(), testWorkspaceLiveConfig(), store, client, now); err != nil {
+		t.Fatal(err)
+	}
+	reminder, ok, err := store.WorkspaceTaskReminderByTaskAndSchedule(context.Background(), task.ID, dueAt)
+	if err != nil || !ok {
+		t.Fatalf("reminder ok=%t err=%v", ok, err)
+	}
+	if reminder.Status != "retry" || reminder.Attempts != 1 || reminder.NextAttemptAt == nil || !reminder.NextAttemptAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("retry reminder = %+v", reminder)
+	}
+}
+
 func TestProcessWorkspaceTaskRemindersStopsOnAmbiguousSend(t *testing.T) {
 	store, task, dueAt, now := openReminderWorkspaceTest(t)
 	client := &fakeTaskReminderTelegram{sendError: errors.New("Bot API sendMessage request failed: unexpected EOF")}

@@ -69,6 +69,36 @@ func TestCalendarPublicationRetriesConfirmedRejectionThenSkipsSent(t *testing.T)
 	}
 }
 
+func TestCalendarSendTypedClientErrorIsNotAmbiguous(t *testing.T) {
+	err := &nest.BotAPIError{
+		Method:      "sendMessage",
+		StatusCode:  429,
+		Description: "Too Many Requests",
+	}
+	if calendarSendIsAmbiguous(err) {
+		t.Fatal("typed Bot API client error was classified as ambiguous")
+	}
+}
+
+func TestCalendarPublicationRetriesDefinitelyUnsentDialFailure(t *testing.T) {
+	store, candidate, cfg := newCalendarApprovalCandidate(t)
+	defer store.Close()
+	cfg.NestChatID = -1001
+	cfg.NestTopics = config.TopicIDs{Digest: 2, Calendar: 3, Status: 4, Chat: 5}
+	ctx := context.Background()
+	failing := &fakeCalendarPublicationTelegram{err: &nest.DefinitelyUnsentError{}}
+	if err := publishCandidatesWithClient(ctx, cfg, store, candidate.RunID, []sqlitestore.CalendarCandidate{candidate}, failing); err == nil {
+		t.Fatal("definitely-unsent calendar send unexpectedly succeeded")
+	}
+	good := &fakeCalendarPublicationTelegram{}
+	if err := publishCandidatesWithClient(ctx, cfg, store, candidate.RunID, []sqlitestore.CalendarCandidate{candidate}, good); err != nil {
+		t.Fatal(err)
+	}
+	if failing.sends != 1 || good.sends != 1 {
+		t.Fatalf("failing sends=%d retry sends=%d", failing.sends, good.sends)
+	}
+}
+
 func TestCallbackDataRoundTrip(t *testing.T) {
 	data := CallbackData(actionApprove, 42)
 	action, id, ok := ParseCallback(data)

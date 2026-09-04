@@ -162,6 +162,99 @@ func TestWorkspacePublishReplacementMakesOldButtonStale(t *testing.T) {
 	}
 }
 
+func TestWorkspaceManualPublishPreviewBlocksBaseAndPublishesOnlyManualText(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	doc := createPublishTestDocument(t, store)
+	now := time.Now().UTC()
+	base := createActivePublishPreviewWithTexts(t, store, doc.ID, []string{"AI text"}, 1050, now)
+	if err := store.BeginWorkspaceManualPublishEdit(ctx, base.ID, 77, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApproveWorkspacePublishRun(ctx, base.ID, now); err == nil {
+		t.Fatal("base preview was approved while manual text was awaited")
+	}
+	waiting, err := store.AwaitingWorkspaceManualPublishInputs(ctx, 10)
+	if err != nil || len(waiting) != 1 || waiting[0].ManualEditorUserID != 77 {
+		t.Fatalf("manual waits=%+v err=%v", waiting, err)
+	}
+	child, err := store.CreateWorkspaceManualPublishPreview(ctx, base.ID, 77, 2001, []string{"Manual text"}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.Status != "preview_sending" || child.Model != "manual" || len(child.Messages) != 1 || child.Messages[0].Text != "Manual text" {
+		t.Fatalf("manual child=%+v", child)
+	}
+	preview := child.Messages[0]
+	if err := store.MarkWorkspacePublishMessageSending(ctx, preview.ID, -1001, 11, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkWorkspacePublishMessageSent(ctx, preview.ID, 1051, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ActivateWorkspacePublishPreview(ctx, child.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.WorkspacePublishRunForCallback(ctx, doc.ID, 1050); err != nil || ok {
+		t.Fatalf("base callback remained active: ok=%v err=%v", ok, err)
+	}
+	approved, err := store.ApproveWorkspacePublishRun(ctx, child.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finals []WorkspacePublishMessage
+	for _, message := range approved.Messages {
+		if message.Kind == "final" {
+			finals = append(finals, message)
+		}
+	}
+	if len(finals) != 1 || finals[0].Text != "Manual text" {
+		t.Fatalf("manual finals=%+v", finals)
+	}
+}
+
+func TestArchiveWorkspaceUsefulPublicationClosesProvenance(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	doc := createPublishTestDocument(t, store)
+	if err := store.UpdateWorkspaceDocumentTarget(ctx, doc.ID, -1001, 18, 750, &now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateWorkspaceDocumentStatus(ctx, doc.ID, "published", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorkspaceDerivedMessage(ctx, WorkspaceDerivedMessage{
+		SourceChatID: doc.SourceChatID, SourceMessageID: doc.SourceMessageID, DerivedType: "legacy_migration_migrate_part_1",
+		DerivedChatID: -1001, DerivedTopicID: 18, DerivedMessageID: 750, Status: "published",
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	legacyIDs, err := store.WorkspaceUsefulLegacyMessageIDsForDocument(ctx, doc.ID, -1001, 18)
+	if err != nil || len(legacyIDs) != 1 || legacyIDs[0] != 750 {
+		t.Fatalf("legacy message IDs=%v err=%v", legacyIDs, err)
+	}
+	if err := store.ArchiveWorkspaceUsefulPublication(ctx, doc.ID, -1001, 18, []int{750}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	doc, err = store.WorkspaceDocumentByID(ctx, doc.ID)
+	if err != nil || doc.Status != "archived" {
+		t.Fatalf("archived doc=%+v err=%v", doc, err)
+	}
+	derived, err := store.WorkspaceDerivedMessagesBySource(ctx, doc.SourceChatID, doc.SourceMessageID, "legacy_migration_", []string{"closed"}, 10)
+	if err != nil || len(derived) != 1 || derived[0].DerivedMessageID != 750 {
+		t.Fatalf("closed provenance=%+v err=%v", derived, err)
+	}
+}
+
 func TestWorkspacePublishApprovalIsIdempotentAndUnknownIsNotResent(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(filepath.Join(t.TempDir(), "sova.db"))

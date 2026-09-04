@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +120,12 @@ func Serve(ctx context.Context, cfg config.Config, store *sqlitestore.Store) err
 	if err := resumeWorkspacePublishRuns(ctx, cfg, store, client, time.Now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Printf("workspace publish recovery unavailable: %v\n", err)
 	}
+	if err := store.RecoverWorkspaceManualPublishInputs(ctx, time.Now().UTC()); err != nil {
+		fmt.Printf("workspace manual publish capture recovery unavailable: %v\n", err)
+	}
+	if err := restoreWorkspaceManualPublishInputs(ctx, cfg, store, pendingInputs); err != nil {
+		fmt.Printf("workspace manual publish input recovery unavailable: %v\n", err)
+	}
 	reminderLoopDone := make(chan struct{})
 	go func() {
 		defer close(reminderLoopDone)
@@ -217,7 +225,7 @@ func handleWorkspaceMessage(ctx context.Context, cfg config.Config, store *sqlit
 	}
 	if !edited && command == "publish" {
 		if strings.EqualFold(strings.TrimSpace(rest), "cleanup") {
-			if err := handlePublishCleanup(ctx, cfg, store, client, publishDrafts, threadID); err != nil {
+			if err := handlePublishCleanup(ctx, cfg, store, client, pendingInputs, publishDrafts, threadID); err != nil {
 				sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось очистить publish preview", err)
 			}
 			return
@@ -418,7 +426,7 @@ func sendAndStoreWorkspaceTaskCard(ctx context.Context, cfg config.Config, store
 }
 
 func isDefinitiveTaskCardSendFailure(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "Bot API sendMessage failed:")
+	return err != nil && (nest.IsBotAPIClientError(err) || strings.Contains(err.Error(), "Bot API sendMessage failed:"))
 }
 
 func handleWorkspaceCallback(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingTaskDates map[pendingTaskDateKey]int64, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, publishDrafts map[int64]publishPreviewDraft, callback nest.CallbackQuery) {
@@ -729,7 +737,7 @@ func handleWorkspaceDocumentCommand(ctx context.Context, cfg config.Config, stor
 	case "collection":
 		err = handleCollectionCommand(ctx, cfg, store, client, pendingInputs, message, threadID, action, body, now)
 	case "useful":
-		err = handleUsefulCommand(ctx, cfg, store, client, message, threadID, action, body, now)
+		err = handleUsefulCommand(ctx, cfg, store, client, pendingInputs, message, threadID, action, body, now)
 	}
 	if err != nil {
 		sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось выполнить /"+command, err)
@@ -1093,7 +1101,7 @@ func handleCollectionCommand(ctx context.Context, cfg config.Config, store *sqli
 	return nil
 }
 
-func handleUsefulCommand(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, message nest.Message, threadID int, action, body string, now time.Time) error {
+func handleUsefulCommand(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, message nest.Message, threadID int, action, body string, now time.Time) error {
 	switch action {
 	case "help":
 		sendWorkspaceDocumentHelp(ctx, client, cfg.Workspace.ChatID, threadID, "useful")
@@ -1133,7 +1141,7 @@ func handleUsefulCommand(ctx context.Context, cfg config.Config, store *sqlitest
 			return err
 		}
 		return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Пометила публикацию как needing review.")
-	case "archive", "delete":
+	case "archive":
 		doc, err := resolveUsefulDocumentRef(ctx, cfg, store, body)
 		if err != nil {
 			return err
@@ -1145,6 +1153,25 @@ func handleUsefulCommand(ctx context.Context, cfg config.Config, store *sqlitest
 			return err
 		}
 		return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID, "Убрала публикацию из индекса Полезного. Сообщение в topic не удаляла.")
+	case "delete":
+		if threadID != cfg.Workspace.Topics.Inbox {
+			return fmt.Errorf("/useful delete запускается только из Inbox")
+		}
+		doc, err := resolveUsefulDocumentRef(ctx, cfg, store, body)
+		if err != nil {
+			return err
+		}
+		target := ""
+		if strings.Contains(body, "t.me/") {
+			messageID, err := usefulTelegramMessageIDFromArg(cfg, body)
+			if err != nil {
+				return err
+			}
+			target = strconv.Itoa(messageID)
+		}
+		return setPendingWorkspaceInput(ctx, client, pendingInputs, message, threadID, pendingWorkspaceInput{
+			Kind: "useful_delete", DocumentID: doc.ID, Title: doc.Title, Target: target,
+		}, "Удалить публикацию <b>"+html.EscapeString(doc.Title)+"</b> из topic <b>Полезное</b> и из индекса? Исходные сообщения не трогаю. Напиши <code>Удалить</code> или <code>Отмена</code>.")
 	case "show":
 		body = strings.TrimSpace(body)
 		if body == "" {
@@ -1269,10 +1296,19 @@ func handlePendingWorkspaceInputMessage(ctx context.Context, cfg config.Config, 
 		return handlePendingQuoteInput(ctx, cfg, store, client, pendingInputs, key, pending, message, threadID)
 	}
 	if command, _ := workspaceCommandName(message.Text); command != "" && !isCancelText(message.Text) {
+		if pending.Kind == "publish_manual" {
+			_ = store.CancelWorkspaceManualPublishEdit(ctx, pending.PublishRunID, message.From.ID, time.Now().UTC())
+		}
 		delete(pendingInputs, key)
 		return false
 	}
 	if isCancelText(message.Text) {
+		if pending.Kind == "publish_manual" {
+			if err := store.CancelWorkspaceManualPublishEdit(ctx, pending.PublishRunID, message.From.ID, time.Now().UTC()); err != nil {
+				sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось отменить ручную правку", err)
+				return true
+			}
+		}
 		delete(pendingInputs, key)
 		_ = client.SendMessage(ctx, nest.SendMessageRequest{
 			ChatID:          message.Chat.ID,
@@ -1364,10 +1400,38 @@ func handlePendingWorkspaceInputMessage(ctx context.Context, cfg config.Config, 
 		err = deleteCollectionDocument(ctx, cfg, store, client, threadID, pending.DocumentID, now)
 	case "publish_revision":
 		err = rerunPublishPreview(ctx, cfg, store, client, publishDrafts, pending.DocumentID, pending.PublishRunID, value, now)
+	case "publish_manual":
+		if threadID != cfg.Workspace.Topics.Inbox {
+			err = fmt.Errorf("ручной итоговый текст принимается только в Inbox")
+			break
+		}
+		if value == "" {
+			_ = client.SendMessage(ctx, nest.SendMessageRequest{
+				ChatID: message.Chat.ID, MessageThreadID: threadID,
+				Text: "Пришли непустой итоговый текст одним сообщением или напиши <code>Отмена</code>.", ParseMode: "HTML",
+			})
+			return true
+		}
+		err = createManualPublishPreview(ctx, cfg, store, client, publishDrafts, pending.DocumentID, pending.PublishRunID, message.From.ID, message.MessageID, value, now)
+	case "useful_delete":
+		if !isDeleteConfirmText(value) {
+			_ = client.SendMessage(ctx, nest.SendMessageRequest{
+				ChatID: message.Chat.ID, MessageThreadID: threadID,
+				Text: "Не удаляю. Напиши <code>Удалить</code> или <code>Отмена</code>.", ParseMode: "HTML",
+			})
+			return true
+		}
+		requestedMessageID, _ := strconv.Atoi(pending.Target)
+		err = deleteUsefulDocument(ctx, cfg, store, client, threadID, pending.DocumentID, requestedMessageID, now)
 	default:
 		err = fmt.Errorf("unknown pending input %q", pending.Kind)
 	}
 	if err != nil {
+		if pending.Kind == "publish_manual" {
+			if run, runErr := store.WorkspacePublishRunByID(ctx, pending.PublishRunID); runErr != nil || run.Status != "awaiting_approval" || run.ManualEditorUserID != message.From.ID {
+				delete(pendingInputs, key)
+			}
+		}
 		sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, threadID, "Не удалось обработать ответ", err)
 		return true
 	}
@@ -1825,17 +1889,33 @@ func resolveUsefulDocumentRef(ctx context.Context, cfg config.Config, store *sql
 	if ref == "" {
 		return sqlitestore.WorkspaceDocument{}, fmt.Errorf("format: /useful <command> <id|название|ссылка>")
 	}
-	if messageID, ok := telegramMessageIDFromArg(cfg.Workspace.ChatID, ref); ok {
+	if strings.Contains(ref, "t.me/") {
+		messageID, err := usefulTelegramMessageIDFromArg(cfg, ref)
+		if err != nil {
+			return sqlitestore.WorkspaceDocument{}, err
+		}
 		if doc, ok, err := store.WorkspaceDocumentByTargetMessage(ctx, cfg.Workspace.ChatID, messageID); err != nil {
 			return sqlitestore.WorkspaceDocument{}, err
-		} else if ok && isUsefulDocument(doc) {
+		} else if ok && isUsefulDocumentInTopic(cfg, doc) {
 			return doc, nil
 		}
+		if run, ok, err := store.WorkspacePublishRunByFinalMessage(ctx, cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, messageID); err != nil {
+			return sqlitestore.WorkspaceDocument{}, err
+		} else if ok {
+			doc, err := store.WorkspaceDocumentByID(ctx, run.DocumentID)
+			if err != nil {
+				return sqlitestore.WorkspaceDocument{}, err
+			}
+			if isUsefulDocumentInTopic(cfg, doc) {
+				return doc, nil
+			}
+		}
+		return sqlitestore.WorkspaceDocument{}, documentNotFoundError{DocType: "useful", Ref: ref}
 	}
 	if id, err := strconv.ParseInt(ref, 10, 64); err == nil && id > 0 {
 		doc, err := store.WorkspaceDocumentByID(ctx, id)
 		if err == nil {
-			if !isUsefulDocument(doc) {
+			if !isUsefulDocumentInTopic(cfg, doc) {
 				return sqlitestore.WorkspaceDocument{}, fmt.Errorf("document #%d is %s/%s, not published useful", id, doc.Type, doc.Status)
 			}
 			return doc, nil
@@ -1845,7 +1925,7 @@ func resolveUsefulDocumentRef(ctx context.Context, cfg config.Config, store *sql
 		}
 		if doc, ok, err := store.WorkspaceDocumentByTargetMessage(ctx, cfg.Workspace.ChatID, int(id)); err != nil {
 			return sqlitestore.WorkspaceDocument{}, err
-		} else if ok && isUsefulDocument(doc) {
+		} else if ok && isUsefulDocumentInTopic(cfg, doc) {
 			return doc, nil
 		}
 	}
@@ -1855,7 +1935,7 @@ func resolveUsefulDocumentRef(ctx context.Context, cfg config.Config, store *sql
 	}
 	var matches []sqlitestore.WorkspaceDocument
 	for _, doc := range docs {
-		if strings.EqualFold(strings.TrimSpace(doc.Title), ref) {
+		if isUsefulDocumentInTopic(cfg, doc) && strings.EqualFold(strings.TrimSpace(doc.Title), ref) {
 			matches = append(matches, doc)
 		}
 	}
@@ -1871,6 +1951,97 @@ func resolveUsefulDocumentRef(ctx context.Context, cfg config.Config, store *sql
 func isUsefulDocument(doc sqlitestore.WorkspaceDocument) bool {
 	return doc.Type == "note" && (doc.Status == "published" || doc.Status == "needs_review") &&
 		doc.TargetChatID != 0 && doc.TargetMessageID != 0
+}
+
+func isUsefulDocumentInTopic(cfg config.Config, doc sqlitestore.WorkspaceDocument) bool {
+	return isUsefulDocument(doc) && doc.TargetChatID == cfg.Workspace.ChatID &&
+		doc.TargetTopicID == cfg.Workspace.Topics.Useful
+}
+
+func usefulTelegramMessageIDFromArg(cfg config.Config, raw string) (int, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		(parsed.Host != "t.me" && parsed.Host != "telegram.me") {
+		return 0, fmt.Errorf("нужна полная ссылка на сообщение из topic Полезное")
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) != 4 || parts[0] != "c" || !sameTelegramInternalChat(cfg.Workspace.ChatID, parts[1]) {
+		return 0, fmt.Errorf("ссылка должна вести в текущую Workspace-группу")
+	}
+	topicID, err := strconv.Atoi(parts[2])
+	if err != nil || topicID != cfg.Workspace.Topics.Useful {
+		return 0, fmt.Errorf("ссылка должна вести именно в topic Полезное")
+	}
+	messageID, err := strconv.Atoi(parts[3])
+	if err != nil || messageID <= 0 {
+		return 0, fmt.Errorf("в ссылке нет корректного message_id")
+	}
+	return messageID, nil
+}
+
+func deleteUsefulDocument(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, threadID int, documentID int64, requestedMessageID int, now time.Time) error {
+	doc, err := store.WorkspaceDocumentByID(ctx, documentID)
+	if err != nil {
+		return err
+	}
+	if !isUsefulDocumentInTopic(cfg, doc) {
+		return fmt.Errorf("document #%d is not a published material in Useful", documentID)
+	}
+	messageIDs := []int{doc.TargetMessageID}
+	if run, ok, err := store.LatestPublishedWorkspacePublishRun(ctx, documentID); err != nil {
+		return err
+	} else if ok {
+		if run.Status != "completed" {
+			return fmt.Errorf("публикация ещё завершает фиксацию; повтори удаление через несколько секунд")
+		}
+		messageIDs = messageIDs[:0]
+		for _, item := range run.Messages {
+			if item.Kind == "final" && item.Status == "sent" && item.ChatID == cfg.Workspace.ChatID && item.TopicID == cfg.Workspace.Topics.Useful && item.MessageID > 0 {
+				messageIDs = append(messageIDs, item.MessageID)
+			}
+		}
+		if len(messageIDs) == 0 {
+			return fmt.Errorf("published run #%d has no confirmed messages in Useful", run.ID)
+		}
+		if requestedMessageID > 0 && !containsInt(messageIDs, requestedMessageID) {
+			return fmt.Errorf("ссылка ведёт не на текущую публикацию; укажи текущую ссылку из индекса Полезного")
+		}
+	} else {
+		legacyIDs, err := store.WorkspaceUsefulLegacyMessageIDsForDocument(ctx, documentID, cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful)
+		if err != nil {
+			return err
+		}
+		if len(legacyIDs) == 0 {
+			return fmt.Errorf("не удалось доказать, что сообщение принадлежит публикации Sova; удаление остановлено")
+		}
+		messageIDs = legacyIDs
+		if requestedMessageID > 0 && !containsInt(messageIDs, requestedMessageID) {
+			return fmt.Errorf("ссылка не принадлежит текущей legacy-публикации")
+		}
+	}
+	messageIDs = uniqueInts(messageIDs)
+	for _, messageID := range messageIDs {
+		if err := client.DeleteMessage(ctx, cfg.Workspace.ChatID, messageID); err != nil && !nest.IsTelegramMessageNotFound(err) {
+			return fmt.Errorf("delete Useful message %d: %w", messageID, err)
+		}
+	}
+	if err := store.ArchiveWorkspaceUsefulPublication(ctx, documentID, cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, messageIDs, now); err != nil {
+		return fmt.Errorf("Telegram message deleted, but local state was not finalized: %w", err)
+	}
+	if err := updateUsefulIndex(ctx, cfg, store, client, now); err != nil {
+		return fmt.Errorf("material deleted, but Useful index was not updated: %w", err)
+	}
+	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID,
+		fmt.Sprintf("Удалено из <b>Полезного</b>: %s (сообщений: <b>%d</b>). Исходники сохранены.", html.EscapeString(doc.Title), len(messageIDs)))
+}
+
+func containsInt(values []int, target int) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func sendDocumentResolveError(ctx context.Context, client *nest.Client, chatID int64, threadID int, docType, ref string, err error) error {
@@ -2267,7 +2438,7 @@ func rerunPublishPreview(ctx context.Context, cfg config.Config, store *sqlitest
 	if err != nil {
 		return err
 	}
-	if base.DocumentID != documentID || base.Status != "awaiting_approval" {
+	if base.DocumentID != documentID || base.Status != "awaiting_approval" || base.ManualEditorUserID != 0 {
 		return fmt.Errorf("publish preview устарел; запусти публикацию ещё раз")
 	}
 	// createPublishPreview activates the replacement only after all of its
@@ -2275,7 +2446,91 @@ func rerunPublishPreview(ctx context.Context, cfg config.Config, store *sqlitest
 	return createPublishPreview(ctx, cfg, store, client, publishDrafts, documentID, revision, now)
 }
 
-func handlePublishCleanup(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, publishDrafts map[int64]publishPreviewDraft, threadID int) error {
+func restoreWorkspaceManualPublishInputs(ctx context.Context, cfg config.Config, store *sqlitestore.Store, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput) error {
+	runs, err := store.AwaitingWorkspaceManualPublishInputs(ctx, 100)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if run.PreviewChatID != cfg.Workspace.ChatID || run.PreviewTopicID != cfg.Workspace.Topics.Inbox {
+			continue
+		}
+		key := pendingTaskDateKey{chatID: run.PreviewChatID, threadID: run.PreviewTopicID, userID: run.ManualEditorUserID}
+		pendingInputs[key] = pendingWorkspaceInput{Kind: "publish_manual", DocumentID: run.DocumentID, PublishRunID: run.ID}
+	}
+	return nil
+}
+
+func manualPublishMessages(text string) ([]string, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, fmt.Errorf("manual publish text is empty")
+	}
+	return normalizePublishMessages([]string{html.EscapeString(text)})
+}
+
+func createManualPublishPreview(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, publishDrafts map[int64]publishPreviewDraft, documentID, baseRunID, editorUserID int64, inputMessageID int, text string, now time.Time) error {
+	base, err := store.WorkspacePublishRunByID(ctx, baseRunID)
+	if err != nil {
+		return err
+	}
+	if base.DocumentID != documentID || base.Status != "awaiting_approval" || base.ManualEditorUserID != editorUserID {
+		return fmt.Errorf("publish preview устарел; запусти публикацию ещё раз")
+	}
+	messages, err := manualPublishMessages(text)
+	if err != nil {
+		return err
+	}
+	run, err := store.CreateWorkspaceManualPublishPreview(ctx, baseRunID, editorUserID, inputMessageID, messages, now)
+	if err != nil {
+		return err
+	}
+	rows, err := store.WorkspacePublishMessages(ctx, run.ID, "preview")
+	if err != nil {
+		return err
+	}
+	for index, row := range rows {
+		request := nest.SendMessageRequest{
+			ChatID: cfg.Workspace.ChatID, MessageThreadID: cfg.Workspace.Topics.Inbox,
+			Text: row.Text, ParseMode: "HTML",
+		}
+		if index == len(rows)-1 {
+			request.ReplyMarkup = PublishPreviewMarkup(documentID)
+		}
+		if _, _, err := sendDurablePublishMessage(ctx, store, client, row, request, now); err != nil {
+			persisted, _ := store.WorkspacePublishMessages(context.WithoutCancel(ctx), run.ID, "preview")
+			deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, workspacePublishMessageIDs(persisted))
+			_ = store.FailWorkspacePublishRun(context.WithoutCancel(ctx), run.ID, publishTelemetryError(err), now)
+			_ = store.ResetWorkspaceManualPublishCapture(context.WithoutCancel(ctx), baseRunID, run.ID, now)
+			_ = writeWorkspacePublishRunsIndex(context.WithoutCancel(ctx), cfg, store)
+			return err
+		}
+	}
+	oldRuns, err := store.ActivateWorkspacePublishPreview(ctx, run.ID, now)
+	if err != nil {
+		return err
+	}
+	persisted, err := store.WorkspacePublishRunByID(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	publishDrafts[documentID] = publishPreviewDraft{
+		RunID: run.ID, DocumentID: documentID,
+		PreviewMessageIDs: workspacePublishMessageIDs(persisted.Messages),
+		PreviewTexts:      messages, Model: "manual",
+	}
+	for _, old := range oldRuns {
+		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, workspacePublishMessageIDs(old.Messages))
+	}
+	_ = writeWorkspacePublishRunsIndex(ctx, cfg, store)
+	_ = client.SendMessage(ctx, nest.SendMessageRequest{
+		ChatID: cfg.Workspace.ChatID, MessageThreadID: cfg.Workspace.Topics.Inbox,
+		Text: "Ручной preview готов. Проверь его и нажми <b>Опубликовать</b> для последнего подтверждения.", ParseMode: "HTML",
+	})
+	return nil
+}
+
+func handlePublishCleanup(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, publishDrafts map[int64]publishPreviewDraft, threadID int) error {
 	runs, err := store.AwaitingWorkspacePublishRuns(ctx, 100)
 	if err != nil {
 		return err
@@ -2291,6 +2546,7 @@ func handlePublishCleanup(ctx context.Context, cfg config.Config, store *sqlites
 		}
 		ids := workspacePublishMessageIDs(run.Messages)
 		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, ids)
+		clearPendingPublishRun(pendingInputs, run.ID)
 		messages += len(ids)
 		delete(publishDrafts, run.DocumentID)
 		drafts++
@@ -2462,6 +2718,10 @@ func handlePublishCallback(ctx context.Context, cfg config.Config, store *sqlite
 	now := time.Now().UTC()
 	switch action {
 	case "approve":
+		if run.ManualEditorUserID != 0 {
+			_ = client.AnswerCallbackQuery(ctx, callback.ID, "Жду итоговый текст для ручной версии.")
+			return
+		}
 		if err := approvePublishPreview(ctx, cfg, store, client, run, callback.Message, now); err != nil {
 			_ = client.AnswerCallbackQuery(ctx, callback.ID, "Не получилось опубликовать.")
 			sendWorkspaceError(ctx, client, cfg.Workspace.ChatID, callback.Message.MessageThreadID, "Не удалось опубликовать", err)
@@ -2479,12 +2739,17 @@ func handlePublishCallback(ctx context.Context, cfg config.Config, store *sqlite
 			return
 		}
 		deletePublishPreviewMessages(ctx, client, cfg.Workspace.ChatID, workspacePublishMessageIDs(run.Messages))
+		clearPendingPublishRun(pendingInputs, run.ID)
 		delete(publishDrafts, documentID)
 		_ = writeWorkspacePublishRunsIndex(ctx, cfg, store)
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Отменила preview.")
 	case "edit":
 		if run.Status != "awaiting_approval" {
 			_ = client.AnswerCallbackQuery(ctx, callback.ID, "Публикация уже подтверждена; preview нельзя менять.")
+			return
+		}
+		if run.ManualEditorUserID != 0 {
+			_ = client.AnswerCallbackQuery(ctx, callback.ID, "Сначала пришли ручной текст или отмени ожидание.")
 			return
 		}
 		key := pendingTaskDateKey{chatID: callback.Message.Chat.ID, threadID: callback.Message.MessageThreadID, userID: callback.From.ID}
@@ -2496,8 +2761,33 @@ func handlePublishCallback(ctx context.Context, cfg config.Config, store *sqlite
 			ParseMode:       "HTML",
 		})
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Жду правку.")
+	case "manual":
+		if run.Status != "awaiting_approval" {
+			_ = client.AnswerCallbackQuery(ctx, callback.ID, "Публикация уже подтверждена; preview нельзя менять.")
+			return
+		}
+		if err := store.BeginWorkspaceManualPublishEdit(ctx, run.ID, callback.From.ID, now); err != nil {
+			_ = client.AnswerCallbackQuery(ctx, callback.ID, "Ручная правка уже занята или устарела.")
+			return
+		}
+		key := pendingTaskDateKey{chatID: callback.Message.Chat.ID, threadID: callback.Message.MessageThreadID, userID: callback.From.ID}
+		pendingInputs[key] = pendingWorkspaceInput{Kind: "publish_manual", DocumentID: documentID, PublishRunID: run.ID}
+		_ = client.SendMessage(ctx, nest.SendMessageRequest{
+			ChatID: callback.Message.Chat.ID, MessageThreadID: callback.Message.MessageThreadID,
+			Text:      "Пришли <b>полный итоговый текст</b> одним сообщением. Я покажу новый preview, и только после ещё одного подтверждения он уйдёт в Полезное. Отменить можно словом <code>Отмена</code>.",
+			ParseMode: "HTML",
+		})
+		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Жду итоговый текст.")
 	default:
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Неизвестное действие.")
+	}
+}
+
+func clearPendingPublishRun(pendingInputs map[pendingTaskDateKey]pendingWorkspaceInput, runID int64) {
+	for key, pending := range pendingInputs {
+		if pending.PublishRunID == runID {
+			delete(pendingInputs, key)
+		}
 	}
 }
 
@@ -2702,8 +2992,9 @@ func renderUsefulIndex(ctx context.Context, cfg config.Config, store *sqlitestor
 		b.WriteString("<i>Пока пусто.</i>")
 		return b.String(), nil
 	}
-	for _, doc := range docs {
-		b.WriteString("• ")
+	sortWorkspaceDocumentsOldestFirst(docs, true)
+	for index, doc := range docs {
+		fmt.Fprintf(&b, "%d. ", index+1)
 		writeHTMLLinkOrText(&b, workspaceMessageLink(cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, doc.TargetMessageID), doc.Title)
 		b.WriteString(" ")
 		b.WriteString(pleasantDocumentEmoji(doc.ID))
@@ -2719,7 +3010,9 @@ func PublishPreviewMarkup(documentID int64) *nest.InlineKeyboardMarkup {
 	return &nest.InlineKeyboardMarkup{InlineKeyboard: [][]nest.InlineKeyboardButton{{
 		{Text: "✅ Опубликовать", CallbackData: PublishCallbackData("approve", documentID)},
 		{Text: "🚫 Отменить", CallbackData: PublishCallbackData("cancel", documentID)},
-		{Text: "✏️ Изменить", CallbackData: PublishCallbackData("edit", documentID)},
+	}, {
+		{Text: "✨ ИИ-правка", CallbackData: PublishCallbackData("edit", documentID)},
+		{Text: "📝 Вручную", CallbackData: PublishCallbackData("manual", documentID)},
 	}}}
 }
 
@@ -2864,8 +3157,8 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 	if selectedType == "" {
 		selectedType = "all"
 	}
-	if selectedType != "all" && selectedType != "note" && selectedType != "template" && selectedType != "collection" && selectedType != "useful" && selectedType != "quote" {
-		return SeedDocumentIndexesResult{}, fmt.Errorf("document index type must be all, note, template, collection, useful, or quote")
+	if selectedType != "all" && selectedType != "task" && selectedType != "note" && selectedType != "template" && selectedType != "collection" && selectedType != "useful" && selectedType != "quote" {
+		return SeedDocumentIndexesResult{}, fmt.Errorf("document index type must be all, task, note, template, collection, useful, or quote")
 	}
 	now := opts.Now
 	if now.IsZero() {
@@ -2873,6 +3166,33 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 	}
 	client := nest.New(cfg.Workspace.BotToken)
 	result := SeedDocumentIndexesResult{DryRun: opts.DryRun}
+	if selectedType == "all" || selectedType == "task" {
+		tasks, err := store.DeferredWorkspaceTasks(ctx, 100)
+		if err != nil {
+			return SeedDocumentIndexesResult{}, err
+		}
+		location := mustLocation(cfg.Timezone)
+		text := formatTaskBacklog(tasks, location, now.In(location))
+		item := SeedDocumentIndexItem{Type: "task", Topic: "Задачи", TopicID: cfg.Workspace.Topics.Tasks, Status: "dry_run", Text: text}
+		if opts.Reset {
+			item.Status = "reset_dry_run"
+		}
+		if !opts.DryRun {
+			var messageID int
+			var status string
+			if opts.Reset {
+				messageID, status, err = sendWorkspaceDocumentIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Tasks, taskBacklogIndexKey, text, now, true)
+			} else {
+				messageID, status, err = upsertWorkspacePinnedIndexMessage(ctx, cfg, store, client, cfg.Workspace.Topics.Tasks, taskBacklogIndexKey, text, now)
+			}
+			if err != nil {
+				return SeedDocumentIndexesResult{}, err
+			}
+			item.MessageID = messageID
+			item.Status = status
+		}
+		result.Items = append(result.Items, item)
+	}
 	for _, docType := range []string{"note", "template", "collection"} {
 		if selectedType != "all" && selectedType != docType {
 			continue
@@ -3129,10 +3449,12 @@ func renderNotesIndex(docs []sqlitestore.WorkspaceDocument, partsByDoc map[int64
 		b.WriteString("<i>Пока пусто.</i>")
 		return b.String()
 	}
-	for _, doc := range docs {
+	docs = append([]sqlitestore.WorkspaceDocument(nil), docs...)
+	sortWorkspaceDocumentsOldestFirst(docs, false)
+	for index, doc := range docs {
 		parts := partsByDoc[doc.ID]
 		firstLink := firstPartLink(parts)
-		b.WriteString("• ")
+		fmt.Fprintf(&b, "%d. ", index+1)
 		writeBoldHTMLLinkOrText(&b, firstLink, doc.Title)
 		b.WriteString(" ")
 		b.WriteString(pleasantDocumentEmoji(doc.ID))
@@ -3201,22 +3523,26 @@ func renderTemplatesIndex(types []sqlitestore.WorkspaceDocumentType, docs []sqli
 		types = []sqlitestore.WorkspaceDocumentType{{DocType: "template", Name: "Остальное", Emoji: pleasantDocumentTypeEmoji("Остальное"), Status: "active"}}
 	}
 	byType := map[string][]sqlitestore.WorkspaceDocument{}
+	docs = append([]sqlitestore.WorkspaceDocument(nil), docs...)
+	sortWorkspaceDocumentsOldestFirst(docs, false)
 	for _, doc := range docs {
 		category := normalizeTemplateTypeName(doc.Category)
 		byType[category] = append(byType[category], doc)
 	}
+	number := 0
 	for _, docTypeRow := range types {
 		name := normalizeTemplateTypeName(docTypeRow.Name)
 		if name == "" {
 			continue
 		}
-		b.WriteString("• <b>")
+		b.WriteString("<b>")
 		b.WriteString(html.EscapeString(name))
 		b.WriteString("</b> ")
 		b.WriteString(html.EscapeString(documentTypeEmoji(docTypeRow)))
 		b.WriteString("\n")
 		for _, doc := range byType[name] {
-			b.WriteString("  ")
+			number++
+			fmt.Fprintf(&b, "  %d. ", number)
 			writeBoldHTMLLinkOrText(&b, firstPartLink(partsByDoc[doc.ID]), doc.Title)
 			b.WriteString("\n")
 			for _, part := range partsByDoc[doc.ID] {
@@ -3239,8 +3565,10 @@ func renderCollectionsIndex(docs []sqlitestore.WorkspaceDocument, partsByDoc map
 		b.WriteString("<i>Пока пусто.</i>")
 		return b.String()
 	}
-	for _, doc := range docs {
-		b.WriteString("• ")
+	docs = append([]sqlitestore.WorkspaceDocument(nil), docs...)
+	sortWorkspaceDocumentsOldestFirst(docs, false)
+	for index, doc := range docs {
+		fmt.Fprintf(&b, "%d. ", index+1)
 		writeHTMLLinkOrText(&b, documentTargetOrFirstPartLink(doc, partsByDoc[doc.ID]), doc.Title)
 		b.WriteString(" ")
 		b.WriteString(pleasantDocumentEmoji(doc.ID))
@@ -3252,6 +3580,25 @@ func renderCollectionsIndex(docs []sqlitestore.WorkspaceDocument, partsByDoc map
 		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func sortWorkspaceDocumentsOldestFirst(docs []sqlitestore.WorkspaceDocument, published bool) {
+	sort.SliceStable(docs, func(i, j int) bool {
+		left := docs[i].CreatedAt
+		right := docs[j].CreatedAt
+		if published {
+			if docs[i].PublishedAt != nil {
+				left = *docs[i].PublishedAt
+			}
+			if docs[j].PublishedAt != nil {
+				right = *docs[j].PublishedAt
+			}
+		}
+		if !left.Equal(right) {
+			return left.Before(right)
+		}
+		return docs[i].ID < docs[j].ID
+	})
 }
 
 func workspaceDocumentIndexTarget(cfg config.Config, docType string) (int, string, error) {
@@ -3426,6 +3773,7 @@ func UsefulHelpMessageText() string {
 • <code>/useful rename ID|ссылка|название | Новое название</code> — переименовать публикацию в индексе Полезного.
 • <code>/useful review ID|ссылка|название</code> — пометить публикацию как needing review.
 • <code>/useful archive ID|ссылка|название</code> — убрать публикацию из индекса, не удаляя сообщение.
+• <code>/useful delete ID|ссылка|название</code> — после подтверждения удалить bot-публикацию из topic и архивировать её в индексе.
 • <code>/useful show</code> или <code>/useful show ID|ссылка|название</code> — обновить индекс или показать публикацию.
 • <code>/useful help</code> — показать эту справку.`)
 }
@@ -4186,6 +4534,13 @@ func formatTaskBacklog(tasks []sqlitestore.WorkspaceTask, location *time.Locatio
 	b.WriteString("<b>Отложенные задачи</b>\n\n")
 	written := 0
 	deferredCount := 0
+	tasks = append([]sqlitestore.WorkspaceTask(nil), tasks...)
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if !tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
+			return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+		}
+		return tasks[i].ID < tasks[j].ID
+	})
 	for _, task := range tasks {
 		if task.Status == "deferred" {
 			deferredCount++
@@ -4196,7 +4551,7 @@ func formatTaskBacklog(tasks []sqlitestore.WorkspaceTask, location *time.Locatio
 			continue
 		}
 		var line strings.Builder
-		line.WriteString("• ")
+		fmt.Fprintf(&line, "%d. ", written+1)
 		taskText := html.EscapeString(task.Text)
 		if task.Emoji != "" {
 			taskText += " " + html.EscapeString(task.Emoji)
@@ -4220,7 +4575,11 @@ func formatTaskBacklog(tasks []sqlitestore.WorkspaceTask, location *time.Locatio
 			}
 		}
 		line.WriteString("\n")
-		if !telegramHTMLFits(b.String()+line.String(), workspaceTelegramSafeTextLimit) {
+		candidate := b.String() + line.String()
+		if written+1 < deferredCount {
+			candidate += fmt.Sprintf("\n<i>Показаны %d из %d отложенных задач.</i>", written+1, deferredCount)
+		}
+		if !telegramHTMLFits(candidate, workspaceTelegramSafeTextLimit) {
 			break
 		}
 		b.WriteString(line.String())
