@@ -137,7 +137,7 @@ func DoctorChecks(ctx context.Context, cfg config.Config, store *sqlitestore.Sto
 		configuredCheck("workspace_legacy_source", strings.TrimSpace(cfg.Workspace.LegacySource) != "", "set SOVA_WORKSPACE_LEGACY_SOURCE to the old InSync source"),
 		configuredCheck("telegram_credentials", cfg.TelegramAppID != 0 && strings.TrimSpace(cfg.TelegramAppHash) != "", "set SOVA_TELEGRAM_APP_ID and SOVA_TELEGRAM_APP_HASH"),
 		configuredCheck("workspace_group", cfg.WorkspaceConfigured(), "set Workspace bot token, InSync v1.0 chat ID, and seven topic IDs"),
-		configuredCheck("control_group", cfg.ControlConfigured(), "set Control bot token, chat ID, and eight topic IDs"),
+		configuredCheck("control_group", cfg.ControlConfigured(), "set Control bot token, chat ID, and Workspace, Nest, Test Lab topic IDs"),
 	}
 	if store == nil {
 		return append(checks, Check{Name: "workspace_database", Status: "needs_input", Message: "open SQLite store before audit"})
@@ -834,15 +834,9 @@ func TopicPinDrafts() []TopicPinDraft {
 
 func ControlTopicPinDrafts() []TopicPinDraft {
 	return []TopicPinDraft{
-		{"Status", "Главная панель состояния. Сюда попадают короткие operational notes, health-check результаты и всё, что отвечает на вопрос: <i>жив ли Sova прямо сейчас?</i>"},
-		{"Errors", "Ошибки, падения, странные ответы API и всё, что требует разборки.\n\n<blockquote>Одно понятное сообщение на проблему, короткий контекст и ссылка на источник, если она есть.</blockquote>"},
-		{"Runs", "История запусков и служебных проходов: sync, audit, review-preview, миграции, публикации. Этот топик помогает восстановить, что именно было сделано и когда."},
-		{"Review", "Ручная проверка: спорные миграции, preview карточек, сомнительные коллекции, шаблоны и материалы, которые нельзя публиковать автоматически."},
-		{"Test Lab", "Песочница для проверок. Здесь можно гонять тестовые команды, формат сообщений, кнопки и новые сценарии до попадания в живой Workspace."},
-		{"Workspace", "Служебные заметки про <b>InSync v1.0</b>: правила тем, качество закрепов, миграционные решения, поведение задач, заметок, шаблонов и коллекций."},
-		{"Nest", "Служебные заметки про <b>Sova.Nest</b>: digest, calendar approval, источники, cooldown, публикации и всё, что не должно смешиваться с личным Workspace."},
-		{"Ideas", "Идеи для будущих улучшений. Сюда можно складывать гипотезы, маленькие UX-наблюдения и желания, которые пока рано превращать в задачи."},
-		{"Archive", "Служебный архив переносов и решений: сюда можно складывать материалы, которые не должны жить в Workspace, но должны остаться под рукой для проверки истории.\n\n<blockquote>Archive не является рабочим inbox: новые задачи, идеи и review лучше отправлять в профильные Control-топики.</blockquote>"},
+		{"Workspace", "Всё про <b>InSync v1.0</b>: задачи, заметки, публикации, заготовки и коллекции. Ошибки, идеи, решения и результаты проверок обсуждаем здесь, рядом с контекстом.\n\nЕсли что-то сломалось, приложи команду, ответ бота и ссылку на сообщение."},
+		{"Nest", "Всё про <b>Sova.Nest</b>: обзоры, календарь и учебные источники. Ошибки, идеи, решения и состояние Nest обсуждаем здесь.\n\nУчебные обзоры и подтверждение событий остаются в самой группе Nest."},
+		{"Test Lab", "Песочница для ручной проверки формата, карточек и кнопок. Поддержку каждой команды в этом топике нужно проверять отдельно: команды Workspace и Nest по-прежнему принимаются в своих группах.\n\nРезультат проверки и найденную проблему записываем в Workspace или Nest."},
 	}
 }
 

@@ -33,7 +33,7 @@ func Run(ctx context.Context, cfg config.Config) []Check {
 		searchConfigCheck(cfg),
 		configuredCheck("workspace_audit", cfg.WorkspaceAuditConfigured(), "set SOVA_WORKSPACE_LEGACY_SOURCE plus Telegram app ID/hash"),
 		configuredCheck("workspace_group", cfg.WorkspaceConfigured(), "set Workspace bot token, InSync v1.0 chat ID, and all Workspace topic IDs"),
-		configuredCheck("control_group", cfg.ControlConfigured(), "set Control bot token, chat ID, and all Control topic IDs"),
+		configuredCheck("control_group", cfg.ControlConfigured(), "set Control bot token, chat ID, and Workspace, Nest, Test Lab topic IDs"),
 		configuredCheck("google_calendar_id", cfg.GoogleCalendarID != "", "set SOVA_GOOGLE_CALENDAR_ID"),
 		configuredCheck("google_oauth_credentials", fileExists(cfg.GoogleCredentials), "place OAuth Desktop client JSON at "+cfg.GoogleCredentials),
 		configuredCheck("google_calendar_token", fileExists(cfg.GoogleToken), "run `sova google-login` after setting OAuth credentials"),

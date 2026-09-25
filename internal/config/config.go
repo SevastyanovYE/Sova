@@ -394,10 +394,8 @@ func (c Config) WorkspaceAuditConfigured() bool {
 
 func (c Config) ControlConfigured() bool {
 	return strings.TrimSpace(c.Control.BotToken) != "" && c.Control.ChatID != 0 &&
-		c.Control.Topics.Status > 0 && c.Control.Topics.Errors > 0 &&
-		c.Control.Topics.Runs > 0 && c.Control.Topics.Review > 0 &&
-		c.Control.Topics.TestLab > 0 && c.Control.Topics.Workspace > 0 &&
-		c.Control.Topics.Nest > 0 && c.Control.Topics.Ideas > 0
+		c.Control.Topics.Workspace > 0 && c.Control.Topics.Nest > 0 &&
+		c.Control.Topics.TestLab > 0
 }
 
 func (c Config) IsCommandTopic(threadID int) bool {

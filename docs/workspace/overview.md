@@ -9,8 +9,7 @@ from the existing `Sova.Nest` study digest/calendar MVP.
 - `Sova.Nest`: current study digest and calendar approval behavior.
 - `Sova.Workspace`: personal thought workspace, legacy InSync audit, tasks,
   notes, templates, collections, and later migration into `InSync v1.0`.
-- `Sova.Control`: service/control supergroup for status, errors, runs, review,
-  test lab, Workspace/Nest progress, and ideas.
+- `Sova.Control`: service/control supergroup with Workspace, Nest, and Test Lab topics.
 
 The Workspace MVP is staged around explicit stop points. Stage 1 is
 non-destructive audit/indexing. Stage 2 merges user review decisions into a
@@ -35,19 +34,21 @@ when it is an admin and the MTProto session can resolve the group.
 
 ## Target Control Topics
 
-`Sova.Control` starts with:
+`Sova.Control` uses three topics:
 
-- `Status`
-- `Errors`
-- `Runs`
-- `Review`
-- `Test Lab`
-- `Workspace`
-- `Nest`
-- `Ideas`
+- `Workspace`: Workspace problems, ideas, operational notes, and decisions.
+- `Nest`: digest/calendar problems, ideas, and operational notes.
+- `Test Lab`: isolated manual presentation and smoke checks; existing bot command
+  routing still requires the corresponding Workspace/Nest group.
 
-The Control bot can create missing topics with `workspace bootstrap-topics`
-when it is an admin and the MTProto session can resolve the group.
+Bootstrap creates only these topics. Strict configuration checks no longer
+require Status, Errors, Runs, Review, Ideas, or Archive. Their old environment
+keys remain supported for existing history and migration compatibility.
+
+For an existing group, keep the current Workspace, Nest, and Test Lab topic IDs.
+After inspecting the group, close obsolete topics in Telegram to retain history;
+do not delete or move their messages. Neither bootstrap nor pin seeding closes
+old topics automatically. Pin seeding targets only the three retained topics.
 
 ## Workspace Commands
 
@@ -223,12 +224,17 @@ updated. Later source edits mark the published document/derived rows
 `/useful delete` first asks for the word `Удалить`, then deletes the
 owned bot publication from the configured Useful topic, closes its derived
 provenance, archives the document, and refreshes the index. User-authored source
-messages are never deleted.
+messages are never deleted. If Telegram refuses deletion (for example because
+the publication is too old), the bot leaves it indexed, reports any partially
+removed messages, and ends the confirmation attempt. Delete the remaining
+publication messages manually, then repeat `/useful delete <ID>` and confirm
+to reconcile the index, provenance, and search state. `/useful archive` remains
+an index-only action.
 
 Dynamic pinned indexes use numbered entries in oldest-first order, so new
 entries are appended below existing ones. Note subparts retain their bracketed
 `[Часть …]` lines. Template type headings remain headings while the
-templates beneath them are numbered.
+templates beneath each heading are numbered from 1 independently.
 
 `/quote` is an Inbox-only wizard. It asks for the required quote text, then an
 optional author and optional title, and shows a Save/Cancel preview. The final

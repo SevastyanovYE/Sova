@@ -2,6 +2,7 @@ package overview
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -611,4 +612,36 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestDigestRepeatedLeadIsRemoved(t *testing.T) {
+	for _, tc := range []struct{ lead, details, want string }{
+		{"Нет ясности", "Нет ясности с расписанием.", "с расписанием."},
+		{"Нет ясности", "нет ясности Нет ясности с расписанием.", "с расписанием."},
+		{"Перенос первой пары", "Перенос первой пары на завтра.", "на завтра."},
+		{"Нет ясности", "с расписанием.", "с расписанием."},
+		{"Нет ясности", "Нет ясностию такой.", "Нет ясностию такой."},
+		{"Нет ясности", "Нет ясности", ""},
+	} {
+		t.Run(tc.details, func(t *testing.T) {
+			raw, err := json.Marshal(geminiDigestPayload{Summary: "Новости.", Notes: []geminiDigestNote{{SourceID: "m1", Lead: tc.lead, Details: tc.details}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := parseGeminiDigestPayload(string(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Notes[0].Details != tc.want {
+				t.Fatalf("details = %q, want %q", got.Notes[0].Details, tc.want)
+			}
+			if tc.want != "" {
+				rendered := renderDigest(got, map[string]string{"m1": "https://t.me/c/123/456"})
+				want := `">` + tc.lead + `</a> ` + tc.want
+				if !strings.Contains(rendered, want) {
+					t.Fatalf("rendered = %s", rendered)
+				}
+			}
+		})
+	}
 }

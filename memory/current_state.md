@@ -1,5 +1,13 @@
 # Current State
 
+- September 2026 fixes are prepared locally, not deployed: digest lead deduplication,
+  per-type template numbering, actionable Useful deletion failures with one-attempt
+  confirmations, atomic Calendar token persistence, and compact three-topic Control.
+  Read-only Telegram inspection confirmed `invalid_grant` on Calendar candidate #18
+  on September 16; Google Auth Platform still shows External / Testing for the
+  Sova Calendar project. Reauthorization and production token installation remain
+  outstanding. Full incident evidence: `docs/september_2026_fixes.md`.
+
 - Production moved to a Google Cloud Compute Engine `e2-micro` in
   `us-central1-a` on 2026-08-07. It uses Debian 12, a 10 GB `pd-standard` disk,
   a custom dual-stack subnet with no external IPv4, external IPv6 restricted

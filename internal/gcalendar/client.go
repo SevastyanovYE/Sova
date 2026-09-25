@@ -8,6 +8,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -184,14 +185,37 @@ func CreateEvent(ctx context.Context, cfg config.Config, event Event) (CreatedEv
 	source := oauthConfig.TokenSource(ctx, token)
 	refreshed, err := source.Token()
 	if err != nil {
-		return CreatedEvent{}, fmt.Errorf("refresh Google OAuth token: %w", err)
+		return CreatedEvent{}, googleTokenError(err)
 	}
-	if refreshed.AccessToken != token.AccessToken || !refreshed.Expiry.Equal(token.Expiry) {
-		_ = saveToken(cfg.GoogleToken, refreshed)
+	if refreshed.AccessToken != token.AccessToken || refreshed.RefreshToken != token.RefreshToken || !refreshed.Expiry.Equal(token.Expiry) {
+		if err := saveToken(cfg.GoogleToken, refreshed); err != nil {
+			return CreatedEvent{}, fmt.Errorf("save refreshed Google OAuth token: %w", err)
+		}
 	}
 	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(refreshed))
 	endpoint := "https://www.googleapis.com/calendar/v3/calendars/" + url.PathEscape(cfg.GoogleCalendarID) + "/events"
 	return createEventWithClient(ctx, client, endpoint, event)
+}
+
+// Do not expose the token endpoint body: it can contain credential material.
+func googleTokenError(err error) error {
+	var retrieve *oauth2.RetrieveError
+	if errors.As(err, &retrieve) {
+		switch retrieve.ErrorCode {
+		case "invalid_grant", "invalid_token":
+			return fmt.Errorf("Google Calendar: доступ истёк или отозван; повторите авторизацию через `sova google-login`, обновите токен сервиса и снова нажмите Approve")
+		case "invalid_client", "unauthorized_client":
+			return fmt.Errorf("Google Calendar: OAuth-клиент отклонён; проверьте настройки Google OAuth и повторите `sova google-login`")
+		case "temporarily_unavailable", "server_error":
+			return fmt.Errorf("Google Calendar: временная ошибка обновления доступа; повторите попытку позже")
+		default:
+			return fmt.Errorf("Google Calendar: не удалось обновить доступ; проверьте подключение и настройки Google OAuth")
+		}
+	}
+	if strings.Contains(err.Error(), "token expired and refresh token is not set") {
+		return fmt.Errorf("Google Calendar: отсутствует refresh token; повторите авторизацию через `sova google-login`")
+	}
+	return fmt.Errorf("refresh Google OAuth token: %w", err)
 }
 
 // EventIDForCandidate returns a stable Google Calendar event ID. Google event
@@ -336,7 +360,24 @@ func saveToken(path string, token *oauth2.Token) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	file, err := os.CreateTemp(filepath.Dir(path), ".google-token-*")
+	if err != nil {
+		return err
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
 }
 
 func googleEventPayload(event Event) map[string]any {

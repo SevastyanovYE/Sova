@@ -7,7 +7,7 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-09-04
+## [0.3.1] - 2026-09-25
 
 ### Added
 
@@ -18,10 +18,15 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - обзоры Nest теперь показывают главное курсивным резюме, а подробности — короткими примечаниями со встроенной в первые два-три слова ссылкой; отдельные блоки «Главное», «Календарь» и «Источники» убраны
 - динамические закрепы Workspace теперь нумеруются и показывают старые записи выше, а новые добавляются вниз; формат `[Часть …]` в Заметках сохранён
+- Control использует три основных топика: Workspace, Nest и Test Lab; старые ID совместимы, лишние топики больше не создаются bootstrap-командой
 
 ### Fixed
 
 - временный TCP/IPv6 timeout Telegram до отправки запроса получает несколько ограниченных повторов и больше не блокирует безопасное восстановление как неоднозначная доставка
+- повтор первых слов в примечаниях Nest убирается перед рендерингом ссылки
+- в Заготовках нумерация начинается с единицы отдельно в каждой группе
+- отказ Telegram удалить Полезное получает понятный ответ; индекс сохраняется до полного удаления, а завершённая попытка больше не перехватывает следующие сообщения Inbox
+- ошибки отозванной Google Calendar авторизации объясняют повторный вход; обновлённый токен сохраняется атомарно, ошибки сохранения не игнорируются
 
 ## [0.2.0] - 2026-08-07
 
@@ -73,7 +78,7 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - командные закрепы обновляются без дублей; отдельная справка по цитатам добавлена в «Опыт»
 - индекс цитат можно безопасно создать отдельно через `seed-document-indexes --type quote`, не трогая старые индексы
 
-[Unreleased]: https://github.com/SevastyanovYE/Sova/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/SevastyanovYE/Sova/compare/v0.2.0...v0.3.0
+[Unreleased]: https://github.com/SevastyanovYE/Sova/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/SevastyanovYE/Sova/compare/a921c333d6db83351eef9bd7965783c43aaf69e8...v0.3.1
 [0.2.0]: https://github.com/SevastyanovYE/Sova/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/SevastyanovYE/Sova/compare/0b7c4b4cd10bbab9d764a327f0e39744413ace9d...v0.1.0

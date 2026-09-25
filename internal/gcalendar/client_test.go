@@ -6,9 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
 )
 
 func TestGoogleEventPayload(t *testing.T) {
@@ -110,5 +114,58 @@ func TestOAuthCallbackHandlerValidatesStateAndReturnsCode(t *testing.T) {
 	callback := <-callbacks
 	if callback.err != nil || callback.code != "auth-code" {
 		t.Fatalf("callback = %+v", callback)
+	}
+}
+
+func TestGoogleTokenErrorExplainsRecoveryWithoutProviderBody(t *testing.T) {
+	for _, tc := range []struct{ code, want string }{
+		{"invalid_grant", "sova google-login"},
+		{"invalid_token", "sova google-login"},
+		{"invalid_client", "OAuth-клиент"},
+		{"unauthorized_client", "OAuth-клиент"},
+		{"temporarily_unavailable", "позже"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			err := googleTokenError(&oauth2.RetrieveError{ErrorCode: tc.code, Body: []byte("private-refresh-token")})
+			if !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "private-refresh-token") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+	err := googleTokenError(errors.New("oauth2: token expired and refresh token is not set"))
+	if !strings.Contains(err.Error(), "sova google-login") {
+		t.Fatalf("error = %v", err)
+	}
+	if !errors.Is(googleTokenError(context.Canceled), context.Canceled) {
+		t.Fatal("lost context cancellation")
+	}
+}
+
+func TestSaveTokenReplacesAtomicallyAndPrivately(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token.json")
+	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	want := &oauth2.Token{AccessToken: "test-access", RefreshToken: "test-refresh", Expiry: time.Now().UTC().Add(time.Hour)}
+	if err := saveToken(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadToken(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AccessToken != want.AccessToken || got.RefreshToken != want.RefreshToken || !got.Expiry.Equal(want.Expiry) {
+		t.Fatal("token did not round trip")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("permissions = %v", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("temporary files left: %v (%v)", entries, err)
 	}
 }

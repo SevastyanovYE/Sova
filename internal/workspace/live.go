@@ -1421,6 +1421,9 @@ func handlePendingWorkspaceInputMessage(ctx context.Context, cfg config.Config, 
 			})
 			return true
 		}
+		// Confirmation authorizes one attempt. An error must not leave this
+		// destructive prompt consuming unrelated future Inbox messages.
+		delete(pendingInputs, key)
 		requestedMessageID, _ := strconv.Atoi(pending.Target)
 		err = deleteUsefulDocument(ctx, cfg, store, client, threadID, pending.DocumentID, requestedMessageID, now)
 	default:
@@ -2020,19 +2023,37 @@ func deleteUsefulDocument(ctx context.Context, cfg config.Config, store *sqlites
 		}
 	}
 	messageIDs = uniqueInts(messageIDs)
-	for _, messageID := range messageIDs {
-		if err := client.DeleteMessage(ctx, cfg.Workspace.ChatID, messageID); err != nil && !nest.IsTelegramMessageNotFound(err) {
-			return fmt.Errorf("delete Useful message %d: %w", messageID, err)
-		}
-	}
-	if err := store.ArchiveWorkspaceUsefulPublication(ctx, documentID, cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, messageIDs, now); err != nil {
-		return fmt.Errorf("Telegram message deleted, but local state was not finalized: %w", err)
+	if err := removeUsefulPublicationMessages(ctx, store, documentID, cfg.Workspace.ChatID, cfg.Workspace.Topics.Useful, messageIDs, now, client.DeleteMessage); err != nil {
+		return err
 	}
 	if err := updateUsefulIndex(ctx, cfg, store, client, now); err != nil {
 		return fmt.Errorf("material deleted, but Useful index was not updated: %w", err)
 	}
 	return sendWorkspaceDocumentDone(ctx, client, cfg.Workspace.ChatID, threadID,
 		fmt.Sprintf("Удалено из <b>Полезного</b>: %s (сообщений: <b>%d</b>). Исходники сохранены.", html.EscapeString(doc.Title), len(messageIDs)))
+}
+
+// Archive only after every owned publication part has been removed (or was
+// already absent). A rejected deletion must not hide a still-visible publication.
+func removeUsefulPublicationMessages(ctx context.Context, store *sqlitestore.Store, documentID, chatID int64, topicID int, messageIDs []int, now time.Time, deleteMessage func(context.Context, int64, int) error) error {
+	for index, messageID := range messageIDs {
+		if err := deleteMessage(ctx, chatID, messageID); err != nil && !nest.IsTelegramMessageNotFound(err) {
+			var apiErr *nest.BotAPIError
+			if errors.As(err, &apiErr) && apiErr.Method == "deleteMessage" &&
+				(apiErr.StatusCode == 400 || apiErr.StatusCode == 403) {
+				progress := "Ни одно сообщение этой попыткой не удалено."
+				if index > 0 {
+					progress = fmt.Sprintf("Уже удалены или отсутствуют: %d из %d сообщений. Остальные сообщения сохранены.", index, len(messageIDs))
+				}
+				return fmt.Errorf("Telegram не разрешил удалить сообщение %d. %s Публикация оставлена в индексе Полезного. Удали оставшиеся сообщения публикации вручную в Telegram, затем повтори /useful delete %d и подтверждение, чтобы завершить очистку индекса и поиска. Исходники сохранены", messageID, progress, documentID)
+			}
+			return fmt.Errorf("не удалось подтвердить удаление сообщения %d; публикация оставлена в индексе Полезного (до ошибки удалены или отсутствуют: %d из %d): %w", messageID, index, len(messageIDs), err)
+		}
+	}
+	if err := store.ArchiveWorkspaceUsefulPublication(ctx, documentID, chatID, topicID, messageIDs, now); err != nil {
+		return fmt.Errorf("Telegram message deleted, but local state was not finalized: %w", err)
+	}
+	return nil
 }
 
 func containsInt(values []int, target int) bool {
@@ -3529,8 +3550,8 @@ func renderTemplatesIndex(types []sqlitestore.WorkspaceDocumentType, docs []sqli
 		category := normalizeTemplateTypeName(doc.Category)
 		byType[category] = append(byType[category], doc)
 	}
-	number := 0
 	for _, docTypeRow := range types {
+		number := 0
 		name := normalizeTemplateTypeName(docTypeRow.Name)
 		if name == "" {
 			continue

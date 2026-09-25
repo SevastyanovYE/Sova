@@ -1183,9 +1183,32 @@ func parseGeminiDigestPayload(text string) (geminiDigestPayload, error) {
 	for index := range payload.Notes {
 		payload.Notes[index].SourceID = strings.TrimSpace(payload.Notes[index].SourceID)
 		payload.Notes[index].Lead = strings.Join(strings.Fields(payload.Notes[index].Lead), " ")
-		payload.Notes[index].Details = compactLine(payload.Notes[index].Details, generatedDigestMaxUTF16)
+		payload.Notes[index].Details = digestNoteContinuation(payload.Notes[index].Lead, compactLine(payload.Notes[index].Details, generatedDigestMaxUTF16))
 	}
 	return payload, nil
+}
+
+// Models sometimes return the complete sentence in details despite the schema.
+// Remove only a complete repeated lead at the word boundary, preserving prose.
+func digestNoteContinuation(lead, details string) string {
+	words := strings.Fields(lead)
+	for len(words) >= 2 {
+		rest := details
+		matched := true
+		for _, word := range words {
+			field, tail, _ := strings.Cut(rest, " ")
+			if !strings.EqualFold(field, word) {
+				matched = false
+				break
+			}
+			rest = strings.TrimSpace(tail)
+		}
+		if !matched {
+			break
+		}
+		details = rest
+	}
+	return details
 }
 
 func validateGeneratedDigest(payload geminiDigestPayload, bundle string) error {

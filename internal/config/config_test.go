@@ -161,15 +161,19 @@ func TestWorkspaceAndControlConfigured(t *testing.T) {
 		t.Fatal("Workspace should be configured with all seven topic IDs")
 	}
 	if !cfg.ControlConfigured() {
-		t.Fatal("Control should be configured with all eight topic IDs")
+		t.Fatal("Control should accept the existing topic configuration")
 	}
 	cfg.Workspace.Topics.Collections = 0
 	if cfg.WorkspaceConfigured() {
 		t.Fatal("Workspace should require Collections topic")
 	}
-	cfg.Control.Topics.Ideas = 0
+	cfg.Control.Topics = ControlTopicIDs{Workspace: 6, Nest: 7, TestLab: 5}
+	if !cfg.ControlConfigured() {
+		t.Fatal("Control should accept the compact three-topic configuration")
+	}
+	cfg.Control.Topics.Nest = 0
 	if cfg.ControlConfigured() {
-		t.Fatal("Control should require Ideas topic")
+		t.Fatal("Control should require Nest topic")
 	}
 }
 

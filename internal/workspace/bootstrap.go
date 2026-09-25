@@ -68,15 +68,9 @@ func WorkspaceTopicSpecs() []TopicSpec {
 
 func ControlTopicSpecs() []TopicSpec {
 	return []TopicSpec{
-		{EnvKey: "SOVA_CONTROL_TOPIC_STATUS_ID", Name: "Status"},
-		{EnvKey: "SOVA_CONTROL_TOPIC_ERRORS_ID", Name: "Errors"},
-		{EnvKey: "SOVA_CONTROL_TOPIC_RUNS_ID", Name: "Runs"},
-		{EnvKey: "SOVA_CONTROL_TOPIC_REVIEW_ID", Name: "Review"},
-		{EnvKey: "SOVA_CONTROL_TOPIC_TEST_LAB_ID", Name: "Test Lab"},
 		{EnvKey: "SOVA_CONTROL_TOPIC_WORKSPACE_ID", Name: "Workspace"},
 		{EnvKey: "SOVA_CONTROL_TOPIC_NEST_ID", Name: "Nest"},
-		{EnvKey: "SOVA_CONTROL_TOPIC_IDEAS_ID", Name: "Ideas"},
-		{EnvKey: "SOVA_CONTROL_TOPIC_ARCHIVE_ID", Name: "Archive"},
+		{EnvKey: "SOVA_CONTROL_TOPIC_TEST_LAB_ID", Name: "Test Lab"},
 	}
 }
 
