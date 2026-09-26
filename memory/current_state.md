@@ -1,8 +1,16 @@
 # Current State
 
-- September 2026 fixes are prepared locally, not deployed: digest lead deduplication,
-  per-type template numbering, actionable Useful deletion failures with one-attempt
-  confirmations, atomic Calendar token persistence, and compact three-topic Control.
+- Sova 0.3.1 commit `9b2fe4a4` was deployed to GCP production on
+  2026-09-26. The September fixes cover digest lead deduplication, per-group
+  template numbering, actionable Useful deletion failures with one-attempt
+  confirmations, atomic Calendar token persistence, and compact three-topic
+  Control. The release passed the exact artifact checksum, strict doctors,
+  model smoke, systemd/journal checks, and an independent post-deploy
+  healthcheck plus SQLite `quick_check`. Production reports `active/running`,
+  zero restarts, and no error-level journal entries since deployment. The
+  rollback inputs are
+  `/var/backups/sova/sova-before-0.3.1-20260926T090545Z.sqlite` and
+  `/var/backups/sova/sova-binary-before-0.3.1-20260926T090545Z`.
   Read-only Telegram inspection confirmed `invalid_grant` on Calendar candidate #18
   on September 16; Google Auth Platform still shows External / Testing for the
   Sova Calendar project. Reauthorization and production token installation remain
@@ -26,10 +34,10 @@
 - The daily overview setting survived the move as
   `daily_overview_enabled=false`. `/daily on|off|status` remains available in
   the Nest `Status` topic, while `/run` and the Chat button remain independent.
-- Sova 0.2.0 commit `a921c333` is active through the new single GCP systemd
-  unit. GCP keeps one checksum-verified post-cutover SQLite backup and its
-  checksum sidecar under `/var/backups/sova`; obsolete staging directories and
-  duplicate server-side migration backups were removed.
+- Sova 0.3.1 commit `9b2fe4a4` is active through the single GCP systemd unit.
+  GCP keeps checksum-verified SQLite and previous-binary backups under
+  `/var/backups/sova`; obsolete staging directories and duplicate server-side
+  migration backups were removed.
 - The alwaysdata staging tree and the dedicated temporary migration SSH key were
   removed after GCP acceptance. Its paused Service registration still needs to
   be deleted from the alwaysdata administration panel because the browser
@@ -112,10 +120,14 @@
 - Sova Nest overview sync reads only `SOVA_NEST_TELEGRAM_ALLOWED_CHATS`.
   Workspace/personal Telegram sources stay in `SOVA_WORKSPACE_*` config and are
   not part of the study digest allowlist.
-- Production Nest classification/event extraction uses the ordered Google route
-  `gemini-3.5-flash-lite`, `gemma-4-31b-it`, `gemini-3.1-flash-lite`,
-  `gemma-4-26b-a4b-it` via `SOVA_GEMINI_API_KEY`. Historical Ollama/Qwen
-  commands remain for reproducibility but are not used by the production overview.
+- Production Nest classification/event extraction starts with
+  `gemini-3.5-flash-lite`. The digest route now starts with
+  `gemini-3-flash-preview`; `gemini-3.5-flash` and
+  `gemini-3.1-flash-lite` remain configured as fallbacks. The change was made
+  after `gemini-3.5-flash` repeatedly exceeded the production smoke deadline;
+  both the classification/event and digest smoke stages passed after rotation.
+  Historical Ollama/Qwen commands remain for reproducibility but are not used
+  by the production overview.
 - Telegram auth: dedicated MTProto project session only.
 - Telegram sync verified end-to-end for two Sova Nest study sources: dry-run
   writes nothing, sync stores 200 messages, repeat sync dedupes to zero new
