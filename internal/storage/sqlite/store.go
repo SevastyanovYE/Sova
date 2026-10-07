@@ -596,6 +596,21 @@ CREATE TABLE IF NOT EXISTS workspace_task_reminders (
 );
 CREATE INDEX IF NOT EXISTS idx_workspace_task_reminders_ready
     ON workspace_task_reminders(status, next_attempt_at, scheduled_for, id);
+CREATE TABLE IF NOT EXISTS workspace_task_reminder_messages (
+    task_id INTEGER NOT NULL REFERENCES workspace_tasks(id) ON DELETE CASCADE,
+    chat_id INTEGER NOT NULL,
+    topic_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    rendered_status TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_task_reminder_messages_task
+    ON workspace_task_reminder_messages(task_id, chat_id, topic_id, next_attempt_at);
 CREATE TABLE IF NOT EXISTS workspace_derived_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_chat_id INTEGER NOT NULL,
@@ -869,6 +884,17 @@ CREATE INDEX IF NOT EXISTS idx_workspace_publish_messages_run
 	}
 	if err := s.ensureWorkspaceTaskReminderSendingStatus(ctx); err != nil {
 		return fmt.Errorf("migrate SQLite workspace_task_reminders sending status: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+INSERT INTO workspace_task_reminder_messages(
+    task_id, chat_id, topic_id, message_id, created_at, updated_at
+)
+SELECT task_id, reminder_chat_id, reminder_topic_id, reminder_message_id,
+       COALESCE(sent_at, created_at), updated_at
+FROM workspace_task_reminders
+WHERE reminder_chat_id != 0 AND reminder_topic_id > 0 AND reminder_message_id > 0
+ON CONFLICT(chat_id, message_id) DO NOTHING`); err != nil {
+		return fmt.Errorf("migrate SQLite workspace task reminder message history: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
 UPDATE workspace_tasks

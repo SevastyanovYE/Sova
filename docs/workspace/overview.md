@@ -253,3 +253,20 @@ Deferred tasks are checked immediately at service startup and once per minute.
 When their date arrives, the bot sends a fresh linked reminder in `Задачи`,
 reopens and edits the original card, and updates the deferred backlog. Each
 scheduled date is its own durable delivery generation.
+
+When a task is completed or cancelled, every recorded reminder is struck through
+in full, keeping its task-card link clickable. Cancelled reminders also show
+`Отменено.`. A separate sent-message ledger preserves earlier reminders even
+when the same date is reused. Startup/minute maintenance catches up terminal
+tasks from before deployment and retries failed edits with durable backoff.
+Historical messages whose Telegram IDs were never recorded or were overwritten
+by an older binary cannot be reconstructed from the outbox.
+
+The existing pinned deferred-task index starts with `Самая давняя задача`, a
+link to the first original card still open in the configured Tasks
+topic. Card message order determines age; editing, rescheduling, or sending a
+reminder does not reset it. Deferred cards are excluded until reopened.
+When no open card remains, the link is replaced with `Открытых задач пока нет.`. Creation and status changes refresh the index;
+startup/minute maintenance repairs interrupted refreshes without creating a
+replacement index. Deploy with `workspace seed-document-indexes --type task`
+to update and pin the tracked index in place (never `--reset`).

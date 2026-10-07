@@ -357,7 +357,7 @@ func syncTasksFromSource(ctx context.Context, cfg config.Config, store *sqlitest
 	if edited && len(existing) > len(taskTexts) {
 		return sendTaskConflictNotice(ctx, cfg, client, source, len(existing), len(taskTexts))
 	}
-	return nil
+	return refreshExistingTaskBacklog(ctx, cfg, store, client, now)
 }
 
 func createWorkspaceTaskCard(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client *nest.Client, source sqlitestore.WorkspaceMessage, clusterID int64, text string, now time.Time) error {
@@ -471,6 +471,9 @@ func handleWorkspaceCallback(ctx context.Context, cfg config.Config, store *sqli
 			ReplyMarkup: emptyMarkup(),
 		})
 		_ = updateTaskBacklog(ctx, cfg, store, client, now)
+		if err := closeWorkspaceTaskReminders(ctx, cfg, store, client, taskID, now); err != nil {
+			fmt.Printf("workspace task reminder closure unavailable: %v\n", err)
+		}
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Готово.")
 	case "cancel":
 		if err := store.UpdateWorkspaceTaskStatus(ctx, taskID, "cancelled", nil, now); err != nil {
@@ -486,6 +489,9 @@ func handleWorkspaceCallback(ctx context.Context, cfg config.Config, store *sqli
 			ReplyMarkup: emptyMarkup(),
 		})
 		_ = updateTaskBacklog(ctx, cfg, store, client, now)
+		if err := closeWorkspaceTaskReminders(ctx, cfg, store, client, taskID, now); err != nil {
+			fmt.Printf("workspace task reminder closure unavailable: %v\n", err)
+		}
 		_ = client.AnswerCallbackQuery(ctx, callback.ID, "Отменила.")
 	case "defer":
 		_ = client.EditMessageText(ctx, nest.EditMessageTextRequest{
@@ -587,12 +593,10 @@ func handlePendingTaskDateMessage(ctx context.Context, cfg config.Config, store 
 }
 
 func updateTaskBacklog(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client taskReminderTelegram, now time.Time) error {
-	tasks, err := store.DeferredWorkspaceTasks(ctx, 100)
+	text, err := renderTaskBacklog(ctx, cfg, store, now)
 	if err != nil {
 		return err
 	}
-	location := mustLocation(cfg.Timezone)
-	text := formatTaskBacklog(tasks, location, time.Now().In(location))
 	messageID, ok, err := store.WorkspaceTopicIndexMessage(ctx, cfg.Workspace.ChatID, cfg.Workspace.Topics.Tasks, taskBacklogIndexKey)
 	if err != nil {
 		return err
@@ -3188,12 +3192,10 @@ func SeedWorkspaceDocumentIndexes(ctx context.Context, cfg config.Config, store 
 	client := nest.New(cfg.Workspace.BotToken)
 	result := SeedDocumentIndexesResult{DryRun: opts.DryRun}
 	if selectedType == "all" || selectedType == "task" {
-		tasks, err := store.DeferredWorkspaceTasks(ctx, 100)
+		text, err := renderTaskBacklog(ctx, cfg, store, now)
 		if err != nil {
 			return SeedDocumentIndexesResult{}, err
 		}
-		location := mustLocation(cfg.Timezone)
-		text := formatTaskBacklog(tasks, location, now.In(location))
 		item := SeedDocumentIndexItem{Type: "task", Topic: "Задачи", TopicID: cfg.Workspace.Topics.Tasks, Status: "dry_run", Text: text}
 		if opts.Reset {
 			item.Status = "reset_dry_run"
@@ -4551,7 +4553,12 @@ func sendTaskConflictNotice(ctx context.Context, cfg config.Config, client *nest
 }
 
 func formatTaskBacklog(tasks []sqlitestore.WorkspaceTask, location *time.Location, now time.Time) string {
+	return formatTaskBacklogWithPrefix(tasks, location, now, "")
+}
+
+func formatTaskBacklogWithPrefix(tasks []sqlitestore.WorkspaceTask, location *time.Location, now time.Time, prefix string) string {
 	var b strings.Builder
+	b.WriteString(prefix)
 	b.WriteString("<b>Отложенные задачи</b>\n\n")
 	written := 0
 	deferredCount := 0

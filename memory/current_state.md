@@ -1,5 +1,12 @@
 # Current State
 
+- Sova 0.3.2 is prepared locally on 2026-10-07, not deployed. Workspace now
+  strikes through all recorded reminders for done/cancelled tasks with durable
+  retry/catch-up, and the existing task index links to the oldest active original
+  card (open only; deferred tasks are excluded). A sent-message ledger backfills known historical IDs
+  and preserves future repeated-date generations. Deployment instructions are
+  in `docs/workspace/update_0.3.2.md`; production remains last verified at 0.3.1.
+
 - Sova 0.3.1 commit `9b2fe4a4` was deployed to GCP production on
   2026-09-26. The September fixes cover digest lead deduplication, per-group
   template numbering, actionable Useful deletion failures with one-attempt

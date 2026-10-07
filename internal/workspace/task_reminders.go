@@ -18,6 +18,10 @@ const (
 	workspaceTaskReminderLimit    = 100
 )
 
+// The poller and minute worker share one service. Serialize selection, editing,
+// and acknowledgement so concurrent status snapshots cannot hide a stale edit.
+var workspaceTaskReminderClosureGate = make(chan struct{}, 1)
+
 type taskReminderTelegram interface {
 	SendMessageResult(context.Context, nest.SendMessageRequest) (nest.Message, error)
 	EditMessageText(context.Context, nest.EditMessageTextRequest) error
@@ -38,8 +42,12 @@ func runWorkspaceTaskReminderLoopWithClock(ctx context.Context, cfg config.Confi
 		fmt.Printf("workspace task reminder recovery unavailable: %v\n", err)
 	}
 	process := func() {
-		if err := processWorkspaceTaskReminders(ctx, cfg, store, client, now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
+		current := now().UTC()
+		if err := processWorkspaceTaskReminders(ctx, cfg, store, client, current); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Printf("workspace task reminders unavailable: %v\n", err)
+		}
+		if err := maintainWorkspaceTasks(ctx, cfg, store, client, current); err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Printf("workspace task maintenance unavailable: %v\n", err)
 		}
 	}
 	process() // startup catch-up, including reminders overdue during downtime
@@ -75,6 +83,12 @@ func processWorkspaceTaskReminders(ctx context.Context, cfg config.Config, store
 		}
 	}
 	return nil
+}
+
+func maintainWorkspaceTasks(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client taskReminderTelegram, now time.Time) error {
+	closureErr := closeWorkspaceTaskReminders(ctx, cfg, store, client, 0, now)
+	indexErr := refreshExistingTaskBacklog(ctx, cfg, store, client, now)
+	return errors.Join(closureErr, indexErr)
 }
 
 func processWorkspaceTaskReminder(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client taskReminderTelegram, reminder sqlitestore.WorkspaceTaskReminder, now time.Time) error {
@@ -165,7 +179,65 @@ func formatWorkspaceTaskReminder(task sqlitestore.WorkspaceTask, link string) st
 	if task.Emoji != "" {
 		label += " " + task.Emoji
 	}
-	return "⏰ <b>Пора вернуться к задаче</b>\n\n<a href=\"" + html.EscapeString(link) + "\">" + html.EscapeString(label) + "</a>"
+	const heading = "⏰ <b>Пора вернуться к задаче</b>\n\n"
+	const cancellation = "\n<i>Отменено.</i>"
+	// Reserve the cancellation note even for newly sent reminders so later edits
+	// fit without losing their link or exceeding Telegram's UTF-16 text limit.
+	overhead, _ := telegramHTMLUTF16Len(heading + cancellation)
+	label = truncatePlainUTF16(label, workspaceTelegramSafeTextLimit-overhead)
+	text := heading + "<a href=\"" + html.EscapeString(link) + "\">" + html.EscapeString(label) + "</a>"
+	if task.Status == "done" || task.Status == "cancelled" {
+		text = "<s>" + text + "</s>"
+		if task.Status == "cancelled" {
+			text += cancellation
+		}
+	}
+	return text
+}
+
+// The ledger is populated from old outbox rows during init and records every new
+// successful delivery. Only edits are retried here; reminders are never resent.
+func closeWorkspaceTaskReminders(ctx context.Context, cfg config.Config, store *sqlitestore.Store, client taskReminderTelegram, taskID int64, now time.Time) error {
+	select {
+	case workspaceTaskReminderClosureGate <- struct{}{}:
+		defer func() { <-workspaceTaskReminderClosureGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	messages, err := store.ReadyWorkspaceTaskReminderClosures(ctx, cfg.Workspace.ChatID, cfg.Workspace.Topics.Tasks, taskID, now, workspaceTaskReminderLimit)
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, message := range messages {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if message.Task.Status != "done" && message.Task.Status != "cancelled" {
+			continue // A callback may have changed status while the task was loaded.
+		}
+		err := client.EditMessageText(ctx, nest.EditMessageTextRequest{
+			ChatID:    message.ChatID,
+			MessageID: message.MessageID,
+			Text:      formatWorkspaceTaskReminder(message.Task, taskCardLink(message.Task)),
+			ParseMode: "HTML",
+		})
+		if err != nil && !isTelegramMessageNotModified(err) {
+			next := now.Add(workspaceTaskReminderRetryDelay(message.Attempts + 1))
+			persistCtx, cancel := workspaceTaskReminderPersistenceContext(ctx)
+			persistErr := store.RetryWorkspaceTaskReminderClosure(persistCtx, message.ChatID, message.MessageID, next, err.Error(), now)
+			cancel()
+			failures = append(failures, fmt.Errorf("edit reminder %d: %w", message.MessageID, errors.Join(err, persistErr)))
+			continue
+		}
+		persistCtx, cancel := workspaceTaskReminderPersistenceContext(ctx)
+		persistErr := store.MarkWorkspaceTaskReminderClosed(persistCtx, message.ChatID, message.MessageID, message.Task.Status, now)
+		cancel()
+		if persistErr != nil {
+			failures = append(failures, persistErr)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func workspaceTaskReminderRetryDelay(attempt int) time.Duration {

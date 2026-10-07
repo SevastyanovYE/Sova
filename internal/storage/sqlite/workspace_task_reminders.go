@@ -162,10 +162,15 @@ WHERE id = ? AND status = 'sending'`,
 }
 
 func (s *Store) MarkWorkspaceTaskReminderSent(ctx context.Context, id int64, chatID int64, topicID int, messageID int, now time.Time) error {
-	if chatID == 0 || topicID == 0 || messageID == 0 {
+	if chatID == 0 || topicID <= 0 || messageID <= 0 {
 		return fmt.Errorf("invalid workspace task reminder message identity")
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
 UPDATE workspace_task_reminders
 SET status = 'sent', attempts = attempts + 1, next_attempt_at = NULL,
     last_error = '', reminder_chat_id = ?, reminder_topic_id = ?,
@@ -176,7 +181,19 @@ WHERE id = ? AND status = 'sending'`,
 	if err != nil {
 		return err
 	}
-	return requireOneRow(result, "actionable workspace task reminder %d not found", id)
+	if err := requireOneRow(result, "actionable workspace task reminder %d not found", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO workspace_task_reminder_messages(
+    task_id, chat_id, topic_id, message_id, created_at, updated_at
+)
+SELECT task_id, reminder_chat_id, reminder_topic_id, reminder_message_id, sent_at, updated_at
+FROM workspace_task_reminders WHERE id = ?
+ON CONFLICT(chat_id, message_id) DO NOTHING`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) CancelWorkspaceTaskReminder(ctx context.Context, id int64, reason string, now time.Time) error {

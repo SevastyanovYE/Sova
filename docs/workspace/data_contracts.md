@@ -128,6 +128,12 @@ heading or source link. Defer presets (`На неделю`, `На месяц`) r
 08:00 in the configured project timezone; explicit user-entered dates keep the
 entered time or use the date-only default.
 
+`workspace_task_reminder_messages` preserves each known successful reminder
+delivery independently of schedule reuse, keyed by `(chat_id, message_id)`.
+Its terminal rendering marker and retry metadata survive restart. Initial
+migration imports all nonzero message identities still stored in the reminder
+outbox; successful new deliveries record both identities atomically.
+
 `workspace_task_reminders` is a generation-keyed outbox unique on
 `(task_id, scheduled_for)`. Confirmed failures retry at 1, 5, 15, and 60
 minutes and then hourly. Ambiguous delivery becomes `unknown` and is not sent

@@ -225,6 +225,159 @@ func TestWorkspaceTaskReminderRetrySchedule(t *testing.T) {
 	}
 }
 
+func TestTaskReminderClosuresCoverEveryDeliveryAndKeepLinks(t *testing.T) {
+	for _, status := range []string{"done", "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			store, task, due, now := openReminderWorkspaceTest(t)
+			ctx := context.Background()
+			cfg := testWorkspaceLiveConfig()
+			client := &fakeTaskReminderTelegram{}
+			if err := processWorkspaceTaskReminders(ctx, cfg, store, client, now); err != nil {
+				t.Fatal(err)
+			}
+			// Reusing the exact same date is a new generation; both messages need closure.
+			if err := store.UpdateWorkspaceTaskStatus(ctx, task.ID, "deferred", &due, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := processWorkspaceTaskReminders(ctx, cfg, store, client, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.UpdateWorkspaceTaskStatus(ctx, task.ID, status, nil, now); err != nil {
+				t.Fatal(err)
+			}
+			client.edits = nil
+			sendsBefore := len(client.sends)
+			if err := closeWorkspaceTaskReminders(ctx, cfg, store, client, task.ID, now); err != nil {
+				t.Fatal(err)
+			}
+			if len(client.edits) != 2 {
+				t.Fatalf("closure edits = %d, want both deliveries", len(client.edits))
+			}
+			for _, edit := range client.edits {
+				if !strings.HasPrefix(edit.Text, "<s>⏰ <b>Пора вернуться к задаче</b>") || !strings.Contains(edit.Text, `/10/211"`) || !strings.Contains(edit.Text, "</a></s>") || edit.ParseMode != "HTML" {
+					t.Fatalf("closure = %+v", edit)
+				}
+				if strings.Contains(edit.Text, "Отменено") != (status == "cancelled") {
+					t.Fatalf("wrong cancellation label: %s", edit.Text)
+				}
+			}
+			if err := closeWorkspaceTaskReminders(ctx, cfg, store, client, task.ID, now.Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if len(client.edits) != 2 || len(client.sends) != sendsBefore {
+				t.Fatal("completed edits repeated or reminder resent")
+			}
+		})
+	}
+}
+
+func TestTaskReminderClosureRetrySurvivesRestartAndNotModified(t *testing.T) {
+	store, task, _, now := openReminderWorkspaceTest(t)
+	ctx := context.Background()
+	cfg := testWorkspaceLiveConfig()
+	client := &fakeTaskReminderTelegram{}
+	if err := processWorkspaceTaskReminders(ctx, cfg, store, client, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateWorkspaceTaskStatus(ctx, task.ID, "done", nil, now); err != nil {
+		t.Fatal(err)
+	}
+	client.edits = nil
+	client.editError = errors.New("temporary network failure")
+	if err := closeWorkspaceTaskReminders(ctx, cfg, store, client, task.ID, now); err == nil {
+		t.Fatal("expected edit error")
+	}
+	if err := closeWorkspaceTaskReminders(ctx, cfg, store, client, task.ID, now.Add(30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.edits) != 1 {
+		t.Fatal("retried before backoff elapsed")
+	}
+	// A fresh client/maintenance pass has no process-local retry state.
+	restarted := &fakeTaskReminderTelegram{editError: errors.New("Bad Request: message is not modified")}
+	if err := maintainWorkspaceTasks(ctx, cfg, store, restarted, now.Add(time.Minute)); err != nil && !isTelegramMessageNotModified(err) {
+		t.Fatal(err)
+	}
+	ready, err := store.ReadyWorkspaceTaskReminderClosures(ctx, cfg.Workspace.ChatID, cfg.Workspace.Topics.Tasks, 0, now.Add(time.Hour), 100)
+	if err != nil || len(ready) != 0 {
+		t.Fatalf("closure remained pending: %+v, %v", ready, err)
+	}
+	if len(restarted.sends) != 0 {
+		t.Fatal("maintenance sent a replacement reminder or index")
+	}
+}
+
+func TestTaskReminderTerminalRenderingRespectsTelegramLimit(t *testing.T) {
+	for _, status := range []string{"open", "done", "cancelled"} {
+		text := formatWorkspaceTaskReminder(sqlitestore.WorkspaceTask{
+			Text: strings.Repeat("🙂<&", 1400), Emoji: "✨", Status: status,
+		}, "https://t.me/c/4301779750/10/211")
+		if !telegramHTMLFits(text, workspaceTelegramSafeTextLimit) ||
+			!strings.Contains(text, `href="https://t.me/c/4301779750/10/211"`) {
+			t.Fatalf("invalid %s reminder", status)
+		}
+		if status == "cancelled" && !strings.HasSuffix(text, "</s>\n<i>Отменено.</i>") {
+			t.Fatal("cancellation suffix truncated")
+		}
+	}
+}
+
+type blockingTaskClosureTelegram struct {
+	fakeTaskReminderTelegram
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingTaskClosureTelegram) EditMessageText(ctx context.Context, request nest.EditMessageTextRequest) error {
+	f.once.Do(func() { close(f.entered); <-f.release })
+	return f.fakeTaskReminderTelegram.EditMessageText(ctx, request)
+}
+
+func TestTaskReminderConcurrentClosuresKeepLatestTerminalStatus(t *testing.T) {
+	store, task, _, now := openReminderWorkspaceTest(t)
+	ctx := context.Background()
+	cfg := testWorkspaceLiveConfig()
+	if err := processWorkspaceTaskReminders(ctx, cfg, store, &fakeTaskReminderTelegram{}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateWorkspaceTaskStatus(ctx, task.ID, "done", nil, now); err != nil {
+		t.Fatal(err)
+	}
+	client := &blockingTaskClosureTelegram{entered: make(chan struct{}), release: make(chan struct{})}
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- closeWorkspaceTaskReminders(ctx, cfg, store, client, 0, now) }()
+	<-client.entered
+	if err := store.UpdateWorkspaceTaskStatus(ctx, task.ID, "cancelled", nil, now); err != nil {
+		t.Fatal(err)
+	}
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- closeWorkspaceTaskReminders(ctx, cfg, store, client, task.ID, now) }()
+	select {
+	case err := <-secondResult:
+		close(client.release)
+		<-firstResult
+		t.Fatalf("concurrent closure bypassed gate: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(client.release)
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondResult; err != nil {
+		t.Fatal(err)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.edits) != 2 || !strings.HasSuffix(client.edits[1].Text, "</s>\n<i>Отменено.</i>") {
+		t.Fatalf("latest status lost: %+v", client.edits)
+	}
+	ready, err := store.ReadyWorkspaceTaskReminderClosures(ctx, cfg.Workspace.ChatID, cfg.Workspace.Topics.Tasks, 0, now, 100)
+	if err != nil || len(ready) != 0 {
+		t.Fatalf("closure marker = %+v, %v", ready, err)
+	}
+}
+
 func openReminderWorkspaceTest(t *testing.T) (*sqlitestore.Store, sqlitestore.WorkspaceTask, time.Time, time.Time) {
 	t.Helper()
 	store, err := sqlitestore.Open(filepath.Join(t.TempDir(), "sova.db"))
